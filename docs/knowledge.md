@@ -4,6 +4,84 @@ Reference material for tool decisions and recommendations. Update when new resea
 
 ---
 
+## Stem Assembly — before any processing
+
+**Rule: always assemble a full channel track before gain staging or any other processing.**
+
+Individual recording clips are not the same as a full channel stem. When a musician records in
+multiple takes or sections, the DAW holds many small clips on the timeline. Gain staging on
+individual clips distorts the natural dynamic balance between sections (a softly-played section
+would get boosted to the same level as a loud one). The EBU R128 gating handles silence, but
+clip-level normalization still destroys intra-performance dynamics.
+
+The correct order is:
+```
+1. assemble_channel  ->  full-length WAV per logical track
+2. analyze           ->  read the assembled channel
+3. apply_gain        ->  gain stage the assembled channel
+4. ...further processing
+```
+
+### Identifying clips that belong together
+
+#### If the session was recorded in a DAW with a session file (e.g. Pro Tools .ptx):
+
+Use `ptformat` / `ptftool` (open-source C library, https://github.com/zamaudio/ptformat) to
+parse the session file and extract the exact clip layout.
+
+Build from source (no pip package exists):
+```bash
+git clone https://github.com/zamaudio/ptformat.git /tmp/ptformat
+cd /tmp/ptformat
+CXX=g++ make all INCL="-I."
+# produces: ptftool, ptunxor, ptgenmissing
+```
+
+Run on a .ptx session file:
+```bash
+/tmp/ptformat/ptftool "path/to/session.ptx" 2>&1
+```
+
+Output format:
+```
+`track_name` t(id) (source_wav_file.wav) @ TIMELINE_SAMPLE + OFFSET_IN_FILE, LENGTH
+```
+
+- TIMELINE_SAMPLE: position in the session timeline (samples at session sample rate)
+- OFFSET_IN_FILE: read offset inside the source WAV (samples)
+- LENGTH: how many samples to read from that offset
+
+From this, for each logical track, sort clips by TIMELINE_SAMPLE and reconstruct a
+continuous audio file with silence in the gaps.
+
+**NOTE:** Multiple WAV files with similar names may exist on disk (e.g. `GTR 1 DI.dup2.09_24.wav`
+and `GTR 1 DI.dup2.09_26.wav`). The PTX tells you exactly which file was actually used and where.
+Do NOT assume all files on disk are used — many are discarded takes.
+
+#### Naming convention in Pro Tools exports (observed in Terido session, 2022):
+
+File format: `INSTRUMENT_NAME.XX_YY.wav`
+- `XX` = internal clip/region start index in the session
+- `YY` = internal clip/region end index or take number
+- These are NOT bar or measure numbers
+- Overlapping XX ranges (e.g. `08_10` and `09_11`) = alternative takes of the same section,
+  NOT overlapping timeline content
+
+The `dup1`, `dup2`, `dup3` suffix = double-tracked guitar layers (played twice for stereo width),
+each intended as a separate parallel track in the mix, NOT alternative takes of the same track.
+Exception: if two files share the same dupN prefix AND the same XX value (e.g. `dup2.09_24` and
+`dup2.09_26`), they ARE alternative takes — check the PTX to see which one is on the timeline.
+
+#### If no session file is available:
+
+Options ranked by reliability:
+1. Ask the engineer which takes were used (most reliable)
+2. Sort files by the first number in the `XX_YY` suffix, exclude clear duplicates by comparing
+   spectrograms (same pattern = likely same take, different = different section)
+3. Use amplitude-based heuristic: prefer the clip with higher peak/RMS as the "intended" take
+
+---
+
 ## Gain Staging
 
 ### LUFS targets by use case

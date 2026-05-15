@@ -46,9 +46,15 @@ output/
 ## Workflow
 
 ```
+[if raw clips from DAW]
+parse_session (ptftool) -> assemble_channel -> analyze -> propose -> apply -> verify
+
+[if already-assembled stems]
 analyze -> read spectrogram.txt + analysis.json -> propose processing -> apply -> verify
 ```
 
+- **Always assemble first.** Gain staging on individual clips destroys intra-performance dynamics.
+  See docs/knowledge.md — "Stem Assembly" section for the full rationale and ptftool usage.
 - Never apply processing without reading the analysis first.
 - Always read `spectrogram.txt` from output — it is the primary way to understand what is in a stem.
 - After applying any processing, re-analyze the output file to verify the result.
