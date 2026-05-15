@@ -82,6 +82,82 @@ Options ranked by reliability:
 
 ---
 
+## DAW Session File Formats
+
+When assembling channels from raw clips, a session file tells us exactly which clips go where
+on the timeline. Format support varies by DAW:
+
+| DAW | Extension | Format | How to parse |
+|---|---|---|---|
+| Pro Tools | `.ptx` / `.pts` / `.ptf` | binary, proprietary | `ptformat` / `ptftool` (C, build from source) |
+| Ableton Live | `.als` | gzip-compressed XML | `gzip` + `xml.etree.ElementTree` (stdlib only) |
+| Reaper | `.rpp` | plain text, XML-like | read directly, regex or custom parser |
+| Logic Pro | `.logicx` | folder (package) containing XML | unzip, parse inner XML |
+| Studio One | `.song` | zip + XML | `zipfile` + `xml.etree` |
+| Bitwig Studio | `.bwproject` | zip + JSON | `zipfile` + `json` |
+| Cubase | `.cpr` | binary, proprietary | no reliable open parser |
+| FL Studio | `.flp` | binary | `pyflp` Python library (`pip install pyflp`) |
+
+### Ableton .als parsing (simplest case)
+
+```python
+import gzip, xml.etree.ElementTree as ET
+
+with gzip.open("session.als", "rb") as f:
+    tree = ET.parse(f)
+root = tree.getroot()
+# clips live under AudioTrack > DeviceChain > MainSequencer > ClipTimeable > ArrangerAutomation > Events
+```
+
+Key XML paths in .als:
+- Tracks: `//AudioTrack`
+- Track name: `AudioTrack/Name/EffectiveName/@Value`
+- Clips: `AudioTrack/DeviceChain/MainSequencer/ClipTimeable/ArrangerAutomation/Events/AudioClip`
+- Clip timeline position: `AudioClip/@Time` (in beats)
+- Source file: `AudioClip/SampleRef/FileRef/Path/@Value`
+- Clip start/end in file: `AudioClip/@StartRelative`, `AudioClip/@LoopEnd`
+
+**NOTE:** Ableton stores clip positions in **beats**, not samples. Convert using session BPM and
+sample rate: `sample_position = (beat_position / bpm * 60) * sample_rate`
+
+### Reaper .rpp parsing
+
+Reaper files are human-readable. Key tokens:
+- `TRACK` block = one track
+- `NAME "track name"` = track name
+- `ITEM` block = one clip
+- `POSITION x` = timeline position in seconds
+- `LENGTH x` = clip length in seconds
+- `SOFFS x` = source offset in seconds
+- `FILE "path/to/file.wav"` = source file
+
+### parse_session.py tool (planned)
+
+A unified tool that auto-detects the session format and outputs a canonical JSON:
+```json
+{
+  "session_file": "...",
+  "sample_rate": 48000,
+  "tracks": [
+    {
+      "name": "BASS DI CLEAN",
+      "clips": [
+        {
+          "source_file": "BASS DI CLEAN.08_10.wav",
+          "timeline_start_sample": 123456,
+          "source_offset_sample": 0,
+          "length_samples": 317405
+        }
+      ]
+    }
+  ]
+}
+```
+
+This canonical format is the input for `assemble_channel.py`.
+
+---
+
 ## Gain Staging
 
 ### LUFS targets by use case
