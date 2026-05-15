@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# audio working files
+*.wav
+*.flac
+*.mp3
+*.aiff
+*.ogg
+output/
+processed/
+spectrograms/
+
+# analysis output
+*.json
+*.png
