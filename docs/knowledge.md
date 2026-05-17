@@ -621,6 +621,27 @@ average target spectrum. `master_health.py --reference ref1.wav ref2.wav
 ref3.wav` averages all references' 1/3-octave PSDs and reports region-level
 deltas against your master. 3-5 references is the typical deck size.
 
+### Reference deck is a tonal GUIDE, not a hard delivery gate
+
+When `master_health` returns a red on the reference-deck section, do **not**
+treat it the same as a red on format conformance. The two are different
+classes of check:
+
+| Check | Class | What red means | What to do |
+|---|---|---|---|
+| Format conformance (LUFS, true peak, codec ISP) | **Hard gate** | The delivery target is missed; the master will trigger platform normalisation / clip | Re-master, do not ship |
+| Phase coherence per band (sub mono, top wide) | **Hard gate** | The master collapses on mono speakers / has out-of-phase highs | Fix the M/S processing, re-master |
+| Punch index | **Hard gate** | The master is over-limited and will sound fatiguing | Soften the chain, re-master |
+| Compression history (already mastered?) | Yellow advisory | The input was already a master — extra master may flatten | Inform; if intentional double pass, proceed |
+| **Reference deck spectral delta** | **Tonal guide** | The master is spectrally different from the chosen reference(s) — could be the master is off, OR the reference is just different (different vocal mix, different genre tilt, different era) | Use as direction-finding; ship if hard gates are green |
+
+If the four hard gates (LUFS, true peak, phase, punch) are green, the master
+is technically deliverable even with a red reference-deck verdict. Treat
+the reference deck like a second opinion: if the deltas surprise you,
+investigate; if they're explained by known content differences (e.g. you
+mixed instrumental, the reference is vocal-driven; or you mastered for
+modern rock loudness, the reference is a 90s mix), document it and ship.
+
 ---
 
 ## Master Bus Chain Order

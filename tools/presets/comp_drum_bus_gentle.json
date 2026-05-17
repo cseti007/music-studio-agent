@@ -1,0 +1,12 @@
+{
+  "name": "comp_drum_bus_gentle",
+  "description": "Drum bus glue — gentle (preserves LRA for downstream clipper / parallel sat)",
+  "notes": "Same SSL G-Bus shape as comp_drum_bus but ratio 2:1 instead of 4:1, threshold -8 instead of -10, makeup 0 not auto. Target: < 1 dB of gain reduction on most material. Use when downstream mastering / make-it-hit tools need >4 LU LRA to function. The aggressive comp_drum_bus often crushes LRA below 4, blocking master clipper and parallel saturation relevance checks.",
+  "settings": {
+    "threshold_db": -8,
+    "ratio": 2,
+    "attack_ms": 15,
+    "release_ms": 150,
+    "makeup_db": 0
+  }
+}

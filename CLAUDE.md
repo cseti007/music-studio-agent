@@ -127,7 +127,7 @@ output/
   "drums": {
     "volume_db": 0.0,          // bus fader
     "pan": 0.0,                // -1.0 (L) to 1.0 (R), applied after volume
-    "comp_preset": "comp_drum_bus",  // optional bus compressor preset
+    "comp_preset": "comp_drum_bus",  // optional bus compressor preset. Use comp_drum_bus_gentle if the render mix_health LRA falls below 4 LU (the default 4:1 preset crushes dynamics, which then blocks the master clipper and drum bus parallel-sat relevance checks downstream).
     "saturation": {"drive": 0.3},   // optional tape saturation (symmetric tanh)
     "parent_bus": null         // routes into this parent bus
   },
@@ -311,7 +311,7 @@ anything else; "optional" means run it if there's a specific question to answer.
 | `mix_health` returned yellow or red verdicts | **Required loop** | Address each non-green item, re-render, re-run `mix_health.py` | Same — until green or "1 yellow max" |
 | `mix_health` passed (green or 1-yellow) — moving from mix to master | **Required transition** | `master_mix mix.wav --output-dir output/<session>/masters --format <preset>` (or `--all-formats`) | Mastering pass per delivery target |
 | `master_mix` finished (per format) | **Required** | `master_health.py master_<fmt>.wav --format <fmt>` | format conformance + phase + punch + compression history per delivery |
-| `master_health` returned yellow or red | **Required loop** | Tweak `--master-preset` or chain params, re-run `master_mix`, re-run `master_health` | Same — until green or "1 yellow max" |
+| `master_health` returned yellow or red | **Required loop, but read which section** | Tweak `--master-preset` or chain params, re-run `master_mix`, re-run `master_health`. **Hard gates** (LUFS, true peak, phase, punch) red = must fix. **Reference deck red** alone = tonal advisory only; ship if the hard gates are green (see knowledge.md "Reference deck is a tonal GUIDE"). | Same — until green on hard gates |
 | Between processing stages (eq → comp → fx), want to see if masking improved | Optional | `detect_masking.py output/<session> --stage <stage>` | Compare critical/high counts to the earlier run |
 | After rendering, want to compare against reference for master EQ tweaks | Optional | `compare_reference.py reference mixes/mix.wav --output-dir output/<session>/analysis [--apply ...]` | Spectral delta in the rendered mix — feeds master EQ |
 | Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
@@ -484,6 +484,29 @@ phase shift, transient smearing, and artifacts.
 session adds at most ONE of: clipper, multiband, or parallel-sat per bus.
 Stacking all three creates fatigue, not punch.
 
+**LRA-driven drum bus preset choice.** If after `render_mix --render` the
+mix LRA sits below 4 LU and the render log shows the clipper and
+parallel-sat guards firing ("SKIPPED — LRA X LU < 4"), the upstream drum
+bus compressor is the load-bearing cause. Switch the drums bus from
+`comp_drum_bus` (4:1, -10 dB) to **`comp_drum_bus_gentle`** (2:1, -8 dB,
+15 ms attack, 150 ms release), re-render, re-check. The gentle preset
+preserves enough LRA headroom for the downstream make-it-hit tools to
+function. Do this before reaching for the master clipper / parallel sat
+manually; you want the relevance check to PASS, not be force-overridden.
+
+**Master preset choice on a refmatched mix.** If you ran
+`compare_reference.py --apply` on the mix.wav, the resulting
+`mix.wav` already carries up to six inverse-delta peak EQ filters (the
+spectral correction toward the reference). Running a tonally-active
+master preset (`modern_rock`, `modern_rock_mb`, `pop` — all of which
+add highshelf EQ + side highshelf + exciter) on top of an already-
+refmatched mix **compounds the tonal moves**, pushing the top another
++2-4 dB above the reference. Use **`--master-preset transparent`** on
+refmatched mixes — let the LUFS normalisation + ISP-aware limiter do
+their job without re-shaping the tonal balance the refmatch step
+already settled. Picked for v3: refmatched mix → `transparent` master
+preset → all four streaming format-conformance verdicts green.
+
 ## Ground rules
 
 - One stem at a time until the user confirms the result is correct.
@@ -492,5 +515,5 @@ Stacking all three creates fatigue, not punch.
 - Keep `docs/knowledge.md` updated when new domain knowledge is found.
 - **Every `render_mix --render` MUST be followed by `mix_health.py`.** No exceptions. If `mix_health` returns any RED verdict, fix it and re-render; if it returns more than 1 YELLOW, address them. Only declare the mix "done" when `mix_health` shows all green (or at most 1 yellow with a reasoned justification).
 - **The mix phase MUST gate the master phase.** Don't start `master_mix` until `mix_health` is green or 1-yellow. Mastering a broken mix wastes work and hides problems under a louder ceiling.
-- **Every `master_mix` output (per format) MUST be followed by `master_health.py`** with the same `--format` flag, to verify the delivery target was actually hit. RED on conformance (LUFS or true peak miss) means re-master, not "ship anyway".
+- **Every `master_mix` output (per format) MUST be followed by `master_health.py`** with the same `--format` flag, to verify the delivery target was actually hit. RED on a **hard gate** (LUFS / true peak / phase / punch) means re-master, not "ship anyway". RED on the **reference-deck section alone** is a tonal advisory, not a hard gate — investigate, document, and ship if the hard gates are green. See knowledge.md "Reference deck is a tonal GUIDE, not a hard delivery gate" for the full table.
 - Follow the **"Analysis tool decision tree — when to run what"** section above as obligations, not suggestions. Skipping a required analysis trigger means you are guessing — and guessing wrong is more expensive than running a 30-second analysis.
