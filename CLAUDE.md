@@ -160,12 +160,30 @@ Master processing order: sum buses → glue comp → EQ → LUFS norm → true p
 ## Workflow
 
 ```
-[full pipeline from DAW session]
-parse_session -> apply_gain --per-clip -> analyze -> align_phase (drums) -> apply_eq -> apply_compression -> render_mix
+[full pipeline from DAW session — analysis triggers in <brackets>]
+parse_session
+  -> apply_gain --per-clip
+     <analyze each new assembled.wav>                                       [Required]
+     <compare_reference if user gave a reference, once>                     [Required if ref]
+     <detect_masking --stage raw to set EQ priorities>                      [Required]
+  -> align_phase (drums)
+     <analyze each new assembled_aligned.wav>                               [Required]
+  -> apply_eq
+     <analyze each *_eq.wav — confirm spectral move>                        [Required]
+  -> apply_compression
+     <analyze each *_eq_comp.wav — confirm crest + pumping flag>            [Required]
+     <detect_masking --stage comp — compare to baseline>                    [Optional]
+  -> (make-it-hit, only if data justifies it: subharm / haas / exciter
+      / multiband / clipper / parallel_sat / M/S — see decision rules)
+     <analyze after each — verify metric + pumping>                         [Required]
+  -> render_mix
+     <mix_health.py output/<session> [--reference ref.wav]>                 [Required]
+     <if not green: address issues, re-render, re-run mix_health>           [Required loop]
 
 [render_mix steps]
 1. render_mix output/<session> --generate-config  -> edit mix_config.json
 2. render_mix mix_config.json --render            -> mix.wav
+3. mix_health.py output/<session>                 -> scorecard (REQUIRED)
 ```
 
 **Gain staging logic:**
@@ -216,6 +234,33 @@ Read all of these fields from analysis.json and comment on each that is outside 
 **Rule:** if all metrics are within range and the spectrogram looks normal for the instrument type,
 say so explicitly ("analysis looks clean — no action needed before next processing step").
 Do not invent problems. Do not recommend processing without a specific reason from the data.
+
+## Analysis tool decision tree — when to run what
+
+This is the source of truth for when each analysis tool MUST run vs. when it's
+optional. Do not wait for the user to ask — these are obligations triggered by
+events in the workflow. "Required" means you stop and run it before doing
+anything else; "optional" means run it if there's a specific question to answer.
+
+| Trigger event | Required / Optional | Run this | What to read |
+|---|---|---|---|
+| A new `assembled.wav` (or `assembled_aligned.wav`) just landed | **Required** | `analyze.py` on that file | LUFS, hum, transient_profile, frequency_bands, frequency_bands_crest_db, stereo, pumping |
+| User provided a reference mix at session start | **Required**, once | `compare_reference.py reference target_or_raw_mix` | LUFS delta (target), spectral balance deltas (EQ goals), LRA delta (compression target) |
+| Session opened, before any EQ work | **Required** | `detect_masking.py output/<session> --stage comp` (or `--stage raw` if no comp yet) | CRITICAL + HIGH pairs → primary EQ cut targets |
+| Output from `apply_eq` / `apply_compression` / `apply_gate` / `apply_amp` / `apply_saturation` / `apply_transient` / `apply_reverb` / `apply_delay` just landed | **Required** | `analyze.py` on that output | Did the targeted metric move the right way? `pumping_detected` flipped? |
+| Output from a make-it-hit tool just landed (`apply_subharm`, `apply_haas`, `apply_exciter`, `apply_multiband_comp`, or a render with `master.clipper` / `master.ms` / `buses.*.parallel_saturation`) | **Required, double check** | `analyze.py` on the output **AND** verify the tool's own `relevance_check` result | (a) targeted metric moved in the intended direction, (b) `pumping.pumping_detected` is still false, (c) `relevance_check.recommend_skip` was honoured |
+| `render_mix --render` finished (mix.wav written) | **Required** | `mix_health.py output/<session> [--reference ref.wav if user gave one]` | Green/yellow/red verdict across LUFS, true peak, LRA, M/S width, mono compat, tonal balance, masking, stem pumping |
+| `mix_health` returned yellow or red verdicts | **Required loop** | Address each non-green item, re-render, re-run `mix_health.py` | Same — until green or "1 yellow max" |
+| Between processing stages (eq → comp → fx), want to see if masking improved | Optional | `detect_masking.py output/<session> --stage <stage>` | Compare critical/high counts to the earlier run |
+| After rendering, want to compare against reference for master EQ tweaks | Optional | `compare_reference.py reference mixes/mix.wav --output-dir output/<session>/analysis [--apply ...]` | Spectral delta in the rendered mix — feeds master EQ |
+| Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
+
+**Operational rules that follow from the table:**
+
+1. **Never skip a "Required" trigger.** If the trigger fires and you didn't run the analysis, you are guessing — that is the failure mode this table exists to prevent.
+2. **Always read the JSON, not just the .txt summary.** The .txt is for the user to skim; the JSON is what your decisions must reference.
+3. **Quote specific fields when proposing a next step.** "I see `loudness.crest_factor_db: 4.1` and `pumping.pumping_detected: true` — the comp went too hard, reverting and retrying with a 2:1 ratio" beats "the comp seems too much".
+4. **Re-run analysis even if you "know" what changed.** The point of the re-analyze loop is to catch the cases where you were wrong about what changed.
 
 ## Progress reporting during long operations
 
@@ -380,3 +425,5 @@ Stacking all three creates fatigue, not punch.
 - State what you observe from the analysis before proposing any action.
 - If a result looks wrong (clipping, unexpected LUFS), stop and diagnose before continuing.
 - Keep `docs/knowledge.md` updated when new domain knowledge is found.
+- **Every `render_mix --render` MUST be followed by `mix_health.py`.** No exceptions. If `mix_health` returns any RED verdict, fix it and re-render; if it returns more than 1 YELLOW, address them. Only declare the mix "done" when `mix_health` shows all green (or at most 1 yellow with a reasoned justification).
+- Follow the **"Analysis tool decision tree — when to run what"** section above as obligations, not suggestions. Skipping a required analysis trigger means you are guessing — and guessing wrong is more expensive than running a 30-second analysis.
