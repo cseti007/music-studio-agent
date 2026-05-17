@@ -332,14 +332,19 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
       1. Compute a short-window RMS envelope (10 ms hop).
       2. High-pass the envelope above 0.5 Hz to remove the overall level.
       3. Look at envelope spectral peak in 1-5 Hz vs. the 5-15 Hz reference.
-      4. Pumping is detected if the 1-5 Hz peak exceeds the reference by
-         >= 6 dB and the absolute modulation depth exceeds ~5%.
+      4. Modulation depth (p95/p5) is computed on **active** frames only —
+         silent gaps between hits or songs sections push p5 to ~0 and falsely
+         hide pumping; gating to active frames keeps the depth measurement
+         meaningful on intermittent material (kick mics, gtr w/ pauses, etc.).
+      5. Pumping is detected if the 1-5 Hz peak exceeds the 5-15 Hz reference
+         by >= 6 dB AND the modulation depth on active frames exceeds ~5 dB.
     """
     hop_ms = 10.0
     hop = max(1, int(sr * hop_ms / 1000.0))
     n_frames = len(signal) // hop
     if n_frames < 200:
         return {"pumping_detected": False, "pump_rate_hz": None, "modulation_depth_db": None,
+                "lf_excess_db": None, "active_frame_ratio": None,
                 "note": "signal too short for pumping analysis"}
 
     env = np.array([
@@ -348,12 +353,13 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
     ])
     env_sr = sr / hop  # ~100 Hz
 
-    # Remove DC and very slow drift (< 0.5 Hz)
+    # Remove DC and very slow drift (< 0.5 Hz). Rate detection uses this.
     from scipy.signal import butter as _butter_local
     sos_hp = _butter_local(2, 0.5 / (env_sr / 2.0), btype="high", output="sos")
     env_hp = sosfilt(sos_hp, env)
 
-    # Spectrum of the envelope
+    # Spectrum of the envelope (full timeline — pumping rate detection wants
+    # the entire periodic signature, including the silent dips).
     nperseg = min(len(env_hp), 1024)
     freqs, psd = welch(env_hp, fs=env_sr, nperseg=nperseg)
 
@@ -368,13 +374,22 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
     ref_peak_db = _band_peak_db(5.0, 15.0)
     excess_db = pump_peak_db - ref_peak_db
 
-    # Modulation depth: peak-to-trough swing in envelope (dB), as a sanity gate
-    p95 = float(np.percentile(env, 95))
-    p5 = float(np.percentile(env, 5))
-    if p5 < 1e-9 or p95 < 1e-9:
+    # Modulation depth: peak-to-trough swing on ACTIVE frames only.
+    # An "active" frame is one whose RMS is above -40 dBFS — i.e. the player
+    # is actually playing. This is the gate that fixes the silent-gap bug:
+    # without it, p5 dives to ~0 on intermittent material and depth_db = 0.
+    active_threshold_lin = 10.0 ** (-40.0 / 20.0)
+    active_mask = env > active_threshold_lin
+    n_active = int(np.sum(active_mask))
+    active_ratio = n_active / max(n_frames, 1)
+
+    if n_active < 50:
         depth_db = 0.0
     else:
-        depth_db = 20.0 * np.log10(p95 / p5)
+        active_env = env[active_mask]
+        p95 = float(np.percentile(active_env, 95))
+        p5 = float(np.percentile(active_env, 5))
+        depth_db = 20.0 * np.log10(p95 / max(p5, 1e-12)) if p5 > 1e-9 else 0.0
 
     pumping = bool(excess_db >= 6.0 and depth_db >= 5.0)
 
@@ -387,6 +402,7 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
         "pump_rate_hz": round(pump_rate, 2) if pump_rate is not None else None,
         "modulation_depth_db": round(depth_db, 1),
         "lf_excess_db": round(excess_db, 1),
+        "active_frame_ratio": round(active_ratio, 3),
     }
 
 

@@ -79,6 +79,12 @@ PRESETS: dict[str, dict] = {
 
 _MIN_SUB_RMS_DB = -35.0
 _MIN_SUB_CREST_DB = 8.0
+# If the target band (where harmonics will land) is already this much louder
+# than the fundamental band, the new harmonics are mathematically too small
+# vs. the existing content to lift the band audibly. Threshold derived from
+# the typical preset (drive=1.8, mix=0.15): for >0.5 dB band lift you need
+# the target to sit within ~3 dB of the fundamental.
+_MAX_TARGET_OVER_FUNDAMENTAL_DB = 3.0
 
 
 def _band_filter(signal: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarray:
@@ -87,12 +93,25 @@ def _band_filter(signal: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarra
     return sosfilt(sos, signal)
 
 
-def _relevance_check(signal: np.ndarray, sr: int) -> dict:
-    sub = _band_filter(signal, sr, 30.0, 80.0)
+def _band_rms_db(signal: np.ndarray, sr: int, lo: float, hi: float) -> float:
+    band = _band_filter(signal, sr, lo, hi)
+    rms = float(np.sqrt(np.mean(band ** 2)))
+    return 20.0 * np.log10(max(rms, 1e-10))
+
+
+def _relevance_check(
+    signal: np.ndarray, sr: int,
+    fundamental_lo: float = 30.0, fundamental_hi: float = 80.0,
+    target_lo: float = 80.0, target_hi: float = 200.0,
+) -> dict:
+    sub = _band_filter(signal, sr, fundamental_lo, fundamental_hi)
     rms = float(np.sqrt(np.mean(sub ** 2)))
     peak = float(np.max(np.abs(sub)))
     rms_db = 20.0 * np.log10(max(rms, 1e-10))
     crest_db = 20.0 * np.log10(peak / max(rms, 1e-10)) if rms > 1e-10 else 0.0
+
+    target_rms_db = _band_rms_db(signal, sr, target_lo, target_hi)
+    target_over_fundamental_db = target_rms_db - rms_db
 
     issues = []
     if rms_db < _MIN_SUB_RMS_DB:
@@ -105,11 +124,20 @@ def _relevance_check(signal: np.ndarray, sr: int) -> dict:
             f"sub band crest {crest_db:.1f} dB < {_MIN_SUB_CREST_DB} — "
             f"sub is already squashed; harmonics will just add mud"
         )
+    if target_over_fundamental_db > _MAX_TARGET_OVER_FUNDAMENTAL_DB:
+        issues.append(
+            f"target band ({target_lo:.0f}-{target_hi:.0f} Hz) is "
+            f"{target_over_fundamental_db:.1f} dB louder than fundamental "
+            f"({fundamental_lo:.0f}-{fundamental_hi:.0f} Hz) — "
+            f"new harmonics will be drowned by existing content"
+        )
 
     return {
         "tool": "subharm",
         "sub_band_rms_dbfs": round(rms_db, 1),
         "sub_band_crest_db": round(crest_db, 1),
+        "target_band_rms_dbfs": round(target_rms_db, 1),
+        "target_over_fundamental_db": round(target_over_fundamental_db, 1),
         "recommend_skip": bool(issues),
         "issues": issues,
     }
@@ -134,7 +162,11 @@ def apply_subharm(
     data, sr = sf.read(str(input_path), always_2d=True)
     mono = data.mean(axis=1)
 
-    rel = _relevance_check(mono, sr)
+    rel = _relevance_check(
+        mono, sr,
+        fundamental_lo=fundamental_hz_low, fundamental_hi=fundamental_hz_high,
+        target_lo=harmonic_hz_low, target_hi=harmonic_hz_high,
+    )
     if rel["recommend_skip"] and not force:
         print(
             f"WARNING: sub-synth relevance_check failed for {input_path.name}:",

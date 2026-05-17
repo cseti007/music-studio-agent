@@ -112,12 +112,18 @@ def _stereo_metrics(data: np.ndarray, sr: int) -> dict:
 
 
 def _detect_pumping_quick(signal: np.ndarray, sr: int) -> dict:
-    """Compact version of analyze._detect_pumping for the stems."""
+    """Compact version of analyze._detect_pumping for the stems.
+
+    Depth (p95/p5) measured on ACTIVE frames only (RMS > -40 dBFS) — without
+    that gate, silent gaps between musical sections collapse p5 to ~0 and
+    hide real pumping on intermittent material.
+    """
     hop = max(1, int(sr * 0.01))
     n_frames = len(signal) // hop
     if n_frames < 200:
         return {"pumping_detected": False, "pump_rate_hz": None,
-                "modulation_depth_db": None, "lf_excess_db": None}
+                "modulation_depth_db": None, "lf_excess_db": None,
+                "active_frame_ratio": None}
 
     env = np.array([
         np.sqrt(np.mean(signal[i * hop:(i + 1) * hop] ** 2) + 1e-20)
@@ -141,9 +147,19 @@ def _detect_pumping_quick(signal: np.ndarray, sr: int) -> dict:
     ref_db = _band_peak_db(5.0, 15.0)
     excess = pump_db - ref_db
 
-    p95 = float(np.percentile(env, 95))
-    p5 = float(np.percentile(env, 5))
-    depth_db = 20.0 * np.log10(p95 / max(p5, 1e-12)) if p5 > 1e-9 else 0.0
+    active_threshold_lin = 10.0 ** (-40.0 / 20.0)
+    active_mask = env > active_threshold_lin
+    n_active = int(np.sum(active_mask))
+    active_ratio = n_active / max(n_frames, 1)
+
+    if n_active < 50:
+        depth_db = 0.0
+    else:
+        active_env = env[active_mask]
+        p95 = float(np.percentile(active_env, 95))
+        p5 = float(np.percentile(active_env, 5))
+        depth_db = 20.0 * np.log10(p95 / max(p5, 1e-12)) if p5 > 1e-9 else 0.0
+
     pumping = bool(excess >= 6.0 and depth_db >= 5.0)
 
     mask = (freqs >= 1.0) & (freqs < 5.0)
@@ -154,6 +170,7 @@ def _detect_pumping_quick(signal: np.ndarray, sr: int) -> dict:
         "pump_rate_hz": round(rate, 2) if rate is not None else None,
         "modulation_depth_db": round(depth_db, 1),
         "lf_excess_db": round(excess, 1),
+        "active_frame_ratio": round(active_ratio, 3),
     }
 
 
