@@ -12,6 +12,38 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Iteration findings: gentle drum-bus preset, master-preset choice, ref-deck severity (cf3f1ea)
+
+Three operational rules surfaced while pushing the terido_v3 session
+from raw to delivery-ready. Captured so the agent doesn't have to
+re-derive them next session.
+
+- **New preset `comp_drum_bus_gentle`** (2:1, -8 dB, 15 ms attack,
+  150 ms release): a gentler SSL-glue alternative to the default
+  `comp_drum_bus` (4:1, -10 dB). The default preset compresses hard
+  enough to drop the mix LRA below 4 LU, which then blocks the master
+  clipper and drum-bus parallel-sat relevance checks downstream. The
+  gentle preset preserves enough LRA headroom for the downstream
+  make-it-hit tools to function. New CLAUDE.md rule: "LRA-driven drum
+  bus preset choice".
+- **New rule: use `--master-preset transparent` on a refmatched mix.**
+  Running tonally-active master presets (`modern_rock`,
+  `modern_rock_mb`, `pop` — each adds highshelf EQ + side highshelf +
+  exciter) on top of a mix that already carries `compare_reference
+  --apply` inverse-delta EQ compounds the tonal moves and pushes the
+  top another +2-4 dB above the reference. The `transparent` preset
+  is the right choice — does LUFS norm and ISP limit only, no
+  spectral re-shaping. Verified on terido_v3: refmatched mix +
+  transparent → all four streaming format-conformance verdicts green.
+- **Clarified: reference-deck verdict is a tonal GUIDE, not a hard
+  delivery gate.** The hard gates are LUFS, true peak, phase, punch —
+  red there must block delivery. The reference-deck spectral delta is
+  a second opinion; red there can mean the master is off OR the
+  reference is just different (vocal mix, era, genre tilt). New
+  full classification table in knowledge.md "Reference deck is a
+  tonal GUIDE, not a hard delivery gate"; cross-referenced from
+  CLAUDE.md decision-tree row and ground rule.
+
 ### Master chain feature completeness — multiband + M/S + width + vinyl elliptical + batch health
 
 Field-test review on the freshly-shipped master_mix flagged five real gaps

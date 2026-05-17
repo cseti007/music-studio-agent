@@ -14,6 +14,15 @@ These items used to live here and have been shipped:
   delivery)~~ — done (commit batch after f2eea7a). Pipeline is now
   end-to-end mix → master with format presets for Spotify, Apple,
   YouTube, Tidal, CD, vinyl pre-master, and broadcast.
+- ~~Master chain feature completeness (multiband / M/S / stereo width /
+  vinyl elliptical / batch master_health)~~ — done (commit f9f5884).
+  Added six chain preset (`modern_rock_mb`), per-format sub-mono filter
+  for vinyl, cross-format batch scorecard.
+- ~~Vinyl-specific master with elliptical EQ in the low end~~ — done
+  inside the master chain feature batch. The `vinyl_pre` format
+  triggers a 4th-order sub-mono filter (side channel HP at 150 Hz)
+  automatically; sample-side energy below 150 Hz is removed so the
+  cutter head can track the groove.
 
 ---
 
@@ -56,7 +65,7 @@ to use automation vs. compression for level shaping.
 - **Hip-hop** — kick_808, snare_clap, hi-hat_trap, vocal_rap
 - **Orchestral** — strings_section, brass_section, woodwinds, timpani
 
-**Why.** The current 46 presets are rock-band-focused (kick_in, snare_top,
+**Why.** The current 47 presets are rock-band-focused (kick_in, snare_top,
 guitar_clean, bass_di, etc.). CLAUDE.md mentions "rock band, orchestral"
 but there is zero orchestral content. An agent given an orchestral session
 today will reach for `guitar_clean` presets that don't fit.
@@ -76,7 +85,7 @@ preset pack plus maybe one or two FX presets (e.g. trap hi-hat decay).
 suite on every push and PR.
 
 **Why.** Defends the repo against regressions when changes touch `tools/`.
-The smoke tests (17 tests, < 1s) already exist; this just runs them
+The smoke tests (39 tests, ~1.2s) already exist; this just runs them
 automatically.
 
 **Scope.** ~30 lines of YAML. Install Python 3.11, install requirements,
@@ -150,9 +159,9 @@ crossfading.
   ISWC into the WAV / FLAC headers. Required for distributors (DistroKid,
   Tunecore, CD Baby).
 - **DDP image export** for CD plant delivery (track marks, PQ codes, EAN).
-- **Vinyl-specific master**: dedicated cutter pre-master with elliptical
-  EQ in the low end (sum mono below 200 Hz to prevent groove jumps),
-  RIAA pre-emphasis option, side-A / side-B time limits.
+- **Vinyl pre-master extensions**: the basic sub-mono filter at 150 Hz
+  is already shipping on the `vinyl_pre` format. Remaining: RIAA
+  pre-emphasis option, side-A / side-B time limits.
 - **Stem mastering**: instead of one master, output vocal-up, vocal-down,
   instrumental, TV mix variants from the same chain.
 

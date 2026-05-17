@@ -94,9 +94,13 @@ mix_health           -- green/yellow/red scorecard. REQUIRED before mastering.
 
 master_mix           -- stereo mix → mastered.wav per delivery format.
                         7 format presets (spotify -14, apple -16, youtube,
-                        tidal, cd 16-bit, vinyl_pre, broadcast -23) and 5
-                        chain presets (gentle, modern_rock, pop, hip_hop,
-                        transparent). --all-formats batch mode.
+                        tidal, cd 16-bit, vinyl_pre, broadcast -23) and 6
+                        chain presets (gentle, modern_rock, modern_rock_mb,
+                        pop, hip_hop, transparent). --all-formats batch.
+                        modern_rock_mb adds 3-band multiband + M/S; pop
+                        adds bright EQ + width 1.1; transparent does
+                        only LUFS norm + ISP limit (use on refmatched
+                        mixes to avoid tonal compounding).
 master_health        -- master scorecard: format conformance (LUFS, true
                         peak, 8x codec-ISP estimate), per-band phase
                         coherence (sub mono check, top wide), M/S width

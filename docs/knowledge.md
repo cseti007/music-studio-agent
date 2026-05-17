@@ -497,10 +497,12 @@ This project treats mix and master as **two separate phases**:
 | Mix | stems + mix_config.json | mix.wav | `render_mix.py` |
 | Master | mix.wav | master_<format>.wav | `master_mix.py` |
 
-The `render_mix.py` master chain (glue comp + EQ + LUFS norm + true peak
-limit) is **the mix engineer's polish**, not the master pass. It runs
-inside the render to give the mix a coherent shape. The actual mastering
-pass is `master_mix.py`, run separately on the bounced stereo file.
+The `render_mix.py` master chain (glue comp + guarded clipper + guarded
+M/S + EQ + LUFS norm + ISP-aware limiter) is **the mix engineer's
+polish**, not the master pass. It runs inside the render to give the mix
+a coherent shape. The actual mastering pass is `master_mix.py`, run
+separately on the bounced stereo file with format-specific delivery
+targets.
 
 ### Why two phases
 
@@ -646,13 +648,22 @@ modern rock loudness, the reference is a 90s mix), document it and ship.
 
 ## Master Bus Chain Order
 
-Processing order matters:
+Processing order matters. This is the current `render_mix.py` master chain
+(each step optional, guarded ones skip if their relevance_check fails):
+
 1. **Bus saturation** (per bus, before summing to master)
-2. **Master sum** (all top-level buses)
-3. **Master glue compressor** (2:1, slow-ish attack, catches sustained program material)
-4. **Master EQ** (zero-phase — no phase coloration; HP@30Hz + gentle high shelf)
-5. **LUFS normalization** (target -14 LUFS for streaming)
-6. **True peak limiter** (-2 dBTP)
+2. **Bus parallel saturation** (guarded, drum bus only — relevance_check: crest > 10 dB AND LRA > 4 LU)
+3. **Master sum** (all top-level buses)
+4. **Master glue compressor** (2:1, slow-ish attack, catches sustained program material)
+5. **Master clipper** (guarded, soft cubic or hard — relevance_check: sample peak ≥ -10 dBFS AND LRA ≥ 4 LU)
+6. **M/S processing** (guarded — independent mid/side EQ + gain — relevance_check: width ≥ 0.05)
+7. **Master EQ** (zero-phase — HP@30Hz + gentle high shelf typical)
+8. **LUFS normalization** (target -14 LUFS for streaming)
+9. **ISP-aware true peak limiter** (-2 dBTP — pedalboard.Limiter + second-pass 4x-oversampled ISP scale-down)
+
+For the **master_mix.py** pass on a finished stereo mix, the chain is
+slightly different (more aggressive, format-aware) — see "Mastering
+Workflow and Philosophy" above.
 
 ### Master glue compressor settings (pedalboard Compressor notes)
 

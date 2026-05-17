@@ -35,7 +35,7 @@ python3 tools/<script>.py
 |---|---|---|
 | `tools/parse_session.py` | Parse DAW session file (.ptx, .als) into canonical session.json | `<session_file> --output-dir output/<session> --audio-dir <audio_dir>` |
 | `tools/apply_gain.py --per-clip` | Clip gain: normalize each clip to consistent LUFS, then assemble full stem | `--per-clip session.json --track "NAME" --output-dir output/<session>/tracks` |
-| `tools/apply_gain.py --per-channel` | Stem gain: apply single gain to assembled stem to reach LUFS target | `--per-channel assembled.wav --preset stem\|spotify\|apple\|amazon\|broadcast` |
+| `tools/apply_gain.py --per-channel` | Stem gain: apply single gain to assembled stem to reach LUFS target | `--per-channel assembled.wav --preset stem\|premix\|spotify\|apple\|amazon\|broadcast` |
 | `tools/analyze.py` | Analyze a stem: LUFS, LRA, crest factor, transient density, spectral centroid, stereo balance/correlation/M-S width, 1/3-octave freq response, hum detection, 10-band text spectrogram + RMS waveform + PNG | `<file> --output-dir output/<session>/tracks/<track>` |
 | `tools/align_phase.py` | Phase-align a target stem to a reference via cross-correlation | `--reference ref.wav --target tgt.wav --output-dir output/<session>/tracks` |
 | `tools/apply_eq.py` | Apply EQ filter chain: notch, HP, LP, bandpass, peak, lowshelf, highshelf. Instrument presets. Auto-notch from hum detection. | `<file> --output-dir DIR [--preset NAME] [--filter JSON]... [--from-analysis analysis.json]` |
@@ -47,7 +47,7 @@ python3 tools/<script>.py
 | `tools/apply_saturation.py` | Harmonic saturation: tape (symmetric tanh, even+odd), tube (asymmetric tanh, even harmonics → warmth), clipper (cubic soft clip, odd harmonics → presence). RMS-normalized output. Parallel mode via --mix. Presets: sat_tape_subtle, sat_tape_drums, sat_tube_bass, sat_tube_guitar, sat_clipper_parallel. | `<file> --output-dir DIR [--preset NAME] [--mode tape\|tube\|clipper] [--drive 0-1] [--asymmetry 0-1] [--mix 0-1]` |
 | `tools/apply_delay.py` | Delay/echo: normal (slapback, single echo, multi-tap with feedback) and pingpong (alternating L/R, mono→stereo). BPM-synced via --bpm + --division. HP/LP on wet signal. Send mode (--send) for bus return routing. Presets: delay_slapback_snare, delay_slapback_guitar, delay_pingpong_send, delay_pre_delay. | `<file> --output-dir DIR [--preset NAME] [--mode normal\|pingpong] [--delay-ms MS] [--feedback 0-0.95] [--mix 0-1] [--bpm BPM] [--division eighth\|dotted-eighth\|...] [--hp HZ] [--lp HZ] [--send]` |
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
-| `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 dBFS before comparison. Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
+| `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 LUFS before comparison; PSD is computed only on active frames (RMS > -45 dBFS) and pairs are time-gated (Jaccard co-activity < 0.15 suppressed). Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
 | `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. | `output/<session> --generate-config` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
 | `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
 | `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 6 chain presets (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_mb\|...] [--target-lufs N] [--tp-ceiling N]` |
@@ -108,14 +108,23 @@ output/
     │   ├── stem_drums.wav
     │   ├── stem_bass.wav
     │   └── stem_guitar.wav
-    └── mixes/
-        ├── mix.wav                   <- render_mix --render output (LUFS normalized + true peak limited)
-        ├── mix_report.json           <- render stats (LUFS, peak, active tracks, stage)
-        └── stages/                   <- render_mix --stage renders for A/B comparison
-            ├── mix_stage_raw.wav     <- stems unprocessed, bus+master chain applied
-            ├── mix_stage_eq.wav
-            ├── mix_stage_comp.wav
-            └── mix_stage_fx.wav
+    ├── mixes/
+    │   ├── mix.wav                   <- render_mix --render output (LUFS normalized + true peak limited)
+    │   ├── mix_report.json           <- render stats: LUFS, true_peak_dbtp, sample_peak_dbfs, clipper/ms/parallel-sat status, ISP correction
+    │   └── stages/                   <- render_mix --stage renders for A/B comparison
+    │       ├── mix_stage_raw.wav     <- stems unprocessed, bus+master chain applied
+    │       ├── mix_stage_eq.wav
+    │       ├── mix_stage_comp.wav
+    │       └── mix_stage_fx.wav
+    └── masters/                      <- master_mix.py output (one WAV per delivery format)
+        ├── master_spotify.wav        <- -14 LUFS, -1 dBTP, 24-bit
+        ├── master_apple.wav          <- -16 LUFS
+        ├── master_youtube.wav        <- -14 LUFS
+        ├── master_tidal.wav          <- -14 LUFS
+        ├── master_cd.wav             <- -9 LUFS, 16-bit dithered
+        ├── master_vinyl_pre.wav      <- -12 LUFS, sub-mono below 150 Hz, no limiter
+        ├── master_<format>_report.json   <- per-format chain log
+        └── master_health_<format>.{json,txt}  <- master_health scorecard per format
 ```
 
 **Session-level analysis always goes to `output/<session>/analysis/`** — never to the session root or mixes/ folder.
@@ -156,8 +165,8 @@ output/
 }
 ```
 
-Bus processing order: volume → pan → comp_preset → saturation → reverb_send
-Master processing order: sum buses → glue comp → EQ → LUFS norm → true peak limiter
+Bus processing order: volume → pan → comp_preset → saturation → parallel_saturation (guarded) → reverb_send
+Master processing order: sum buses → glue comp → clipper (guarded) → M/S (guarded) → EQ → LUFS norm → ISP-aware true-peak limiter
 
 ## Workflow
 
@@ -441,7 +450,7 @@ over-process — keep the band's raw energy".
 
 | Tool | Required evidence (from analyze.py or render output) |
 |---|---|
-| Master clipper | Mix LUFS > -12 after glue comp; LRA > 4 LU; sample peak > -10 dBFS |
+| Master clipper | Sample peak ≥ -10 dBFS AND LRA ≥ 4 LU (the two conditions the code's relevance_check actually enforces). Below either, the clipper has no headroom to recover or just adds fatigue to an already-flat mix. |
 | Sub-bass synth (`apply_subharm`) | `frequency_bands.sub_60hz_rms_db` >= -35; `frequency_bands_crest_db.sub_60hz_crest_db` >= 8; stem is bass or kick |
 | Drum bus parallel sat | Drum bus crest factor > 10 dB; LRA > 4 LU; user explicitly asked for "punchier drums" or a "fatter kit" |
 | Spectral exciter | `spectral_centroid_hz` < 4000; `frequency_bands.air_8khz_plus_rms_db` < -40 |
