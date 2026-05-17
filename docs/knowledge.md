@@ -530,16 +530,39 @@ target; CD and vinyl are their own paths.
 
 ### Mastering chain presets
 
-`master_mix.py` ships five chain templates (the *what to do* part, distinct
+`master_mix.py` ships six chain templates (the *what to do* part, distinct
 from the format target *how loud* part):
 
 | Preset | Chain | Use when |
 |---|---|---|
 | `gentle` | comp only (1.5:1, gentle) | Acoustic, jazz, classical-leaning rock. Preserves dynamics. |
-| `modern_rock` | EQ + comp + exciter + soft clip | Competitive loudness with audible LUFS lift. The default. |
-| `pop` | EQ (bright) + comp (faster) + exciter + soft clip | Bright top, present mids. |
-| `hip_hop` | EQ (sub boost) + comp + exciter + hard clip | Sub weight, impact. |
+| `modern_rock` | EQ + glue comp + exciter + M/S side highshelf + soft clip | Competitive rock loudness with audible LUFS lift and a wider top. |
+| `modern_rock_mb` | EQ + 3-band multiband + exciter + M/S side highshelf + stereo width 1.05 + soft clip | Modern rock with tighter band-by-band dynamics. Replaces glue comp with multiband — better controlled low end. |
+| `pop` | EQ (bright) + comp + exciter + M/S side highshelf + width 1.1 + soft clip | Bright top, present mids, slightly wider image. |
+| `hip_hop` | EQ (sub boost) + comp + exciter + width 0.95 (slightly narrower) + hard clip | Sub weight, impact, mono-leaning width to keep the 808 centred. |
 | `transparent` | LUFS norm + limit only | When the mix doesn't need master tone. |
+
+### Optional chain steps and when to use them
+
+The chain presets above wire up these steps for you, but you can override
+any of them via a custom preset JSON:
+
+- **Multiband compressor** (`multiband` field): replaces or supplements the
+  glue comp. Use when the bass needs tighter control than the mids/highs
+  can tolerate. The `modern_rock_mb` preset is the typical example.
+- **M/S processing** (`ms` field): independent EQ and gain for the mid
+  (mono-summed) and side (stereo-difference) channels. Standard mastering
+  tricks: +1-2 dB highshelf on the side for "shine", small mid gain cut
+  to push the kick/bass to the sides ratio. Avoid side boost > +2 dB
+  unless the mix is narrow to begin with.
+- **Stereo width** (`stereo_width` field, scalar): scales the side signal.
+  1.0 = no change. 1.05-1.15 = subtle widening. 0.95 = slightly narrower
+  (good for sub-heavy genres). 0.0 = mono. Width > 1.3 risks
+  mono-compatibility.
+- **Vinyl elliptical EQ**: sub-mono filter below ~150 Hz. Automatic on
+  the `vinyl_pre` format (cuts side energy below 150 Hz so the vinyl
+  cutter head doesn't leave the groove on wide bass). Not configurable
+  per chain preset — driven by the format's `vinyl_elliptical_hz` field.
 
 ### Codec-ISP vs. true peak
 

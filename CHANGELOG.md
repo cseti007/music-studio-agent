@@ -12,6 +12,58 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Master chain feature completeness — multiband + M/S + width + vinyl elliptical + batch health
+
+Field-test review on the freshly-shipped master_mix flagged five real gaps
+between the v1 master toolset and a production-grade mastering kit. All
+five closed in this batch.
+
+**New chain steps (in `master_mix.py`)** — every chain preset can now wire
+these in via a single config field; the existing presets were updated to
+use them where appropriate:
+
+- **Multiband compressor** (`multiband` field) — 3-band Linkwitz-Riley LR4
+  split + per-band pedalboard.Compressor on the master. Reuses the band
+  helpers from `apply_multiband_comp.py`. New chain preset
+  `modern_rock_mb` puts a tight low / breathing mid+high preset on the
+  master instead of glue comp.
+- **M/S processing** (`ms` field) — independent mid/side EQ and gain on
+  the master, identical pattern to the render_mix master.ms block but
+  callable from the chain preset. `modern_rock`, `modern_rock_mb`, and
+  `pop` presets now ship a +1 dB side highshelf at 7-8 kHz for the
+  classic "wider top" mastering trick.
+- **Stereo width control** (`stereo_width` field) — scalar that scales
+  the side channel after M/S. 1.0 = no change, > 1 = wider, < 1 =
+  narrower. `pop` ships 1.1, `modern_rock_mb` ships 1.05, `hip_hop`
+  ships 0.95 (keeps the 808 centred).
+- **Vinyl elliptical EQ** — sub-mono filter below 150 Hz on the side
+  channel. Triggers automatically for the `vinyl_pre` format (via the
+  new `vinyl_elliptical_hz` field on the format preset). Stops the
+  cutter head from leaving the groove on wide bass — classic vinyl
+  mastering requirement.
+
+**New batch mode (in `master_health.py`)**:
+
+- **`--all-formats`** scans the output dir for `master_<format>.wav`
+  files and produces a per-format scorecard plus a cross-format summary
+  table. Pairs naturally with `master_mix --all-formats`.
+- Vinyl / no-limiter formats are now handled correctly — a true peak
+  above the ceiling no longer flags red on `vinyl_pre`; it's expected
+  (the cutter does its own limiting). The conformance report carries
+  a `true_peak_note` explaining when downstream gear handles the limit.
+
+**Tests**: 6 new pytest cases in `test_master.py` cover stereo-width
+identity / mono / widening, vinyl elliptical sub-mono attenuation, M/S
+side-gain effect on width, multiband shape preservation, and the
+batch-mode summary. Total suite: 39 tests, all green.
+
+**Field test on terido_v2**: re-mastered with the `modern_rock_mb` preset
+across all formats. Spotify / Apple / YouTube / Tidal all landed at
+target LUFS with delta 0.00; vinyl_pre output correctly applied the
+sub-mono elliptical filter and the verdict came back green despite a
++1.72 dBTP true peak (correctly classified as no-limiter-format
+expected behaviour).
+
 ### Mastering pipeline (master_mix + master_health) — separate phase
 
 The project now covers the full mix→master→delivery flow as two distinct

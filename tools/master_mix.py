@@ -42,9 +42,13 @@ from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt
 # Reuse pieces already in the project
 sys.path.insert(0, str(Path(__file__).parent))
 from apply_eq import _build_sos  # noqa: E402
+from apply_multiband_comp import _compress_band, _lr4_split  # noqa: E402
 from render_mix import (  # noqa: E402
     _hard_clip,
     _measure_true_peak_dbfs,
+    _ms_apply_eq,
+    _ms_decode,
+    _ms_encode,
     _soft_clip,
 )
 
@@ -90,13 +94,14 @@ FORMAT_PRESETS: dict[str, dict] = {
         "dither": True,
     },
     "vinyl_pre": {
-        "description": "Vinyl pre-master — gentle, no clipper/limiter, preserves dynamics for cutting",
+        "description": "Vinyl pre-master — sub-mono below 150 Hz, no clipper/limiter, preserves dynamics for cutting",
         "target_lufs": -12.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 24,
         "dither": False,
         "skip_clipper": True,
         "skip_limiter": True,
+        "vinyl_elliptical_hz": 150.0,
     },
     "broadcast": {
         "description": "Broadcast EBU R128 target",
@@ -112,46 +117,86 @@ FORMAT_PRESETS: dict[str, dict] = {
 # Mastering chain presets — EQ / comp / exciter / clipper settings
 # ---------------------------------------------------------------------------
 
+# All chain presets have the same fields. Setting a field to None / [] /
+# default value skips that step. Fields:
+#   eq           list of EQ filter dicts (zero-phase)
+#   multiband    {low_high_hz, mid_high_hz, low, mid, high}  | None
+#   comp         {threshold_db, ratio, attack_ms, release_ms, makeup_db} | None
+#   exciter      {hp_hz, drive, mix}                          | None
+#   ms           {mid_gain_db, side_gain_db, mid_eq, side_eq} | None
+#   stereo_width float — 1.0 = no change, >1 wider, <1 narrower (no key = 1.0)
+#   clipper      {threshold_db, knee_db, mode}               | None
+
 MASTERING_PRESETS: dict[str, dict] = {
     "gentle": {
         "description": "Conservative master — preserves dynamics, no clipping. Good for jazz, acoustic, classical-leaning rock.",
         "eq": [],
+        "multiband": None,
         "comp": {"threshold_db": -12, "ratio": 1.5, "attack_ms": 30, "release_ms": 300, "makeup_db": 0.5},
         "exciter": None,
+        "ms": None,
+        "stereo_width": 1.0,
         "clipper": None,
     },
     "modern_rock": {
-        "description": "Competitive rock master — moderate clipper, gentle exciter, audible LUFS lift.",
+        "description": "Competitive rock master — moderate clipper, gentle exciter, audible LUFS lift, side highshelf for air.",
         "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],
+        "multiband": None,
         "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
         "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.10},
+        "ms": {"side_eq": [{"type": "highshelf", "hz": 8000, "db": 1.0, "slope": 1.0}], "mid_eq": [], "side_gain_db": 0.0, "mid_gain_db": 0.0},
+        "stereo_width": 1.0,
+        "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
+    },
+    "modern_rock_mb": {
+        "description": "Modern rock with 3-band multiband — tight low, breathing mid/high. More controlled low end.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],
+        "multiband": {
+            "low_high_hz": 200.0, "mid_high_hz": 3000.0,
+            "low":  {"threshold_db": -14, "ratio": 3.0, "attack_ms": 10, "release_ms": 200},
+            "mid":  {"threshold_db": -16, "ratio": 2.0, "attack_ms": 25, "release_ms": 250},
+            "high": {"threshold_db": -20, "ratio": 1.5, "attack_ms": 30, "release_ms": 350},
+        },
+        "comp": None,  # multiband replaces glue comp
+        "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.10},
+        "ms": {"side_eq": [{"type": "highshelf", "hz": 8000, "db": 1.0, "slope": 1.0}], "mid_eq": [], "side_gain_db": 0.0, "mid_gain_db": 0.0},
+        "stereo_width": 1.05,
         "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
     },
     "pop": {
-        "description": "Pop master — bright EQ, present mids, soft clip for loudness.",
+        "description": "Pop master — bright EQ, present mids, soft clip, slight width boost.",
         "eq": [
             {"type": "highshelf", "hz": 10000, "db": 1.5, "slope": 1.0},
             {"type": "peak", "hz": 3500, "q": 1.0, "db": 1.0},
         ],
+        "multiband": None,
         "comp": {"threshold_db": -9, "ratio": 2.5, "attack_ms": 15, "release_ms": 200, "makeup_db": 0.0},
         "exciter": {"hp_hz": 6000.0, "drive": 0.5, "mix": 0.12},
+        "ms": {"side_eq": [{"type": "highshelf", "hz": 7000, "db": 1.5, "slope": 1.0}], "mid_eq": [], "side_gain_db": 0.5, "mid_gain_db": 0.0},
+        "stereo_width": 1.1,
         "clipper": {"threshold_db": -1.5, "knee_db": 1.0, "mode": "soft"},
     },
     "hip_hop": {
-        "description": "Hip-hop master — sub weight, hard clip for impact, modest loudness.",
+        "description": "Hip-hop master — sub weight, hard clip for impact, narrow mono-leaning width to keep sub centred.",
         "eq": [
             {"type": "lowshelf", "hz": 80, "db": 1.0, "slope": 1.0},
             {"type": "highshelf", "hz": 12000, "db": 0.5, "slope": 1.0},
         ],
+        "multiband": None,
         "comp": {"threshold_db": -8, "ratio": 2.0, "attack_ms": 25, "release_ms": 200, "makeup_db": 0.0},
         "exciter": {"hp_hz": 100.0, "drive": 0.6, "mix": 0.15},
+        "ms": None,
+        "stereo_width": 0.95,
         "clipper": {"threshold_db": -1.5, "knee_db": 1.0, "mode": "hard"},
     },
     "transparent": {
         "description": "No EQ, no exciter, only LUFS norm + true peak limit. For mixes that don't need master tone.",
         "eq": [],
+        "multiband": None,
         "comp": None,
         "exciter": None,
+        "ms": None,
+        "stereo_width": 1.0,
         "clipper": None,
     },
 }
@@ -208,6 +253,79 @@ def _harmonic_exciter(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
         harmonics = sosfilt(sos, saturated)
         out[ch] = stereo[ch] + harmonics * mix
     return out
+
+
+def _master_multiband(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
+    """3-band Linkwitz-Riley split + per-band compressor on each channel.
+
+    Reuses the LR4 split and band-compressor helpers from
+    apply_multiband_comp so the math is the same as the standalone tool.
+    """
+    lo_hz = float(params["low_high_hz"])
+    hi_hz = float(params["mid_high_hz"])
+    out = np.empty_like(stereo)
+    for ch in range(stereo.shape[0]):
+        low, mid, high = _lr4_split(stereo[ch], sr, lo_hz, hi_hz)
+        out[ch] = (
+            _compress_band(low, sr, params["low"])
+            + _compress_band(mid, sr, params["mid"])
+            + _compress_band(high, sr, params["high"])
+        )
+    return out
+
+
+def _master_ms(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
+    """Mid/Side independent EQ + gain on the master.
+
+    Reuses _ms_encode / _ms_decode / _ms_apply_eq from render_mix. Encoding
+    is energy-preserving (sum * 0.5, diff * 0.5).
+    """
+    mid, side = _ms_encode(stereo)
+    mid_gain = float(params.get("mid_gain_db", 0.0))
+    side_gain = float(params.get("side_gain_db", 0.0))
+    if mid_gain != 0.0:
+        mid = mid * 10.0 ** (mid_gain / 20.0)
+    if side_gain != 0.0:
+        side = side * 10.0 ** (side_gain / 20.0)
+    mid = _ms_apply_eq(mid, sr, params.get("mid_eq", []))
+    side = _ms_apply_eq(side, sr, params.get("side_eq", []))
+    return _ms_decode(mid, side)
+
+
+def _stereo_width_scale(stereo: np.ndarray, factor: float) -> np.ndarray:
+    """Adjust stereo width by scaling the side signal.
+
+    factor = 1.0 means no change. factor < 1 narrows toward mono;
+    factor = 0 is fully mono; factor > 1 widens (mono-compat risk grows
+    with the factor).
+    """
+    if factor == 1.0:
+        return stereo
+    mid = (stereo[0] + stereo[1]) * 0.5
+    side = (stereo[0] - stereo[1]) * 0.5
+    side = side * factor
+    L = mid + side
+    R = mid - side
+    return np.vstack([L, R])
+
+
+def _vinyl_elliptical_eq(stereo: np.ndarray, sr: int, mono_below_hz: float = 150.0) -> np.ndarray:
+    """Vinyl-cutter pre-master sub-mono filter.
+
+    Below `mono_below_hz` the side channel is removed (sum-to-mono in the low
+    end). This stops the cutter head from leaving the groove on a wide low
+    end — classic vinyl mastering requirement.
+
+    Implementation: M/S encode, low-pass the SIDE channel at `mono_below_hz`
+    using a complementary high-shelf — anything below the cutoff is zeroed
+    on the side, anything above passes through.
+    """
+    mid, side = _ms_encode(stereo)
+    nyq = sr / 2.0
+    # 4th-order high-pass on the side channel: removes <150 Hz from side
+    sos_hp = butter(4, mono_below_hz / nyq, btype="high", output="sos")
+    side = sosfilt(sos_hp, side)
+    return _ms_decode(mid, side)
 
 
 def _dither_to_16bit(stereo: np.ndarray) -> np.ndarray:
@@ -275,7 +393,19 @@ def master_mix(
         master = _master_eq(master, sr, mp["eq"])
         chain_applied.append(f"eq({len(mp['eq'])} filters)")
 
-    # 2. Glue comp
+    # 2. Multiband compressor (optional — replaces or precedes glue comp).
+    #    Sits before glue comp so per-band dynamics are controlled first.
+    if mp.get("multiband"):
+        mb = mp["multiband"]
+        lufs_pre = float(meter.integrated_loudness(master.T))
+        master = _master_multiband(master, sr, mb)
+        lufs_post = float(meter.integrated_loudness(master.T))
+        chain_applied.append(
+            f"multiband(LR4 {mb['low_high_hz']}/{mb['mid_high_hz']} Hz, "
+            f"GR={lufs_post - lufs_pre:+.2f} LU)"
+        )
+
+    # 3. Glue comp
     if mp["comp"]:
         lufs_pre = float(meter.integrated_loudness(master.T))
         master = _master_comp(master, sr, mp["comp"])
@@ -284,12 +414,37 @@ def master_mix(
             f"comp(thr={mp['comp']['threshold_db']}, ratio={mp['comp']['ratio']}, GR={lufs_post - lufs_pre:+.2f} LU)"
         )
 
-    # 3. Exciter
+    # 4. Exciter
     if mp["exciter"]:
         master = _harmonic_exciter(master, sr, mp["exciter"])
         chain_applied.append(f"exciter(hp={mp['exciter']['hp_hz']}, mix={mp['exciter']['mix']})")
 
-    # 4. Clipper
+    # 5. M/S processing (mid/side independent EQ + gain).
+    #    Sits after glue/exciter so the stereo shape is the last spectral
+    #    decision before width / clipper / limit.
+    if mp.get("ms"):
+        master = _master_ms(master, sr, mp["ms"])
+        mid_g = mp["ms"].get("mid_gain_db", 0.0)
+        side_g = mp["ms"].get("side_gain_db", 0.0)
+        mid_eq_n = len(mp["ms"].get("mid_eq", []))
+        side_eq_n = len(mp["ms"].get("side_eq", []))
+        chain_applied.append(
+            f"ms(mid {mid_g:+.1f} dB, side {side_g:+.1f} dB, mid_eq={mid_eq_n}, side_eq={side_eq_n})"
+        )
+
+    # 6. Stereo width control (scales the side channel after M/S processing).
+    width = float(mp.get("stereo_width", 1.0))
+    if width != 1.0:
+        master = _stereo_width_scale(master, width)
+        chain_applied.append(f"stereo_width({width:.2f})")
+
+    # 7. Vinyl elliptical EQ — sub-mono filter for cutter compatibility.
+    #    Only fires for the vinyl_pre format (which signals it explicitly).
+    if fmt.get("vinyl_elliptical_hz"):
+        master = _vinyl_elliptical_eq(master, sr, mono_below_hz=fmt["vinyl_elliptical_hz"])
+        chain_applied.append(f"vinyl_elliptical(side muted below {fmt['vinyl_elliptical_hz']} Hz)")
+
+    # 8. Clipper
     if mp["clipper"] and not skip_clipper:
         cp = mp["clipper"]
         if cp["mode"] == "hard":

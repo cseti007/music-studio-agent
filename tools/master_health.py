@@ -342,9 +342,21 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
     tp_ceiling = format_preset["tp_ceiling_dbtp"]
     lufs_err = abs(lufs - target_lufs)
     lufs_v = _verdict(green=lufs_err <= 0.5, yellow=lufs_err <= 1.5)
-    tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 1.0)
-    tp_codec_v = _verdict(green=tp_codec <= tp_ceiling + 0.5,
-                          yellow=tp_codec <= tp_ceiling + 1.5)
+
+    # Vinyl / no-limiter formats deliberately skip the limiter (cutter does
+    # its own limiting). A TP > ceiling is expected on the WAV — yellow at
+    # worst, never red, with a note that this is by design.
+    skip_limiter = format_preset.get("skip_limiter", False)
+    if skip_limiter:
+        tp_v = YELLOW if tp > tp_ceiling + 3.0 else GREEN
+        tp_codec_v = YELLOW if tp_codec > tp_ceiling + 3.0 else GREEN
+        tp_note = "no-limiter format (vinyl/etc) — TP ceiling enforced downstream by the cutter / mastering plant"
+    else:
+        tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 1.0)
+        tp_codec_v = _verdict(green=tp_codec <= tp_ceiling + 0.5,
+                              yellow=tp_codec <= tp_ceiling + 1.5)
+        tp_note = None
+
     overall = lufs_v
     for v in (tp_v, tp_codec_v):
         if v == RED:
@@ -355,12 +367,14 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
     return {
         "format_target_lufs": target_lufs,
         "format_tp_ceiling_dbtp": tp_ceiling,
+        "format_skip_limiter": skip_limiter,
         "integrated_lufs": round(lufs, 2),
         "lufs_delta": round(lufs - target_lufs, 2),
         "lufs_verdict": lufs_v,
         "lra_lu": round(lra, 2),
         "true_peak_dbtp": round(tp, 2),
         "true_peak_verdict": tp_v,
+        "true_peak_note": tp_note,
         "codec_isp_estimate_dbtp": round(tp_codec, 2),
         "codec_isp_verdict": tp_codec_v,
         "sample_peak_dbfs": round(sample_peak, 2),
@@ -449,6 +463,8 @@ def _render_text(report: dict) -> str:
                      f"(delta {C['lufs_delta']:+.2f})")
         lines.append(f"  {C['true_peak_verdict']} True peak          : {C['true_peak_dbtp']:+.2f} dBTP")
         lines.append(f"  {C['codec_isp_verdict']} Codec-ISP estimate : {C['codec_isp_estimate_dbtp']:+.2f} dBTP  (8x oversampled)")
+        if C.get("true_peak_note"):
+            lines.append(f"      note: {C['true_peak_note']}")
         lines.append(f"      LRA                : {C['lra_lu']:.2f} LU")
 
     P = report["phase"]
@@ -575,24 +591,74 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Master-level health scorecard. Run after master_mix.py.",
     )
-    parser.add_argument("master", type=Path, help="Mastered stereo WAV")
+    parser.add_argument("master", type=Path, nargs="?",
+                        help="Mastered stereo WAV (omit when using --all-formats)")
     parser.add_argument("--output-dir", type=Path, required=True,
                         help="Where to write master_health_<format>.{json,txt}")
     parser.add_argument("--format", choices=list(FORMAT_PRESETS), default=None,
                         help="Format target for conformance check (spotify/apple/...)")
+    parser.add_argument("--all-formats", action="store_true",
+                        help="Batch mode: scan --output-dir for master_<format>.wav files "
+                             "and run a per-format health check on each. Useful after "
+                             "master_mix --all-formats.")
     parser.add_argument("--reference", type=Path, nargs="*", default=None,
                         help="One or more reference WAVs (mastered tracks) for the deck comparison")
     args = parser.parse_args()
-
-    if not args.master.exists():
-        print(json.dumps({"error": f"Not found: {args.master}"}), file=sys.stderr)
-        sys.exit(1)
 
     refs = [p for p in (args.reference or []) if p.exists()]
     if args.reference:
         missing = [p for p in args.reference if not p.exists()]
         for p in missing:
             print(f"WARNING: reference not found: {p}", file=sys.stderr)
+
+    if args.all_formats:
+        # Scan the output dir for master_<format>.wav files
+        candidates = []
+        for fmt in FORMAT_PRESETS:
+            wav = args.output_dir / f"master_{fmt}.wav"
+            if wav.exists():
+                candidates.append((fmt, wav))
+        if not candidates:
+            print(json.dumps({"error": f"No master_<format>.wav files in {args.output_dir}"}),
+                  file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Batch master_health for {len(candidates)} format(s):", flush=True)
+        for fmt, _ in candidates:
+            print(f"  - master_{fmt}.wav", flush=True)
+
+        results = []
+        for fmt, wav in candidates:
+            print(f"\n{'=' * 60}\n{fmt.upper()}\n{'=' * 60}", flush=True)
+            r = master_health(
+                master_path=wav,
+                output_dir=args.output_dir,
+                format_name=fmt,
+                reference_paths=refs,
+            )
+            results.append((fmt, r))
+
+        # Cross-format overall summary
+        print("\n" + "=" * 60)
+        print("BATCH SUMMARY")
+        print("=" * 60)
+        for fmt, r in results:
+            C = r["conformance"]
+            lufs = C.get("integrated_lufs", "?")
+            tp = C.get("true_peak_dbtp", "?")
+            verdict = C.get("verdict", "?")
+            target_delta = C.get("lufs_delta", "n/a")
+            delta_str = f"{target_delta:+.2f}" if isinstance(target_delta, (int, float)) else "n/a"
+            print(f"  {verdict} {fmt:<14}  LUFS {lufs:+.2f}  (delta {delta_str})  "
+                  f"TP {tp:+.2f} dBTP")
+        return
+
+    # Single-file mode
+    if args.master is None:
+        parser.error("master path is required (or use --all-formats)")
+    if not args.master.exists():
+        print(json.dumps({"error": f"Not found: {args.master}"}), file=sys.stderr)
+        sys.exit(1)
 
     master_health(
         master_path=args.master,

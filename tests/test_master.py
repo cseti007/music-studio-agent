@@ -286,6 +286,116 @@ class TestMasterHealth:
             "— modulated material should report higher punch"
         )
 
+    def test_stereo_width_scale_zero_yields_mono(self):
+        """Width factor 0 must collapse to perfect mono (L == R)."""
+        from master_mix import _stereo_width_scale
+
+        rng = np.random.default_rng(11)
+        stereo = rng.standard_normal((2, 10000)) * 0.3
+        narrowed = _stereo_width_scale(stereo, 0.0)
+        assert np.allclose(narrowed[0], narrowed[1], atol=1e-12), (
+            f"width=0 should give L == R, got max diff {np.max(np.abs(narrowed[0] - narrowed[1]))}"
+        )
+
+    def test_stereo_width_scale_one_is_identity(self):
+        """Width factor 1.0 must be a no-op (passes the input through)."""
+        from master_mix import _stereo_width_scale
+
+        rng = np.random.default_rng(12)
+        stereo = rng.standard_normal((2, 10000)) * 0.3
+        out = _stereo_width_scale(stereo, 1.0)
+        assert np.allclose(out, stereo, atol=1e-12)
+
+    def test_stereo_width_scale_widens(self):
+        """Width factor > 1 must increase side energy."""
+        from master_mix import _stereo_width_scale
+
+        rng = np.random.default_rng(13)
+        stereo = rng.standard_normal((2, 10000)) * 0.3
+        side_before = (stereo[0] - stereo[1]) * 0.5
+        wide = _stereo_width_scale(stereo, 1.5)
+        side_after = (wide[0] - wide[1]) * 0.5
+        rms_before = float(np.sqrt(np.mean(side_before ** 2)))
+        rms_after = float(np.sqrt(np.mean(side_after ** 2)))
+        assert rms_after > rms_before * 1.4
+
+    def test_vinyl_elliptical_removes_low_side_energy(self):
+        """The vinyl elliptical EQ must drop side energy below the cutoff
+        while leaving mid (sum) energy alone."""
+        from master_mix import _vinyl_elliptical_eq
+        from scipy.signal import butter, sosfilt
+
+        # Build a stereo signal with strong wide low end (different noise in L vs R)
+        SR_LOCAL = 48000
+        rng_L = np.random.default_rng(20)
+        rng_R = np.random.default_rng(21)
+        # Low-pass both channels to put energy in the low end, but different noise
+        sos = butter(4, 100 / (SR_LOCAL / 2), btype="low", output="sos")
+        L = sosfilt(sos, rng_L.standard_normal(SR_LOCAL * 3)) * 1.0
+        R = sosfilt(sos, rng_R.standard_normal(SR_LOCAL * 3)) * 1.0
+        stereo = np.vstack([L, R])
+
+        # Measure side energy in the low region BEFORE
+        side_before = (stereo[0] - stereo[1]) * 0.5
+        sos_low = butter(4, 100 / (SR_LOCAL / 2), btype="low", output="sos")
+        side_low_before = sosfilt(sos_low, side_before)
+        rms_low_before = float(np.sqrt(np.mean(side_low_before ** 2)))
+
+        # Apply elliptical EQ at 150 Hz
+        filtered = _vinyl_elliptical_eq(stereo, SR_LOCAL, mono_below_hz=150.0)
+
+        side_after = (filtered[0] - filtered[1]) * 0.5
+        side_low_after = sosfilt(sos_low, side_after)
+        rms_low_after = float(np.sqrt(np.mean(side_low_after ** 2)))
+
+        # The 4th-order HP at 150 Hz should drop low-side energy substantially
+        assert rms_low_after < rms_low_before * 0.2, (
+            f"low-side before {rms_low_before:.4f}, after {rms_low_after:.4f}"
+        )
+
+    def test_master_ms_processing_with_side_gain(self):
+        """+6 dB on the side channel must roughly double the M/S width ratio."""
+        from master_mix import _master_ms
+
+        rng = np.random.default_rng(22)
+        stereo = rng.standard_normal((2, 10000)) * 0.3
+
+        def width_ratio(s):
+            mid = (s[0] + s[1]) * 0.5
+            side = (s[0] - s[1]) * 0.5
+            rm = float(np.sqrt(np.mean(mid ** 2) + 1e-12))
+            rs = float(np.sqrt(np.mean(side ** 2) + 1e-12))
+            return rs / rm
+
+        w_before = width_ratio(stereo)
+        boosted = _master_ms(stereo, 48000, {
+            "mid_gain_db": 0.0, "side_gain_db": 6.0,
+            "mid_eq": [], "side_eq": [],
+        })
+        w_after = width_ratio(boosted)
+        # +6 dB = 2x amplitude
+        assert w_after > w_before * 1.8
+
+    def test_multiband_chain_step_runs_on_stereo(self):
+        """The master-multiband helper must process a (2, N) stereo buffer
+        without changing the shape."""
+        from master_mix import _master_multiband
+
+        rng = np.random.default_rng(23)
+        stereo = rng.standard_normal((2, 48000 * 3)) * 0.3
+        params = {
+            "low_high_hz": 200.0, "mid_high_hz": 3000.0,
+            "low":  {"threshold_db": -14, "ratio": 3.0, "attack_ms": 10, "release_ms": 200},
+            "mid":  {"threshold_db": -16, "ratio": 2.0, "attack_ms": 25, "release_ms": 250},
+            "high": {"threshold_db": -20, "ratio": 1.5, "attack_ms": 30, "release_ms": 350},
+        }
+        out = _master_multiband(stereo, 48000, params)
+        assert out.shape == stereo.shape
+        # Output should be in the same level ballpark (not silenced, not blown up)
+        rms_in = float(np.sqrt(np.mean(stereo ** 2)))
+        rms_out = float(np.sqrt(np.mean(out ** 2)))
+        assert 0.5 < rms_out / rms_in < 2.0
+
     def test_compression_history_flags_low_lra(self):
         """A heavily limited signal (low LRA) must be flagged as likely already
         mastered."""
