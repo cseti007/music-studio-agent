@@ -60,6 +60,13 @@ PRESETS: dict[str, dict] = {
 
 _AIR_RMS_DB_THRESHOLD = -40.0
 _CENTROID_HZ_THRESHOLD = 4000.0
+# Low-frequency-dominant stems (kick, bass): even though their air band is
+# technically empty, "exciting" them makes no musical sense — bass and kick
+# don't want top-end harmonics. Detect via: low band 6+ dB louder than high
+# band, AND spectral centroid below 800 Hz (typical kick: ~100-300 Hz, bass:
+# ~200-600 Hz, low guitar tracks: still ~500-1500 Hz).
+_LOW_DOMINANCE_DB = 6.0
+_LOW_DOMINANT_CENTROID_HZ = 800.0
 
 
 def _band_rms_db(signal: np.ndarray, sr: int, lo: float, hi: float) -> float:
@@ -71,6 +78,10 @@ def _band_rms_db(signal: np.ndarray, sr: int, lo: float, hi: float) -> float:
 
 def _relevance_check(mono: np.ndarray, sr: int) -> dict:
     air_db = _band_rms_db(mono, sr, 8000.0, min(sr / 2.0 - 100.0, 20000.0))
+    low_db = _band_rms_db(mono, sr, 30.0, 250.0)
+    high_db = _band_rms_db(mono, sr, 2000.0, min(sr / 2.0 - 100.0, 8000.0))
+    low_over_high_db = low_db - high_db
+
     nperseg = min(len(mono), 32768)
     freqs, psd = welch(mono, fs=sr, nperseg=nperseg)
     centroid = float(np.sum(freqs * psd) / max(np.sum(psd), 1e-12))
@@ -84,10 +95,21 @@ def _relevance_check(mono: np.ndarray, sr: int) -> dict:
         issues.append(
             f"spectral centroid {centroid:.0f} Hz > {_CENTROID_HZ_THRESHOLD} — stem is already bright"
         )
+    if (low_over_high_db > _LOW_DOMINANCE_DB and
+            centroid < _LOW_DOMINANT_CENTROID_HZ):
+        issues.append(
+            f"low-dominant stem (low band {low_over_high_db:.1f} dB > high band, "
+            f"centroid {centroid:.0f} Hz < {_LOW_DOMINANT_CENTROID_HZ:.0f}) — "
+            f"looks like a kick / bass / sub source. Exciter on bass/kick adds "
+            f"harshness, not 'air'; skip unless you want a slap-bass click."
+        )
 
     return {
         "tool": "exciter",
         "air_band_rms_dbfs": round(air_db, 1),
+        "low_band_rms_dbfs": round(low_db, 1),
+        "high_band_rms_dbfs": round(high_db, 1),
+        "low_over_high_db": round(low_over_high_db, 1),
         "spectral_centroid_hz": round(centroid, 0),
         "recommend_skip": bool(issues),
         "issues": issues,

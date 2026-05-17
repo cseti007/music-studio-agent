@@ -504,6 +504,125 @@ Pedalboard's Compressor uses peak detection. With slow attack (>20ms), short tra
 
 ---
 
+## Make-it-hit Philosophy — Loudness, Weight, Width Without Fatigue
+
+A modern rock/pop mix has to **"hit"** — sound dense, weighty, and impactful — but **without sounding squashed or tiring**. These are in tension. Too little processing = thin and dynamic but inconsequential. Too much = "loud but ugly", listener fatigue, sales drop on smartphone speakers.
+
+The tools that exist to push toward "hit" — clipper, multiband compressor, sub-bass synth, exciter, parallel saturation, M/S width — are powerful and they all share a property: **they degrade the source signal in exchange for a perceived improvement.** Saturation adds harmonic distortion. Clipping flattens transients. Sub-synth adds harmonic content that wasn't there. M/S widening reduces mono compatibility.
+
+The agent's job is to apply them **only when the data justifies the trade-off**. This is why every make-it-hit tool in this project ships with a `relevance_check` — the tool measures its input and refuses to write audio when the conditions for benefit are not met.
+
+### The relevance_check pattern
+
+Every make-it-hit tool runs its check first and returns a verdict like:
+
+```json
+"relevance_check": {
+  "tool": "subharm",
+  "sub_band_rms_dbfs": -25.0,
+  "target_over_fundamental_db": 3.8,
+  "recommend_skip": true,
+  "issues": [
+    "target band (80-200 Hz) is 3.8 dB louder than fundamental — new harmonics will be drowned"
+  ]
+}
+```
+
+When `recommend_skip: true`, the tool exits without writing the output WAV. The agent reads the report, understands why, and moves on. Only `--force` overrides — and that should require the user explicitly asking for it.
+
+### Required-evidence thresholds (per tool)
+
+These are the empirical thresholds derived from the field test on the terido session:
+
+| Tool | Required evidence |
+|---|---|
+| Master clipper | Sample peak > -10 dBFS AND LRA > 4 LU. Below either, the clipper has no headroom to recover or just adds fatigue to an already-flat mix. |
+| Sub-bass synth | sub_60hz_rms_db ≥ -35 (something to extract harmonics from) AND sub_60hz_crest_db ≥ 8 (sub isn't squashed) AND target band 80-200 Hz must NOT exceed the fundamental by more than 3 dB (else new harmonics are drowned by existing content). |
+| Drum bus parallel sat | Bus crest > 10 dB (transient life left) AND LRA > 4 LU AND bus is drums. |
+| Exciter | spectral_centroid_hz < 4000 (stem is dark) AND air_8khz_plus_rms_db < -40 (genuine air-band emptiness). |
+| Multiband comp | At least 2 of 3 bands with crest ≥ 6 dB (real per-band dynamics to control). |
+| M/S width | ms_width_ratio < 0.2 if side-boosting; do NOT side-boost if width > 0.5 (mono-compat risk). |
+| Haas | ms_width_ratio < 0.3 AND NOT on bass / low-centroid stems. |
+
+### Process budget
+
+A single stem chain should not exceed **4 processing steps**. Typical: gain → EQ → comp → one fx. More than that compounds phase shift, transient smearing, and harmonics that didn't ask permission to be there. If you find yourself about to add a 5th step, stop and reconsider whether the earlier steps actually solved the problem — or whether the problem was something other than what the chain has been treating.
+
+### Re-analyze loop
+
+After every make-it-hit step, re-run `analyze.py` on the output. Two checks:
+
+1. **The targeted metric moved the right way.** Sub-synth on a bass stem → sub_60hz_rms_db should rise 0.5-1.5 dB. Clipper → integrated_lufs rises 1-3 dB without LRA collapsing. Multiband → per-band crest tightens in the targeted band. Exciter → spectral_centroid_hz rises (note: with mix ≤ 0.15 this can be subtle, < 50 Hz delta on the centroid is normal).
+2. **`pumping.pumping_detected` did not flip true.** If it was false before the step and true after, the step caused it. Revert or soften. (Pre-existing pumping flags often indicate musical pulse — see the pumping disambiguation section.)
+
+If the metric didn't move, **revert**. The tool either didn't help or just shifted the problem.
+
+### Field-test lesson: rock-band tracking and the subharm tool
+
+On the terido test session (a real 56-stem rock recording) every stem failed the subharm relevance check — the target band 80-200 Hz was always 3+ dB louder than the 40-80 Hz fundamental. This is **not a bug**: rock recording captures harmonics naturally, so the target band is always full. Subharm is genuinely a synth-bass / 808 / sample-based-low-end tool. Honour the skip.
+
+### Field-test lesson: pumping is often a musical pulse, not artifact
+
+The pumping detector flags 1-5 Hz envelope modulation. On rhythm guitar tracks the strumming itself produces this modulation at song-tempo quarters or eighths (1.37 Hz at 82 BPM, 2.34 Hz at 140 BPM). The detector cannot tell musical pulse from comp pumping from envelope statistics alone. So `pumping_detected: true` is a **suspicion, not a verdict** — see "Reading the New Analysis Metrics" below.
+
+---
+
+## Reading the New Analysis Metrics
+
+`analyze.py` produces several metrics introduced for the make-it-hit and re-analyze workflows. They are not in the textbooks; here is how to read them.
+
+### frequency_bands_crest_db
+
+Peak-to-RMS within each 5-band region (sub/low/mid/high/air). Tells you which bands have headroom for dynamic processing and which are already squashed.
+
+| Band crest | Meaning | Action |
+|---|---|---|
+| > 18 dB | Loose / transient-rich | Multiband or parallel sat on this band has room to work |
+| 8-15 dB | Healthy | Normal range, no special action |
+| < 6 dB | Squashed | Avoid multiband / parallel sat on this band — it'll just smear without controlling anything |
+
+Use case: deciding the per-band ratios for a multiband chain. If the low-band crest is 22 dB but the high-band crest is 5 dB, you want a tight low-band comp and almost no high-band comp.
+
+### pumping (pumping_detected, pump_rate_hz, modulation_depth_db, lf_excess_db, active_frame_ratio)
+
+Detects 1-5 Hz envelope modulation. Two criteria both must trigger for `pumping_detected: true`:
+
+1. `modulation_depth_db ≥ 5` — the envelope swings by 5+ dB peak-to-trough on active frames (RMS > -40 dBFS). The active-frame gate fixes a previous bug: silent gaps between hits dragged p5 to ~0 and falsely hid pumping on intermittent material like kick mics and guitar with verse rests.
+2. `lf_excess_db ≥ 6` — the 1-5 Hz peak in the envelope's spectrum exceeds the 5-15 Hz reference by 6+ dB. Synthetic continuous pumping signals show excess > 20 dB; real-world musical content typically shows 5-15 dB.
+
+When `pumping_detected: true`, disambiguate before reverting any upstream step:
+
+1. **Did the flag appear AFTER a comp/multiband/clipper step?** Compare the analysis JSON from before and after. False → True after the step = the step caused it.
+2. **Is `pump_rate_hz` close to song-tempo quarters/eighths?** At 120 BPM: quarter = 2.0 Hz, eighth = 4.0 Hz. At 82 BPM: quarter = 1.37 Hz. If pump_rate matches the groove pulse, it is likely **musical strumming/groove**, not comp artifact.
+3. **What stem is it on?** Guitar (especially rhythm), bass, drum buses → typically musical pulse. Vocal, sustained pad, master mix → comp artifact more likely.
+4. **Depth vs excess profile.** High depth + moderate excess (depth 18 dB, excess 5 dB) = musical pulse. High depth + high excess (depth 8 dB, excess 30 dB) = comp artifact.
+
+If the conclusion is "musical pulse, not artifact": **say so explicitly and do NOT revert**. Note it in the session summary so the next analysis pass doesn't re-flag it as a problem.
+
+### true_peak_dbfs vs sample_peak_dbfs
+
+`analyze.py` reports both:
+- `sample_peak_dbfs` — the raw maximum sample value, naive
+- `true_peak_dbfs` — 4×-oversampled, ITU-R BS.1770-4 style
+
+The difference is the inter-sample peak (ISP). For low-frequency signals they are nearly identical. For HF content (cymbals, distorted guitar, snare crack) the true peak can sit 0.5-3 dB above the sample peak. After codec encoding (Spotify Ogg/Vorbis, Apple AAC), the encoded signal's inter-sample peak can climb further, occasionally pushing samples above 0 dBFS.
+
+**For stems: the difference rarely matters.** For master delivery: target `-2 dBTP` (the true peak, not the sample peak) to survive streaming codec encoding without clipping. `render_mix.py` does a second-pass true peak measurement after its limiter and scales the master down if the oversampled value exceeds the ceiling.
+
+### mix_health verdicts (green / yellow / red)
+
+`mix_health.py` scores the final mix on 7 dimensions: LUFS-vs-target, true peak, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (if supplied), masking pair counts (if detect_masking was run), and stem pumping.
+
+| Verdict | Meaning |
+|---|---|
+| All green | Mix is delivery-ready. |
+| 1 yellow, rest green | Mix is close. Address the yellow item if it's worth the time; otherwise ship. |
+| 2+ yellow OR any red | Address the issues, re-render, re-run mix_health. |
+| Red on tonal balance | The bottom/mids/top region differs from the reference by 2-4 dB. Use compare_reference --apply to bake in inverse-delta EQ correction. |
+| Yellow on stem pumping | One or more bus stems show 1-5 Hz envelope modulation. Verify per the pumping disambiguation checklist — usually it's musical pulse and can be left alone. |
+
+---
+
 ## Stem Analysis — Interpreting Metrics
 
 `analyze.py` produces `analysis.json` and `spectrogram.txt`. The STATS SUMMARY block at the bottom of `spectrogram.txt` condenses the key metrics. Interpret them together — no single number tells the full story.

@@ -67,10 +67,38 @@ def _band_rms(signal: np.ndarray, sr: int, lo: float, hi: float) -> float:
     return float(np.sqrt(np.mean(sosfilt(sos, signal) ** 2)))
 
 
-def _relevance_check(data: np.ndarray, sr: int) -> dict:
+# Mono filenames whose pattern suggests they're one half of a stereo pair
+# (overheads, room L/R, stereo mic pair). Applying Haas to such a stem makes
+# no sense — the other half already carries the stereo information; widening
+# one half breaks the relationship.
+_STEREO_PAIR_PATTERNS = [
+    " l.",  " l_",  " l-",  " l ",
+    " r.",  " r_",  " r-",  " r ",
+    ".l.", "_l.", "-l.",
+    ".r.", "_r.", "-r.",
+]
+
+
+def _looks_like_stereo_pair_half(file_path: Path) -> str | None:
+    """Returns a description string if the filename looks like one half of a
+    stereo pair (OH L/R, room L/R, mic pair). Returns None if it does not."""
+    # Look at the parent track-dir name + the filename, both lowercased.
+    name = f"{file_path.parent.name} {file_path.name}".lower()
+    # Surround with spaces so " l " etc. patterns match clean tokens
+    name_padded = f" {name} "
+    for pat in _STEREO_PAIR_PATTERNS:
+        if pat in name_padded:
+            # Try to extract which side
+            side = "L" if " l" in name_padded or ".l." in name or "_l." in name or "-l." in name else "R"
+            return f"filename contains '{pat.strip()}' — looks like the {side} channel of a stereo pair"
+    return None
+
+
+def _relevance_check(data: np.ndarray, sr: int, file_path: Path | None = None) -> dict:
     mono = data.mean(axis=1) if data.ndim == 2 and data.shape[1] > 1 else (
         data[:, 0] if data.ndim == 2 else data
     )
+    n_channels = data.shape[1] if data.ndim == 2 else 1
 
     # Existing M/S width (only meaningful if input is stereo)
     if data.ndim == 2 and data.shape[1] == 2:
@@ -93,17 +121,29 @@ def _relevance_check(data: np.ndarray, sr: int) -> dict:
     mask = freqs <= 8000
     centroid = float(np.sum(freqs[mask] * psd[mask]) / max(np.sum(psd[mask]), 1e-12))
 
+    # Check if this mono file appears to be half of a stereo pair
+    stereo_pair_warning = None
+    if n_channels == 1 and file_path is not None:
+        stereo_pair_warning = _looks_like_stereo_pair_half(file_path)
+
     issues = []
     if ms_width > 0.3:
         issues.append(f"already wide (M/S width {ms_width:.2f} > 0.3) — Haas will smear, not widen")
     if low_ratio > 0.4 and centroid < 500.0:
         issues.append(f"bass-heavy stem (low ratio {low_ratio:.2f}, centroid {centroid:.0f} Hz) — Haas causes phase mud")
+    if stereo_pair_warning is not None:
+        issues.append(
+            f"{stereo_pair_warning}. Haas on one half breaks the pair's stereo "
+            f"relationship — apply Haas to the summed pair, not one channel."
+        )
 
     return {
         "tool": "haas",
         "ms_width_ratio": round(ms_width, 3),
         "low_band_ratio": round(low_ratio, 3),
         "spectral_centroid_hz": round(centroid, 0),
+        "channels": n_channels,
+        "looks_like_stereo_pair_half": stereo_pair_warning is not None,
         "recommend_skip": bool(issues),
         "issues": issues,
     }
@@ -131,7 +171,7 @@ def apply_haas(
 
     data, sr = sf.read(str(input_path), always_2d=True)
 
-    rel = _relevance_check(data, sr)
+    rel = _relevance_check(data, sr, file_path=input_path)
     if rel["recommend_skip"] and not force:
         print(f"WARNING: Haas relevance_check failed for {input_path.name}:", file=sys.stderr)
         for issue in rel["issues"]:
