@@ -12,6 +12,40 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Reverb extensions: BPM-synced pre-delay, sidechain ducking, built-in IR pack
+
+Three non-vocal-specific reverb features that don't require the
+deferred vocal-toolkit work:
+
+- **BPM-synced pre-delay.** `apply_reverb --bpm 184
+  --pre-delay-division sixteenth` computes the pre-delay from
+  tempo + note division (12 named divisions including dotted and
+  triplet variants). 184 BPM sixteenth = 81.5 ms; 120 BPM eighth =
+  250 ms. Replaces explicit `--pre-delay MS` when given.
+- **Sidechain ducking on the reverb tail** ("pumping reverb").
+  `apply_reverb --sidechain kick.wav --sc-depth -12 --sc-hp 60
+  --sc-lp 200` ducks the wet signal each time the sidechain triggers,
+  so the reverb breathes with the kick instead of washing over
+  transients. Reports mean / peak gain reduction in the report JSON.
+- **Built-in IR pack.** New `tools/generate_irs.py` synthesises six
+  impulse responses into `tools/irs/` (plate_short, plate_long,
+  room_tight, room_live, hall_concert, spring_guitar). Synthetic so
+  no licensing — generated from noise + exponential decay + spectral
+  shaping. `apply_reverb --ir-preset hall_concert` loads
+  `tools/irs/hall_concert.wav` via the existing Convolution engine.
+  `--list-ir-presets` shows what's available.
+
+CLAUDE.md gains an updated `apply_reverb` row covering the new flags
+plus a new `generate_irs.py` row. docs/knowledge.md gains three new
+subsections under "Reverb in a Rock Mix": "Choosing between algorithmic
+and convolution", "BPM-synced pre-delay" (with a tempo lookup table),
+and "Sidechain reverb (pumping pattern)".
+
+Tests: 4 new cases in test_smoke.py cover BPM-to-pre-delay math (known
+values + unknown-division rejection), sidechain envelope ducking
+(loud input ducks, quiet input passes through, depth floor honoured).
+Total suite 45 tests, all green.
+
 ### Session-audit tool for phase-coherent duplicates
 
 A user-by-ear test on the terido_v3 mix surfaced that two drum tracks

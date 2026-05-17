@@ -23,5 +23,8 @@ spectrograms/
 # but keep instrument presets — these ship with the repo
 !tools/presets/*.json
 
+# and keep the synthetic IR pack — ships with the repo
+!tools/irs/*.wav
+
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json

@@ -161,6 +161,78 @@ def _lowpass(data: np.ndarray, sr: int, hz: float) -> np.ndarray:
     return sosfilt(sos, data, axis=0)
 
 
+_DIVISION_FACTORS: dict[str, float] = {
+    "whole":         1.0,
+    "half":          0.5,
+    "dotted-quarter": 0.375,
+    "quarter":       0.25,
+    "dotted-eighth": 0.1875,
+    "triplet-quarter": 1.0 / 6.0,
+    "eighth":        0.125,
+    "dotted-sixteenth": 0.09375,
+    "triplet-eighth": 1.0 / 12.0,
+    "sixteenth":     0.0625,
+    "triplet-sixteenth": 1.0 / 24.0,
+    "thirty-second": 0.03125,
+}
+
+
+def _bpm_to_pre_delay_ms(bpm: float, division: str) -> float:
+    """Convert a tempo + note-division into a pre-delay in milliseconds.
+
+    A whole note at BPM is `4 * 60000 / BPM` ms (because BPM counts
+    quarters per minute). Each named division is a fraction of that.
+    Example: 120 BPM eighth = 4 * 500 * 0.125 = 250 ms; 184 BPM
+    sixteenth = 4 * 326.087 * 0.0625 = 81.5 ms.
+    """
+    if division not in _DIVISION_FACTORS:
+        raise ValueError(
+            f"Unknown division {division!r}. Known: {sorted(_DIVISION_FACTORS)}"
+        )
+    whole_note_ms = 4.0 * 60000.0 / float(bpm)
+    return whole_note_ms * _DIVISION_FACTORS[division]
+
+
+def _sidechain_envelope(sc_mono: np.ndarray, sr: int,
+                        attack_ms: float = 5.0, release_ms: float = 150.0,
+                        threshold_db: float = -30.0, depth_db: float = -12.0) -> np.ndarray:
+    """Return a per-sample 0..1 multiplier driven by sc_mono.
+
+    Used to duck the reverb tail every time the sidechain (typically the
+    kick) hits — the "pumping reverb" pattern. depth_db is how far the
+    reverb is pulled down at peak ducking (e.g. -12 dB → multiplier 0.25).
+    """
+    block_samples = max(1, sr // 1000)  # 1 ms blocks
+    n_blocks = (len(sc_mono) + block_samples - 1) // block_samples
+    alpha_a = np.exp(-1.0 / max(1.0, attack_ms * 0.001 * sr / block_samples))
+    alpha_r = np.exp(-1.0 / max(1.0, release_ms * 0.001 * sr / block_samples))
+    threshold_lin = 10.0 ** (threshold_db / 20.0)
+    depth_lin = 10.0 ** (depth_db / 20.0)
+
+    env = 0.0
+    gain_blocks = np.ones(n_blocks)
+    for i in range(n_blocks):
+        start = i * block_samples
+        end = min(start + block_samples, len(sc_mono))
+        level = float(np.max(np.abs(sc_mono[start:end])))
+        # Ballistic envelope follower
+        if level > env:
+            env = alpha_a * env + (1.0 - alpha_a) * level
+        else:
+            env = alpha_r * env + (1.0 - alpha_r) * level
+        if env > threshold_lin:
+            # Map (env_db - threshold) onto a 0..1 ducking amount, capped
+            over_db = 20.0 * np.log10(max(env, 1e-10)) - threshold_db
+            # Light static: 1:4 ratio → 0.25 dB ducking per dB over threshold
+            ducked = max(depth_lin, 10.0 ** ((-over_db * 0.25) / 20.0))
+            gain_blocks[i] = ducked
+        # else: leave at 1.0 (no ducking)
+
+    # Interpolate to sample resolution
+    block_centers = np.arange(n_blocks) * block_samples + block_samples // 2
+    return np.interp(np.arange(len(sc_mono)), block_centers, gain_blocks).astype(np.float64)
+
+
 def apply_reverb(
     file_path: Path,
     output_dir: Path,
@@ -177,6 +249,10 @@ def apply_reverb(
     send_mode: bool = False,
     preset_name: str | None = None,
     ir_path: Path | None = None,
+    sidechain_path: Path | None = None,
+    sc_depth_db: float = -12.0,
+    sc_hp_hz: float | None = None,
+    sc_lp_hz: float | None = None,
 ) -> dict:
     data, sr = sf.read(str(file_path), always_2d=True)
 
@@ -233,6 +309,43 @@ def apply_reverb(
         reverb_out = _gate(reverb_out, sr,
                            hold_ms=gate_hold_ms, release_ms=gate_release_ms)
 
+    # Sidechain ducking on the reverb tail (pumping-reverb pattern). The
+    # tail dips every time the sidechain (typically the kick) hits, so the
+    # reverb breathes with the song instead of washing over transients.
+    sidechain_info: dict | None = None
+    if sidechain_path is not None:
+        sc_data, sc_sr = sf.read(str(sidechain_path), always_2d=True)
+        if sc_sr != sr:
+            raise ValueError(
+                f"Sidechain sample rate {sc_sr} Hz differs from main {sr} Hz"
+            )
+        # Trim/pad to match
+        n_main = reverb_out.shape[0]
+        if sc_data.shape[0] > n_main:
+            sc_data = sc_data[:n_main]
+        elif sc_data.shape[0] < n_main:
+            sc_data = np.pad(sc_data, ((0, n_main - sc_data.shape[0]), (0, 0)))
+        sc_mono = sc_data.mean(axis=1)
+        # Optional band-pass on the sidechain (isolate kick beater range)
+        if sc_hp_hz and sc_hp_hz > 0:
+            sos = butter(2, sc_hp_hz / (sr / 2), btype="high", output="sos")
+            sc_mono = sosfilt(sos, sc_mono)
+        if sc_lp_hz and sc_lp_hz > 0:
+            sos = butter(2, sc_lp_hz / (sr / 2), btype="low", output="sos")
+            sc_mono = sosfilt(sos, sc_mono)
+        env = _sidechain_envelope(sc_mono, sr, depth_db=sc_depth_db)
+        reverb_out = reverb_out * env[:, None]
+        mean_gr_db = float(20.0 * np.log10(max(float(np.mean(env)), 1e-10)))
+        peak_gr_db = float(20.0 * np.log10(max(float(np.min(env)), 1e-10)))
+        sidechain_info = {
+            "file": str(sidechain_path),
+            "depth_db": sc_depth_db,
+            "sc_hp_hz": sc_hp_hz,
+            "sc_lp_hz": sc_lp_hz,
+            "mean_gain_reduction_db": round(mean_gr_db, 2),
+            "peak_gain_reduction_db": round(peak_gr_db, 2),
+        }
+
     # Mix
     if send_mode:
         output = reverb_out * wet
@@ -274,6 +387,7 @@ def apply_reverb(
         "lp_hz": lp_hz,
         "gate_hold_ms": gate_hold_ms,
         "gate_release_ms": gate_release_ms,
+        "sidechain": sidechain_info,
         "sample_rate": sr,
     }
 
@@ -307,7 +421,34 @@ def main() -> None:
         help="Impulse response WAV — switches engine to convolution. "
              "Algorithmic params (room_size, damping, width) are ignored when set.",
     )
-    parser.add_argument("--list-presets", action="store_true", help="List available presets and exit")
+    parser.add_argument(
+        "--ir-preset", metavar="NAME",
+        help="Load an IR from tools/irs/<NAME>.wav. Alternative to --ir. "
+             "Run --list-ir-presets to see the built-in IR pack.",
+    )
+    parser.add_argument(
+        "--bpm", type=float, metavar="BPM",
+        help="Tempo for BPM-synced pre-delay (used with --pre-delay-division)",
+    )
+    parser.add_argument(
+        "--pre-delay-division", metavar="NAME",
+        help="Note division for pre-delay (eighth, sixteenth, quarter, "
+             "dotted-eighth, triplet-eighth, etc.). Requires --bpm.",
+    )
+    parser.add_argument(
+        "--sidechain", type=Path, metavar="WAV",
+        help="Sidechain WAV (typically kick) — ducks the reverb tail when "
+             "the sidechain hits. Classic pumping-reverb pattern.",
+    )
+    parser.add_argument(
+        "--sc-depth", type=float, default=-12.0, metavar="DB",
+        help="Maximum gain reduction on the reverb tail at peak ducking "
+             "(default -12 dB)",
+    )
+    parser.add_argument("--sc-hp", type=float, metavar="HZ", help="High-pass the sidechain before detection")
+    parser.add_argument("--sc-lp", type=float, metavar="HZ", help="Low-pass the sidechain before detection")
+    parser.add_argument("--list-presets", action="store_true", help="List available algorithmic presets and exit")
+    parser.add_argument("--list-ir-presets", action="store_true", help="List built-in IR presets (tools/irs/) and exit")
 
     args = parser.parse_args()
 
@@ -319,14 +460,42 @@ def main() -> None:
             print(f"  {p['notes']}")
         return
 
+    irs_dir = Path(__file__).parent / "irs"
+    if args.list_ir_presets:
+        if not irs_dir.is_dir():
+            print(f"No IR directory: {irs_dir}")
+            return
+        ir_files = sorted(irs_dir.glob("*.wav"))
+        if not ir_files:
+            print(f"No IR files in {irs_dir}")
+            return
+        print(f"IR presets in {irs_dir}:")
+        for f in ir_files:
+            print(f"  {f.stem}")
+        return
+
     if args.input is None:
         parser.error("input file is required")
     if not args.input.exists():
         print(json.dumps({"error": f"Not found: {args.input}"}), file=sys.stderr)
         sys.exit(1)
+
+    # Resolve --ir-preset to an --ir path
+    if args.ir_preset is not None:
+        ir_candidate = irs_dir / f"{args.ir_preset}.wav"
+        if not ir_candidate.exists():
+            print(json.dumps({"error": f"IR preset not found: {ir_candidate}. Run --list-ir-presets."}),
+                  file=sys.stderr)
+            sys.exit(1)
+        args.ir = ir_candidate
     if args.ir is not None and not args.ir.exists():
         print(json.dumps({"error": f"IR file not found: {args.ir}"}), file=sys.stderr)
         sys.exit(1)
+    if args.sidechain is not None and not args.sidechain.exists():
+        print(json.dumps({"error": f"Sidechain file not found: {args.sidechain}"}), file=sys.stderr)
+        sys.exit(1)
+    if (args.bpm is None) != (args.pre_delay_division is None):
+        parser.error("--bpm and --pre-delay-division must be used together")
 
     # Start from preset, then apply CLI overrides
     params: dict = {}
@@ -352,7 +521,11 @@ def main() -> None:
                   "hp_hz": None, "lp_hz": None,
                   "gate_hold_ms": None, "gate_release_ms": None}
 
-    if args.pre_delay is not None:   params["pre_delay_ms"] = args.pre_delay
+    # BPM-synced pre-delay overrides explicit --pre-delay
+    if args.bpm is not None and args.pre_delay_division is not None:
+        params["pre_delay_ms"] = _bpm_to_pre_delay_ms(args.bpm, args.pre_delay_division)
+    elif args.pre_delay is not None:
+        params["pre_delay_ms"] = args.pre_delay
     if args.room_size is not None:   params["room_size"] = args.room_size
     if args.damping is not None:     params["damping"] = args.damping
     if args.width is not None:       params["width"] = args.width
@@ -370,6 +543,10 @@ def main() -> None:
         preset_name=preset_name,
         send_mode=args.send,
         ir_path=args.ir,
+        sidechain_path=args.sidechain,
+        sc_depth_db=args.sc_depth,
+        sc_hp_hz=args.sc_hp,
+        sc_lp_hz=args.sc_lp,
         **params,
     )
     print(json.dumps(result, indent=2))

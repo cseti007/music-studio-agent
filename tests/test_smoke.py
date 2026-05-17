@@ -328,6 +328,50 @@ class TestRelevanceChecks:
         f.touch()
         assert _looks_like_stereo_pair_half(f) is None
 
+    def test_bpm_to_pre_delay_known_values(self):
+        """120 BPM eighth = 250 ms, sixteenth = 125 ms; 184 BPM sixteenth ≈ 81.5 ms."""
+        from apply_reverb import _bpm_to_pre_delay_ms
+
+        assert abs(_bpm_to_pre_delay_ms(120, "eighth") - 250.0) < 0.01
+        assert abs(_bpm_to_pre_delay_ms(120, "sixteenth") - 125.0) < 0.01
+        assert abs(_bpm_to_pre_delay_ms(184, "sixteenth") - 81.52) < 0.1
+        # Triplets: a triplet-eighth at 120 BPM is 2/3 of an eighth = ~167 ms
+        assert abs(_bpm_to_pre_delay_ms(120, "triplet-eighth") - 1000.0 / 6.0) < 0.5
+
+    def test_bpm_to_pre_delay_rejects_unknown_division(self):
+        from apply_reverb import _bpm_to_pre_delay_ms
+
+        try:
+            _bpm_to_pre_delay_ms(120, "twelve-bar-blues")
+        except ValueError:
+            return
+        raise AssertionError("expected ValueError for unknown division")
+
+    def test_sidechain_envelope_ducks_on_loud_input(self):
+        """The sidechain envelope must drop below 1.0 when the input is loud."""
+        from apply_reverb import _sidechain_envelope
+
+        SR_LOCAL = 48000
+        # 2 seconds of loud noise (above the default -30 dB threshold)
+        rng = np.random.default_rng(33)
+        sc = rng.standard_normal(SR_LOCAL * 2) * 0.5  # ~-3 dBFS RMS, well above threshold
+        env = _sidechain_envelope(sc, SR_LOCAL, depth_db=-12.0)
+        # On loud sustained input the envelope must duck the reverb
+        assert env.shape == sc.shape
+        assert env.min() < 0.6, f"env never ducked: min={env.min():.3f}"
+        # And never go below the depth floor (10^(-12/20) = 0.251)
+        assert env.min() >= 0.25 - 1e-3, f"env went below depth_db floor: {env.min()}"
+
+    def test_sidechain_envelope_passes_quiet_input(self):
+        """Below threshold, the envelope must stay near 1.0 (no ducking)."""
+        from apply_reverb import _sidechain_envelope
+
+        SR_LOCAL = 48000
+        # Very quiet input — below -30 dB threshold
+        sc = np.random.default_rng(34).standard_normal(SR_LOCAL) * 0.001
+        env = _sidechain_envelope(sc, SR_LOCAL, depth_db=-12.0)
+        assert env.min() > 0.99
+
     def test_audit_session_finds_duplicates(self, tmp_path):
         """audit_session must group tracks that share source files and
         recommend the shortest name as primary."""
