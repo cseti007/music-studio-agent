@@ -226,8 +226,7 @@ def apply_amp(
         out = out / peak
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    preset_tag = f"_{preset_name}" if preset_name else ""
-    out_path = output_dir / (file_path.stem + f"_amp{preset_tag}.wav")
+    out_path = output_dir / (file_path.stem + "_amp.wav")
     sf.write(str(out_path), out, sr, subtype="PCM_24")
 
     result = {

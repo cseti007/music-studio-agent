@@ -39,13 +39,9 @@ import pyloudnorm as pyln
 import soundfile as sf
 from scipy.signal import welch
 
-# Stage → filename candidates (first match wins)
-_STAGE_FILES = {
-    "raw":  ["assembled.wav"],
-    "eq":   ["assembled_eq.wav"],
-    "comp": ["assembled_eq_comp.wav", "assembled_gained_eq_comp.wav"],
-    "fx":   [],  # discovered via glob
-}
+# Need to add the tools dir to sys.path so we can import _stages
+sys.path.insert(0, str(Path(__file__).parent))
+from _stages import STAGE_CANDIDATES as _SHARED_STAGE_CANDIDATES  # noqa: E402
 
 # 10-band heatmap regions (label, lo_hz, hi_hz)
 _HEATMAP_BANDS = [
@@ -85,7 +81,7 @@ def _find_stem_file(track_dir: Path, stage: str) -> Path | None:
         # Fall back to comp
         return _find_stem_file(track_dir, "comp")
 
-    for name in _STAGE_FILES.get(stage, []):
+    for name in _SHARED_STAGE_CANDIDATES.get(stage, []):
         p = track_dir / name
         if p.exists():
             return p

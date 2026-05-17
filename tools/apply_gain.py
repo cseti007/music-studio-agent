@@ -399,7 +399,7 @@ def apply_gain_per_channel(
         "true_peak_after_dbfs": round(20.0 * np.log10(max(peak_after, 1e-10)), 1),
     }
 
-    report_path = output_dir / "gain_report.json"
+    report_path = output_dir / f"{file_path.stem}_gain_report.json"
     report_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
     return result
 

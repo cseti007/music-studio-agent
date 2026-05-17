@@ -34,10 +34,10 @@ python3 tools/<script>.py
 | Tool | What it does | Key args |
 |---|---|---|
 | `tools/parse_session.py` | Parse DAW session file (.ptx, .als) into canonical session.json | `<session_file> --output-dir output/<session> --audio-dir <audio_dir>` |
-| `tools/apply_gain.py --per-clip` | Clip gain: normalize each clip to consistent LUFS, then assemble full stem | `--per-clip session.json --track "NAME" --output-dir output/<session>` |
+| `tools/apply_gain.py --per-clip` | Clip gain: normalize each clip to consistent LUFS, then assemble full stem | `--per-clip session.json --track "NAME" --output-dir output/<session>/tracks` |
 | `tools/apply_gain.py --per-channel` | Stem gain: apply single gain to assembled stem to reach LUFS target | `--per-channel assembled.wav --preset stem\|spotify\|apple\|amazon\|broadcast` |
-| `tools/analyze.py` | Analyze a stem: LUFS, LRA, crest factor, transient density, spectral centroid, stereo balance/correlation/M-S width, 1/3-octave freq response, hum detection, 10-band text spectrogram + RMS waveform + PNG | `<file> --output-dir output/<session>/<track>` |
-| `tools/align_phase.py` | Phase-align a target stem to a reference via cross-correlation | `--reference ref.wav --target tgt.wav --output-dir output/<session>` |
+| `tools/analyze.py` | Analyze a stem: LUFS, LRA, crest factor, transient density, spectral centroid, stereo balance/correlation/M-S width, 1/3-octave freq response, hum detection, 10-band text spectrogram + RMS waveform + PNG | `<file> --output-dir output/<session>/tracks/<track>` |
+| `tools/align_phase.py` | Phase-align a target stem to a reference via cross-correlation | `--reference ref.wav --target tgt.wav --output-dir output/<session>/tracks` |
 | `tools/apply_eq.py` | Apply EQ filter chain: notch, HP, LP, bandpass, peak, lowshelf, highshelf. Instrument presets. Auto-notch from hum detection. | `<file> --output-dir DIR [--preset NAME] [--filter JSON]... [--from-analysis analysis.json]` |
 | `tools/apply_compression.py` | Apply dynamic range compression (pedalboard/JUCE). Parallel compression via --mix. Sidechain compression via --sidechain (custom envelope follower; pedalboard has no native sidechain). Instrument presets. | `<file> --output-dir DIR [--preset NAME] [--threshold DB] [--ratio N] [--attack MS] [--release MS] [--mix 0-1] [--sidechain FILE] [--sc-hp HZ] [--sc-lp HZ]` |
 | `tools/apply_reverb.py` | Apply reverb to a stem. Algorithmic reverb (Freeverb) with pre-delay, HP/LP on return. Insert mode (dry+wet) or send mode (wet only). Presets: snare_plate, snare_plate_big, snare_gated, room_drums, guitar_room, hall_ambient. | `<file> --preset NAME [--send] [--pre-delay MS] [--wet 0-1] [--hp HZ] [--lp HZ] --output-dir DIR` |

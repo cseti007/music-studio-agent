@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 import librosa
@@ -16,7 +17,19 @@ import pyloudnorm as pyln
 import soundfile as sf
 from scipy.signal import butter, sosfilt, welch
 
-DEFAULT_TARGET_LUFS = -23.0
+_CONFIG_PATH = Path("config.toml")
+_FALLBACK_TARGET_LUFS = -18.0
+
+
+def _config_target_lufs() -> float:
+    if _CONFIG_PATH.exists():
+        with open(_CONFIG_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+        return float(cfg.get("analyze", {}).get("default_target_lufs", _FALLBACK_TARGET_LUFS))
+    return _FALLBACK_TARGET_LUFS
+
+
+DEFAULT_TARGET_LUFS = _config_target_lufs()
 
 
 def _rms_db(signal: np.ndarray) -> float:

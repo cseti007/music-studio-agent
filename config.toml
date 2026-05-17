@@ -28,5 +28,6 @@ segment_duration_sec = 10.0
 
 
 [analyze]
-# Defaults for analyze.py (not yet implemented — placeholder)
-# default_target_lufs = -18.0
+# Default target LUFS used by analyze.py for the recommended_gain_db field.
+# Matches the stem-level target used elsewhere in the pipeline.
+default_target_lufs = -18.0

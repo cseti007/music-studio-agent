@@ -242,8 +242,7 @@ def apply_reverb(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     mode_tag = "_send" if send_mode else ""
-    preset_tag = f"_{preset_name}" if preset_name else ""
-    out_path = output_dir / (file_path.stem + f"_reverb{preset_tag}{mode_tag}.wav")
+    out_path = output_dir / (file_path.stem + f"_reverb{mode_tag}.wav")
     sf.write(str(out_path), output, sr, subtype="PCM_24")
 
     result = {

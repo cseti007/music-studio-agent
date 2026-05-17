@@ -36,6 +36,8 @@ try:
 except ImportError:
     _HAS_EQ = False
 
+from _stages import STAGE_CANDIDATES as _STAGE_CANDIDATE_LISTS, STAGE_NAMES
+
 PRESETS_DIR = Path(__file__).parent / "presets"
 
 # Guitar guitarist prefixes in specificity order (most specific first)
@@ -91,24 +93,16 @@ def _find_final_file(track_dir: Path) -> str | None:
     return None
 
 
-_STAGE_CANDIDATES: dict[str, list[str] | None] = {
-    "raw":  ["assembled.wav"],
-    "eq":   ["assembled_aligned_eq.wav", "assembled_eq.wav", "assembled.wav"],
-    "comp": ["assembled_aligned_eq_comp.wav", "assembled_eq_comp.wav",
-             "assembled_aligned_eq.wav", "assembled_eq.wav", "assembled.wav"],
-    "fx":   None,  # use config file as-is (final stem, before bus processing)
-}
-
-
 def _resolve_stage_file(config_file: str, stage: str) -> str:
     """Return the stem file for the requested processing stage.
 
     Searches for the stage-appropriate file in the same directory as config_file.
     Falls back to config_file with a warning if the stage file doesn't exist.
+    The "fx" stage uses the config file as-is (final stem, before bus processing).
     """
-    candidates = _STAGE_CANDIDATES.get(stage)
-    if candidates is None:
+    if stage == "fx":
         return config_file
+    candidates = _STAGE_CANDIDATE_LISTS.get(stage, [])
     track_dir = Path(config_file).parent
     for name in candidates:
         p = track_dir / name
@@ -640,7 +634,7 @@ Examples:
     parser.add_argument("--stems", action="store_true", help="Also write per-bus stem WAVs to <output_dir>/stems/")
     parser.add_argument(
         "--stage",
-        choices=list(_STAGE_CANDIDATES.keys()),
+        choices=STAGE_NAMES,
         default=None,
         help="Use stem files from this processing stage. raw=assembled, eq=after EQ, comp=after comp, fx=config file (default). Bus and master chain always run.",
     )

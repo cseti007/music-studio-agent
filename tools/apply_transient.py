@@ -145,7 +145,6 @@ Examples:
     sustain_db = 0.0
     fast_ms = args.fast_ms
     slow_ms = args.slow_ms
-    preset_tag = ""
 
     if args.preset:
         p = _load_preset(args.preset)
@@ -154,8 +153,6 @@ Examples:
         sustain_db = float(s.get("sustain_db", 0.0))
         fast_ms = float(s.get("fast_ms", fast_ms))
         slow_ms = float(s.get("slow_ms", slow_ms))
-        clean_name = args.preset.removeprefix("transient_")
-        preset_tag = f"_{clean_name}"
         print(f"Preset: {args.preset} — attack {attack_db:+.1f} dB, sustain {sustain_db:+.1f} dB")
 
     if args.attack is not None:
@@ -180,7 +177,7 @@ Examples:
     print(f"Peak:    {peak_in:.1f} dBFS -> {peak_out:.1f} dBFS")
 
     stem = args.file.stem
-    out_name = f"{stem}_transient{preset_tag}.wav"
+    out_name = f"{stem}_transient.wav"
     out_path = args.output_dir / out_name
     args.output_dir.mkdir(parents=True, exist_ok=True)
     sf.write(str(out_path), shaped, sr, subtype="PCM_24")

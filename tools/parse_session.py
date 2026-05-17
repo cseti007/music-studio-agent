@@ -29,13 +29,15 @@ Canonical output (session.json):
 import argparse
 import gzip
 import json
+import os
 import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-PTFTOOL = Path("/tmp/ptformat/ptftool")
+# Override with the PTFTOOL_PATH environment variable if installed elsewhere.
+PTFTOOL = Path(os.environ.get("PTFTOOL_PATH", "/tmp/ptformat/ptftool"))
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +83,8 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
             f"ptftool not found at {PTFTOOL}.\n"
             "Build it:\n"
             "  git clone https://github.com/zamaudio/ptformat.git /tmp/ptformat\n"
-            "  cd /tmp/ptformat && CXX=g++ make all INCL='-I.'"
+            "  cd /tmp/ptformat && CXX=g++ make all INCL='-I.'\n"
+            "Or set PTFTOOL_PATH to point at an existing binary."
         )
 
     proc = subprocess.run(
