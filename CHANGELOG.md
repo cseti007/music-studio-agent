@@ -12,6 +12,71 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Mastering pipeline (master_mix + master_health) — separate phase
+
+The project now covers the full mix→master→delivery flow as two distinct
+phases with their own scorecards. The render_mix master chain stays in
+its existing role (the mix-engineer's polish during render), and a new
+independent mastering pass runs on the finished mix.wav.
+
+**New tools:**
+- `tools/master_mix.py` — mastering pass on stereo mix.wav. Chain:
+  EQ → glue comp → harmonic exciter → soft/hard clipper → LUFS norm →
+  ISP-aware true-peak limiter → post-limiter LUFS correction → optional
+  16-bit dither.
+- `tools/master_health.py` — master-level scorecard, distinct from
+  mix_health. Checks format conformance (LUFS / true peak / 8x codec-ISP
+  estimate), per-band phase coherence (sub-mono check, top-wide check),
+  per-band M/S width profile, punch index (percentile-90 short envelope
+  vs long envelope), compression-history detection, reference-deck
+  comparison (multi-reference averaged).
+
+**Format presets** (7): spotify, apple, youtube, tidal (all -14 to -16
+LUFS, -1 dBTP, 24-bit), cd (-9 LUFS, -1 dBTP, 16-bit dithered),
+vinyl_pre (-12 LUFS, no clipper / no limiter for the cutter), and
+broadcast (-23 LUFS, EBU R128).
+
+**Mastering chain presets** (5): gentle, modern_rock (default), pop,
+hip_hop, transparent.
+
+**Important fix discovered during field test**: pedalboard.Limiter
+applies internal makeup gain, so the post-limiter integrated LUFS sits
+~2-5 dB above the target. The chain now does a post-limiter LUFS
+re-measure and a downward-only correction. Verified on the terido_v2
+mix: spotify master lands at -14.00 LUFS (delta 0.00 from target),
+all-green master_health scorecard.
+
+**Punch index formula corrected**: the original `mean(short_env) /
+mean(long_env)` formula in master_health doesn't discriminate squashed
+from dynamic material because both envelopes converge on the same RMS
+mean. Replaced with `percentile_90(short_env) / mean(long_env)` so the
+metric actually compares transient peaks to sustained bed.
+
+**Master_health LUFS measurement fixed**: was mono-summing the stereo
+master before measuring (returns ~3 dB lower than BS.1770 spec). Now
+measures on the native stereo signal as the standard requires.
+
+**Docs**:
+- CLAUDE.md workflow diagram now shows the explicit "mix phase ends"
+  → "master phase begins" boundary; decision tree gains the master
+  triggers; new ground rules: mix_health must gate master_mix, and
+  every master_mix output must be followed by master_health.
+- docs/knowledge.md gains a "Mastering Workflow and Philosophy" section
+  covering format targets, codec ISP, punch index, per-band phase rules,
+  compression history, and reference-deck workflow.
+- README workflow diagram updated to show the master phase.
+- BACKLOG.md: mastering moved to "Completed since this file was created";
+  new BACKLOG entry "Advanced mastering features" for true codec
+  roundtrip, ISRC embed, DDP, vinyl-specific elliptical EQ, stem
+  mastering variants.
+
+**Tests**: 16 new tests in `tests/test_master.py` covering format
+presets, chain presets, master_mix end-to-end (LUFS targeting, TP
+ceiling, CD bit depth, vinyl limiter skip), and master_health
+(conformance round-trip, per-band phase coherence for mono and wide
+signals, punch index discrimination, compression history detection).
+Total suite: 33 tests, all green.
+
 ### Tests, docs, and final tuning
 
 - **pytest smoke suite** (`tests/test_smoke.py`, 17 tests) — covers the

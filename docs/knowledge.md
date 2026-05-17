@@ -483,6 +483,123 @@ Both are RMS-normalized in this pipeline: they change the spectral content (add 
 
 ---
 
+## Mastering Workflow and Philosophy
+
+Mastering is the final pass after the mix is bounced to a stereo file. It's
+a different mindset than mixing — the mix engineer balances the parts; the
+master engineer treats the song as one finished object and prepares it for
+delivery.
+
+This project treats mix and master as **two separate phases**:
+
+| Phase | Input | Output | Tool |
+|---|---|---|---|
+| Mix | stems + mix_config.json | mix.wav | `render_mix.py` |
+| Master | mix.wav | master_<format>.wav | `master_mix.py` |
+
+The `render_mix.py` master chain (glue comp + EQ + LUFS norm + true peak
+limit) is **the mix engineer's polish**, not the master pass. It runs
+inside the render to give the mix a coherent shape. The actual mastering
+pass is `master_mix.py`, run separately on the bounced stereo file.
+
+### Why two phases
+
+1. **Independent iteration**: tweak master EQ without re-rendering 56 stems.
+2. **Multi-format delivery**: one mix → many masters (Spotify, Apple, CD,
+   vinyl pre, etc.) with format-specific LUFS / true peak targets.
+3. **Compatibility with external mixes**: if someone hands you a mix.wav,
+   you can master it without their session.
+4. **Match real-world workflow**: mix engineers and master engineers are
+   usually different people; the tools should reflect that boundary.
+
+### Format-specific delivery targets (2026)
+
+| Platform | LUFS | True peak | Bit depth | Notes |
+|---|---|---|---|---|
+| Spotify | -14 | -1 dBTP | 24 | Ogg Vorbis encoding — codec ISP overshoots ~0.5-1.0 dB |
+| Apple Music | -16 | -1 dBTP | 24 | AAC encoding — slightly quieter target than Spotify |
+| YouTube | -14 | -1 dBTP | 24 | Same as Spotify; YouTube normalises loudly |
+| Tidal | -14 | -1 dBTP | 24 | HiFi tier; lossless playback |
+| CD | -9 | -1 dBTP | 16 | Louder; 16-bit dithered for Red Book |
+| Vinyl pre-master | -12 | -1 dBTP | 24 | Gentle — the cutter adds its own limiting |
+| Broadcast (EBU R128) | -23 | -2 dBTP | 24 | TV / radio |
+
+The targets converge enough that one "streaming master" (-14 LUFS, -1 dBTP,
+24-bit) is acceptable for Spotify, YouTube, Tidal. Apple gets a separate
+target; CD and vinyl are their own paths.
+
+### Mastering chain presets
+
+`master_mix.py` ships five chain templates (the *what to do* part, distinct
+from the format target *how loud* part):
+
+| Preset | Chain | Use when |
+|---|---|---|
+| `gentle` | comp only (1.5:1, gentle) | Acoustic, jazz, classical-leaning rock. Preserves dynamics. |
+| `modern_rock` | EQ + comp + exciter + soft clip | Competitive loudness with audible LUFS lift. The default. |
+| `pop` | EQ (bright) + comp (faster) + exciter + soft clip | Bright top, present mids. |
+| `hip_hop` | EQ (sub boost) + comp + exciter + hard clip | Sub weight, impact. |
+| `transparent` | LUFS norm + limit only | When the mix doesn't need master tone. |
+
+### Codec-ISP vs. true peak
+
+Sample peak and 4× true peak miss what the codec encoder does to the signal.
+Ogg Vorbis and AAC re-quantize transients and routinely overshoot the
+4×-oversampled true peak by 0.5-1.5 dB. `master_health.py` includes an
+**8×-oversampled codec-ISP estimate** as a conservative proxy: if your master
+sits at -1.0 dBTP measured at 4× but the 8× value is -0.3 dBTP, expect the
+encoded version to occasionally clip.
+
+### Punch index
+
+Mastering must preserve transient punch. The punch index in
+`master_health.py` is `percentile_90(short-window RMS) / mean(long-window
+RMS)` in dB — how far the transient peaks pop above the sustained bed:
+
+| Punch index | Material character |
+|---|---|
+| < 2 dB | Squashed — transients buried in the bed. Over-limited. |
+| 2-4 dB | Low punch — borderline, may sound fatiguing. |
+| 4-7 dB | Healthy — modern rock master with intact transients. |
+| > 8 dB | Very dynamic — dynamic jazz, live recording, classical. |
+
+If a master's punch index drops below 4 dB after the chain, soften the
+clipper / limiter or move to a gentler chain preset.
+
+### Per-band phase coherence
+
+Two stereo rules that matter at the master level:
+
+1. **Sub should be near-mono.** L/R correlation below ~100 Hz should be
+   > 0.85 (ideally > 0.95). Otherwise the bass collapses on mono playback
+   (phone speakers, club PA mono fold-down).
+2. **Top can be wide, but not anti-correlated.** L/R correlation in the
+   8 kHz+ band should be > 0.2. Below that, the highs are decorrelated
+   to the point of phasiness.
+
+`master_health.py` checks both per band; failing the sub check is RED.
+
+### Compression history detection
+
+If the input mix.wav already shows signs of mastering (LRA < 4 LU, crest
+< 10 dB, or sample peak > -0.5 dBFS), `master_health.py` flags
+`likely_already_mastered: true` and warns. Applying more mastering on top
+of an already-mastered track flattens it further with no benefit.
+
+When this triggers: pull back the master_preset to `gentle` or
+`transparent`, or work from the pre-master / pre-limit version of the mix.
+
+### Reference deck
+
+A single reference can be misleading — if the reference happens to be
+extra-bright or has a specific vocal mix, the comparison drifts that way.
+Mastering engineers use **multiple references** (a "deck") and look at the
+average target spectrum. `master_health.py --reference ref1.wav ref2.wav
+ref3.wav` averages all references' 1/3-octave PSDs and reports region-level
+deltas against your master. 3-5 references is the typical deck size.
+
+---
+
 ## Master Bus Chain Order
 
 Processing order matters:

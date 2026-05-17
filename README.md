@@ -88,8 +88,20 @@ compare_reference    -- spectral + LUFS comparison against a reference track,
                         optional --apply for auto inverse-delta EQ chain
 render_mix           -- sum to stereo, bus routing, master chain
                         (master.clipper / master.ms / parallel_sat — all guarded)
-mix_health           -- green/yellow/red scorecard. Run after every render.
-                        REQUIRED to declare a mix delivery-ready.
+mix_health           -- green/yellow/red scorecard. REQUIRED before mastering.
+
+  ── mix phase ends here ── master phase begins ──
+
+master_mix           -- stereo mix → mastered.wav per delivery format.
+                        7 format presets (spotify -14, apple -16, youtube,
+                        tidal, cd 16-bit, vinyl_pre, broadcast -23) and 5
+                        chain presets (gentle, modern_rock, pop, hip_hop,
+                        transparent). --all-formats batch mode.
+master_health        -- master scorecard: format conformance (LUFS, true
+                        peak, 8x codec-ISP estimate), per-band phase
+                        coherence (sub mono check, top wide), M/S width
+                        profile, punch index, compression-history detect,
+                        reference-deck comparison. REQUIRED per format.
 ```
 
 All tools are standalone CLI scripts — run them in any order, re-run individual steps,

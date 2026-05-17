@@ -6,6 +6,17 @@ worth doing. Ordered by how readily it fits the existing architecture.
 
 ---
 
+## Completed since this file was created
+
+These items used to live here and have been shipped:
+
+- ~~Dedicated mastering tools (master_mix + master_health, multi-format
+  delivery)~~ — done (commit batch after f2eea7a). Pipeline is now
+  end-to-end mix → master with format presets for Spotify, Apple,
+  YouTube, Tidal, CD, vinyl pre-master, and broadcast.
+
+---
+
 ## 1. Volume / clip automation
 
 **What.** Per-track time-based gain envelope. Linear interpolation between
@@ -128,7 +139,43 @@ crossfading.
 
 ---
 
-## 6. Spatial / Dolby Atmos output
+## 6. Advanced mastering features
+
+**What.** Extensions to the existing `master_mix.py` / `master_health.py`:
+
+- **True codec roundtrip**: encode → decode → measure (ffmpeg-backed Ogg
+  Vorbis, AAC, MP3) instead of the 8×-oversampling proxy. Exact post-codec
+  true peak rather than a conservative estimate.
+- **ISRC / metadata embed**: write ISRC code, artist, album, track title,
+  ISWC into the WAV / FLAC headers. Required for distributors (DistroKid,
+  Tunecore, CD Baby).
+- **DDP image export** for CD plant delivery (track marks, PQ codes, EAN).
+- **Vinyl-specific master**: dedicated cutter pre-master with elliptical
+  EQ in the low end (sum mono below 200 Hz to prevent groove jumps),
+  RIAA pre-emphasis option, side-A / side-B time limits.
+- **Stem mastering**: instead of one master, output vocal-up, vocal-down,
+  instrumental, TV mix variants from the same chain.
+
+**Why.** These cover the "professional delivery" tail of the mastering
+workflow that the current tools don't reach. The current pipeline ships a
+master_<format>.wav that's accurate against streaming platforms; commercial
+delivery often needs more.
+
+**Scope.** ffmpeg dependency for true codec roundtrip (~80 lines plus
+subprocess plumbing). ISRC / metadata via the `mutagen` library
+(~50 lines). DDP image is genuinely complex (~400 lines, custom
+binary format). Vinyl pre-master can layer on existing chain
+(~100 lines). Stem mastering is straightforward if you already have
+the stems separately (~120 lines).
+
+**Triggers.** Worth doing when:
+- A commercial release is being prepared
+- A specific delivery target needs metadata or DDP
+- A vinyl cut is on the schedule
+
+---
+
+## 7. Spatial / Dolby Atmos output
 
 **What.** Object-based render path. `render_mix --atmos` produces an ADM BWF
 file with bed channels + objects (per-track positional metadata). Optionally

@@ -49,7 +49,9 @@ python3 tools/<script>.py
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 dBFS before comparison. Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
 | `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. | `output/<session> --generate-config` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
-| `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last — it tells you if the mix is ready or what still needs work.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
+| `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
+| `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Independent chain (EQ → glue comp → harmonic exciter → clipper → LUFS norm → ISP-aware limiter → optional dither). 7 format delivery presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 5 mastering chain presets (gentle, modern_rock, pop, hip_hop, transparent). `--all-formats` produces all delivery variants from one input. Output: `master_<format>.wav` + report JSON. | `mix.wav --output-dir <session>/masters [--format spotify\|apple\|...] [--all-formats] [--master-preset modern_rock\|...] [--target-lufs N] [--tp-ceiling N]` |
+| `tools/master_health.py` | Master-level scorecard, complementary to mix_health. Checks: format conformance (LUFS / TP / codec-ISP estimate), per-band phase coherence (sub-mono / top-wide), per-band M/S width profile, punch index (transient peak vs sustained bed), compression-history detection (was input already mastered?), optional reference-deck comparison (multi-reference averaged). Outputs master_health_<format>.{json,txt}. **Required after every master_mix step.** | `master.wav --output-dir DIR --format spotify [--reference ref1.wav ref2.wav ...]` |
 
 ### Make-it-hit tools — DATA-GATED, NOT DEFAULT
 
@@ -159,8 +161,12 @@ Master processing order: sum buses → glue comp → EQ → LUFS norm → true p
 
 ## Workflow
 
+The full pipeline is two phases — MIX, then MASTER. Each phase ends with a
+required scorecard (mix_health, master_health). The master phase only starts
+when mix_health is green or 1-yellow.
+
 ```
-[full pipeline from DAW session — analysis triggers in <brackets>]
+[MIX PHASE — analysis triggers in <brackets>]
 parse_session
   -> apply_gain --per-clip
      <analyze each new assembled.wav>                                       [Required]
@@ -176,14 +182,26 @@ parse_session
   -> (make-it-hit, only if data justifies it: subharm / haas / exciter
       / multiband / clipper / parallel_sat / M/S — see decision rules)
      <analyze after each — verify metric + pumping>                         [Required]
-  -> render_mix
+  -> render_mix                                              -> mix.wav
      <mix_health.py output/<session> [--reference ref.wav]>                 [Required]
      <if not green: address issues, re-render, re-run mix_health>           [Required loop]
 
-[render_mix steps]
+[MASTER PHASE — runs on mix.wav after mix_health passed]
+  -> master_mix mix.wav --format <preset>   OR   --all-formats
+     <master_health.py master_<fmt>.wav --format <fmt> [--reference deck...]>  [Required per format]
+     <if not green: tweak --master-preset or chain settings, re-master>        [Required loop]
+  -> delivery: ship master_<format>.wav files
+
+[mix render commands]
 1. render_mix output/<session> --generate-config  -> edit mix_config.json
 2. render_mix mix_config.json --render            -> mix.wav
 3. mix_health.py output/<session>                 -> scorecard (REQUIRED)
+
+[master commands]
+4. master_mix mix.wav --output-dir output/<session>/masters --all-formats
+                                                  -> master_<format>.wav per format
+5. master_health.py master_<fmt>.wav --format <fmt> --output-dir DIR
+                                                  -> scorecard per format (REQUIRED)
 ```
 
 **Gain staging logic:**
@@ -291,6 +309,9 @@ anything else; "optional" means run it if there's a specific question to answer.
 | Output from a make-it-hit tool just landed (`apply_subharm`, `apply_haas`, `apply_exciter`, `apply_multiband_comp`, or a render with `master.clipper` / `master.ms` / `buses.*.parallel_saturation`) | **Required, double check** | `analyze.py` on the output **AND** verify the tool's own `relevance_check` result | (a) targeted metric moved in the intended direction, (b) `pumping.pumping_detected` is still false, (c) `relevance_check.recommend_skip` was honoured |
 | `render_mix --render` finished (mix.wav written) | **Required** | `mix_health.py output/<session> [--reference ref.wav if user gave one]` | Green/yellow/red verdict across LUFS, true peak, LRA, M/S width, mono compat, tonal balance, masking, stem pumping |
 | `mix_health` returned yellow or red verdicts | **Required loop** | Address each non-green item, re-render, re-run `mix_health.py` | Same — until green or "1 yellow max" |
+| `mix_health` passed (green or 1-yellow) — moving from mix to master | **Required transition** | `master_mix mix.wav --output-dir output/<session>/masters --format <preset>` (or `--all-formats`) | Mastering pass per delivery target |
+| `master_mix` finished (per format) | **Required** | `master_health.py master_<fmt>.wav --format <fmt>` | format conformance + phase + punch + compression history per delivery |
+| `master_health` returned yellow or red | **Required loop** | Tweak `--master-preset` or chain params, re-run `master_mix`, re-run `master_health` | Same — until green or "1 yellow max" |
 | Between processing stages (eq → comp → fx), want to see if masking improved | Optional | `detect_masking.py output/<session> --stage <stage>` | Compare critical/high counts to the earlier run |
 | After rendering, want to compare against reference for master EQ tweaks | Optional | `compare_reference.py reference mixes/mix.wav --output-dir output/<session>/analysis [--apply ...]` | Spectral delta in the rendered mix — feeds master EQ |
 | Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
@@ -470,4 +491,6 @@ Stacking all three creates fatigue, not punch.
 - If a result looks wrong (clipping, unexpected LUFS), stop and diagnose before continuing.
 - Keep `docs/knowledge.md` updated when new domain knowledge is found.
 - **Every `render_mix --render` MUST be followed by `mix_health.py`.** No exceptions. If `mix_health` returns any RED verdict, fix it and re-render; if it returns more than 1 YELLOW, address them. Only declare the mix "done" when `mix_health` shows all green (or at most 1 yellow with a reasoned justification).
+- **The mix phase MUST gate the master phase.** Don't start `master_mix` until `mix_health` is green or 1-yellow. Mastering a broken mix wastes work and hides problems under a louder ceiling.
+- **Every `master_mix` output (per format) MUST be followed by `master_health.py`** with the same `--format` flag, to verify the delivery target was actually hit. RED on conformance (LUFS or true peak miss) means re-master, not "ship anyway".
 - Follow the **"Analysis tool decision tree — when to run what"** section above as obligations, not suggestions. Skipping a required analysis trigger means you are guessing — and guessing wrong is more expensive than running a 30-second analysis.
