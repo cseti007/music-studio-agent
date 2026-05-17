@@ -63,23 +63,39 @@ stems (WAV files)
     v
 parse_session        -- parse DAW session (.ptx / .als) into session.json
 apply_gain --per-clip -- normalize clips + assemble full-length stems
-analyze              -- LUFS, transients, spectrum, stereo, hum detection
-align_phase          -- phase-align drum mics to kick reference
+analyze              -- LUFS, transients, spectrum, stereo, hum, pumping,
+                        per-band crest, true peak (4x oversampled)
+detect_masking       -- find frequency conflicts between stems (time-gated)
+align_phase          -- phase-align drum mics to kick reference (sub-sample)
 apply_eq             -- notch hum, carve frequencies, instrument presets
+                        (minimum-phase by default, zero-phase for mastering)
 apply_compression    -- dynamics control, parallel + sidechain options
 apply_gate           -- drum bleed control
 apply_transient      -- attack/sustain shaping for percussive stems
 apply_amp            -- tube amp + cabinet sim for bass DI
 apply_saturation     -- tape/tube/clipper harmonic saturation
-apply_reverb         -- algorithmic reverb (insert or send)
+apply_reverb         -- algorithmic (Freeverb) OR convolution (--ir <IR.wav>)
 apply_delay          -- slapback, echo, ping-pong
-detect_masking       -- find frequency conflicts between stems
+
+make-it-hit tools    -- guarded by data-driven relevance_check (won't fire
+                        if the input doesn't justify the trade-off):
+  apply_subharm      -- sub-bass harmonic synthesizer (small-speaker translation)
+  apply_haas         -- Haas stereo widener (mono mic-pair detection)
+  apply_exciter      -- HF harmonic generator (Aphex-style, refuses on bass/kick)
+  apply_multiband_comp -- 3-band Linkwitz-Riley split + per-band compressor
+
+compare_reference    -- spectral + LUFS comparison against a reference track,
+                        optional --apply for auto inverse-delta EQ chain
 render_mix           -- sum to stereo, bus routing, master chain
-compare_reference    -- spectral + LUFS comparison against a reference track
+                        (master.clipper / master.ms / parallel_sat — all guarded)
+mix_health           -- green/yellow/red scorecard. Run after every render.
+                        REQUIRED to declare a mix delivery-ready.
 ```
 
 All tools are standalone CLI scripts — run them in any order, re-run individual steps,
-or skip stages that are not needed for your session.
+or skip stages that are not needed for your session. Make-it-hit tools are
+gated by `relevance_check`: each one analyses its input first and refuses
+to write audio when the input data doesn't justify the processing.
 
 ---
 
@@ -87,10 +103,27 @@ or skip stages that are not needed for your session.
 
 ```
 tools/               CLI processing tools (one file per processor)
-docs/knowledge.md    Domain knowledge base (LUFS targets, instrument guidelines)
+docs/knowledge.md    Domain knowledge base (LUFS targets, instrument guidelines,
+                     make-it-hit philosophy, pumping disambiguation)
+tests/               Smoke tests (pytest) for DSP + relevance-check logic
 config.toml          Pipeline configuration (LUFS targets, alignment settings)
 CLAUDE.md            Agent system prompt (auto-loaded by Claude Code; paste manually for other LLMs)
 output/              Generated during a session (excluded from git)
+BACKLOG.md           Deferred feature ideas
+CHANGELOG.md         Project history
+```
+
+---
+
+## Tests
+
+A minimal pytest suite covers the load-bearing DSP and relevance-check logic.
+Run before committing changes that touch tools/:
+
+```bash
+conda run -n music-mix-agent pytest tests/ -v
+# or with venv:
+pytest tests/ -v
 ```
 
 ---

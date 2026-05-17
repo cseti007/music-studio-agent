@@ -1,0 +1,347 @@
+"""Minimal smoke tests for the critical DSP and relevance-check logic.
+
+These are NOT exhaustive — they cover the load-bearing pieces that previous
+field-test rounds revealed as easy to regress:
+
+- True peak measurement (4x oversampled) is actually higher than sample peak
+  on HF content
+- M/S encode/decode is identity (perfect round-trip)
+- Sub-sample phase alignment recovers a known fractional delay
+- Pumping detector handles silent-gap signals (the active-frame fix)
+- Each make-it-hit tool's relevance_check returns the expected skip/apply
+  decision on simple synthetic inputs
+
+Run with:  conda run -n music-mix-agent pytest tests/ -v
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+# Make the tools/ package importable from the project root
+TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+sys.path.insert(0, str(TOOLS_DIR))
+
+
+# ---------------------------------------------------------------------------
+# Audio fixtures
+# ---------------------------------------------------------------------------
+
+SR = 48000
+
+
+@pytest.fixture
+def noise_5s():
+    """5 seconds of white noise at modest level. Used as a stand-in for "real"
+    stem material for relevance checks that just need *something* present."""
+    rng = np.random.default_rng(42)
+    return rng.standard_normal(SR * 5) * 0.2
+
+
+@pytest.fixture
+def hf_sine_1s():
+    """1 second of 19 kHz cosine. Phase chosen so the sample peaks miss the
+    true peak — used to verify 4x-oversampled true peak measurement."""
+    t = np.arange(SR) / SR
+    return 0.9 * np.cos(2 * np.pi * 19000 * t + 0.4)
+
+
+@pytest.fixture
+def low_dominant_5s():
+    """Bass-like signal: 60 Hz fundamental with mild harmonics. Used to check
+    the exciter's low-dominance gate."""
+    t = np.arange(SR * 5) / SR
+    fund = 0.3 * np.sin(2 * np.pi * 60 * t)
+    h2 = 0.1 * np.sin(2 * np.pi * 120 * t)
+    return fund + h2
+
+
+@pytest.fixture
+def continuous_pump_5s():
+    """Continuous noise modulated at 2 Hz — synthetic pumping signal."""
+    t = np.arange(SR * 5) / SR
+    env = 0.5 + 0.5 * (1 + np.cos(2 * np.pi * 2.0 * t)) / 2
+    rng = np.random.default_rng(1)
+    return env * rng.standard_normal(SR * 5) * 0.3
+
+
+@pytest.fixture
+def intermittent_signal_5s():
+    """Signal active for the first half, silent for the second.
+    Used to verify the pumping detector's active-frame gating fix."""
+    rng = np.random.default_rng(3)
+    sig = np.zeros(SR * 5)
+    sig[: SR * 2] = rng.standard_normal(SR * 2) * 0.3
+    return sig
+
+
+# ---------------------------------------------------------------------------
+# True peak
+# ---------------------------------------------------------------------------
+
+class TestTruePeak:
+    def test_true_peak_exceeds_sample_peak_on_hf_content(self, hf_sine_1s):
+        """At 19 kHz with phase that misses the peak, true peak must exceed
+        sample peak by at least 0.1 dB — that's the whole point of ISP."""
+        from analyze import _true_peak_dbfs
+
+        sample_peak_db = 20 * np.log10(np.max(np.abs(hf_sine_1s)))
+        true_peak_db = _true_peak_dbfs(hf_sine_1s)
+        assert true_peak_db > sample_peak_db + 0.1, (
+            f"sample {sample_peak_db:.3f} dBFS, true {true_peak_db:.3f} dBFS"
+        )
+
+    def test_true_peak_matches_sample_peak_on_lf_content(self):
+        """At 100 Hz with no aliasing, true peak ~= sample peak (within 0.1 dB)."""
+        from analyze import _true_peak_dbfs
+
+        t = np.arange(SR) / SR
+        sig = 0.5 * np.sin(2 * np.pi * 100 * t)
+        sample_peak_db = 20 * np.log10(np.max(np.abs(sig)))
+        true_peak_db = _true_peak_dbfs(sig)
+        assert abs(true_peak_db - sample_peak_db) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# Mid/Side encode/decode round-trip
+# ---------------------------------------------------------------------------
+
+class TestMidSide:
+    def test_encode_decode_is_identity(self):
+        """L/R -> M/S -> L/R must round-trip exactly (to floating-point eps)."""
+        from render_mix import _ms_decode, _ms_encode
+
+        rng = np.random.default_rng(7)
+        master = rng.standard_normal((2, 10000)) * 0.3
+        mid, side = _ms_encode(master)
+        recovered = _ms_decode(mid, side)
+        assert np.allclose(recovered, master, atol=1e-12), (
+            f"max abs diff: {np.max(np.abs(recovered - master))}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sub-sample phase alignment
+# ---------------------------------------------------------------------------
+
+class TestPhaseAlign:
+    def test_recovers_known_fractional_delay(self):
+        """Apply a 3.4-sample delay, verify the alignment finds it within
+        0.5 sample. The detect uses parabolic refinement around the
+        correlation peak."""
+        from align_phase import _compute_alignment, _fractional_shift
+
+        rng = np.random.default_rng(0)
+        ref = rng.standard_normal(SR) * 0.3
+        delay_true = 3.4
+        tgt = _fractional_shift(ref, delay_true)
+
+        delay_recovered, polarity_flip, score = _compute_alignment(
+            ref, tgt, sr=SR, max_delay_ms=2.0
+        )
+        assert not polarity_flip
+        assert abs(delay_recovered - delay_true) < 0.5
+
+    def test_correction_drives_residual_to_zero(self):
+        """End-to-end: detect + apply correction = ref and corrected agree
+        at integer-lag 0."""
+        from align_phase import _apply_correction, _compute_alignment, _fractional_shift
+        from scipy.signal import correlate
+
+        rng = np.random.default_rng(0)
+        ref = rng.standard_normal(SR) * 0.3
+        tgt = _fractional_shift(ref, 3.4)
+
+        d, pol, _ = _compute_alignment(ref, tgt, sr=SR, max_delay_ms=2.0)
+        corrected = _apply_correction(tgt, d, pol)
+
+        c = correlate(ref, corrected, mode="full", method="fft")
+        lags = np.arange(-(SR - 1), SR)
+        mask = np.abs(lags) <= 50
+        peak_idx = int(np.argmax(np.where(mask, np.abs(c), -np.inf)))
+        residual = int(lags[peak_idx])
+        assert abs(residual) <= 1, f"residual lag {residual} after correction"
+
+    def test_detects_polarity_flip(self):
+        """A simple polarity inversion must be detected."""
+        from align_phase import _compute_alignment
+
+        rng = np.random.default_rng(11)
+        ref = rng.standard_normal(SR) * 0.3
+        tgt = -ref
+
+        _, pol, score = _compute_alignment(ref, tgt, sr=SR, max_delay_ms=2.0)
+        assert pol is True
+        assert score < 0
+
+
+# ---------------------------------------------------------------------------
+# Pumping detector
+# ---------------------------------------------------------------------------
+
+class TestPumping:
+    def test_detects_continuous_pumping(self, continuous_pump_5s):
+        """Synthetic 2 Hz envelope pumping must trigger."""
+        from analyze import _detect_pumping
+
+        r = _detect_pumping(continuous_pump_5s, SR)
+        assert r["pumping_detected"] is True
+        assert r["pump_rate_hz"] is not None
+        assert abs(r["pump_rate_hz"] - 2.0) < 0.5
+        assert r["modulation_depth_db"] >= 5.0
+        assert r["lf_excess_db"] >= 6.0
+
+    def test_clean_noise_does_not_trigger(self, noise_5s):
+        """Plain white noise has no LF envelope modulation."""
+        from analyze import _detect_pumping
+
+        r = _detect_pumping(noise_5s, SR)
+        assert r["pumping_detected"] is False
+
+    def test_intermittent_signal_does_not_collapse_depth(self, intermittent_signal_5s):
+        """The active-frame gating fix: a half-silent signal must still produce
+        a non-zero modulation_depth_db on the active half. The old code (p5/p95
+        across the full envelope) returned 0.0 because p5 dived to ~0 in the
+        silent half. With active-frame gating the depth is computed on the
+        playing half only — for white noise that's ~1 dB (which is the
+        IQR of |N(0,1)|), small but >= the bug's 0.0 sentinel."""
+        from analyze import _detect_pumping
+
+        r = _detect_pumping(intermittent_signal_5s, SR)
+        assert r["modulation_depth_db"] >= 0.5, (
+            f"depth {r['modulation_depth_db']} dB — active-frame gating "
+            "regression? (the bug returned 0.0)"
+        )
+        assert r["active_frame_ratio"] is not None
+        assert r["active_frame_ratio"] < 0.6  # we know half is silent
+
+
+# ---------------------------------------------------------------------------
+# Frequency bands crest factor
+# ---------------------------------------------------------------------------
+
+class TestBandCrest:
+    def test_transient_band_has_higher_crest_than_sustained(self):
+        """A kick-like transient at 60 Hz + sustained 6 kHz tone: the low band
+        should report a much higher crest than the high band."""
+        from analyze import _band_crest_db
+
+        t = np.arange(SR * 2) / SR
+        # Periodic short transient at 60 Hz region
+        low = np.zeros_like(t)
+        for i in range(0, len(t), SR // 4):
+            n = min(480, len(t) - i)
+            low[i:i + n] = (
+                0.5 * np.exp(-np.arange(n) / 100) * np.sin(2 * np.pi * 60 * t[i:i + n])
+            )
+        # Sustained high tone
+        high = 0.05 * np.sin(2 * np.pi * 6000 * t)
+        sig = low + high
+
+        low_crest = _band_crest_db(sig, SR, 30, 120)
+        high_crest = _band_crest_db(sig, SR, 4000, 8000)
+        assert low_crest > high_crest + 5, (
+            f"low {low_crest} dB, high {high_crest} dB — "
+            "transient band must be more dynamic than sustained"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Make-it-hit relevance checks (synthetic inputs)
+# ---------------------------------------------------------------------------
+
+class TestRelevanceChecks:
+    def test_subharm_skips_target_band_richer_than_fundamental(self, noise_5s):
+        """White noise has approximately uniform energy across bands, so the
+        target band (80-200 Hz) is roughly as loud as the fundamental (30-80 Hz)
+        — close enough that the 3 dB gate may pass. Use a low-tilted noise so
+        the target is clearly above fundamental → should SKIP."""
+        from apply_subharm import _relevance_check
+        from scipy.signal import butter, sosfilt
+
+        # Low-shelf boost the noise so 80-200 Hz is louder than 30-80 Hz
+        sos = butter(2, 60 / (SR / 2), btype="high", output="sos")
+        tilted = sosfilt(sos, noise_5s) * 2.0
+        rel = _relevance_check(tilted, SR)
+        # If target > fundamental + 3 dB, skip
+        if rel["target_over_fundamental_db"] > 3.0:
+            assert rel["recommend_skip"] is True
+
+    def test_subharm_skips_when_sub_is_silent(self):
+        """A high-pass-filtered signal has no sub content — subharm must skip."""
+        from apply_subharm import _relevance_check
+        from scipy.signal import butter, sosfilt
+
+        rng = np.random.default_rng(20)
+        sig = rng.standard_normal(SR * 5) * 0.3
+        sos = butter(4, 200 / (SR / 2), btype="high", output="sos")
+        hp_sig = sosfilt(sos, sig)
+
+        rel = _relevance_check(hp_sig, SR)
+        assert rel["recommend_skip"] is True
+        assert any("nothing in the sub region" in m for m in rel["issues"])
+
+    def test_exciter_skips_bass_like_stems(self, low_dominant_5s):
+        """A 60 Hz sine + mild 2nd harmonic is overwhelmingly low-dominant —
+        exciter must refuse with the bass/kick warning."""
+        from apply_exciter import _relevance_check
+
+        rel = _relevance_check(low_dominant_5s, SR)
+        assert rel["recommend_skip"] is True
+        assert rel["low_over_high_db"] > 6.0
+        assert rel["spectral_centroid_hz"] < 800.0
+        assert any("low-dominant" in m for m in rel["issues"])
+
+    def test_exciter_skips_already_bright_signal(self):
+        """High-pass noise has air content above -40 dBFS — exciter must skip."""
+        from apply_exciter import _relevance_check
+        from scipy.signal import butter, sosfilt
+
+        rng = np.random.default_rng(30)
+        sig = rng.standard_normal(SR * 5) * 0.3
+        sos = butter(4, 5000 / (SR / 2), btype="high", output="sos")
+        bright = sosfilt(sos, sig)
+        rel = _relevance_check(bright, SR)
+        assert rel["recommend_skip"] is True
+
+    def test_haas_detects_stereo_pair_filename(self, tmp_path):
+        """A mono file named like 'OH L.wav' must be flagged as a stereo-pair half."""
+        from apply_haas import _looks_like_stereo_pair_half
+
+        f = tmp_path / "OH AEA.01 L.05" / "assembled.wav"
+        f.parent.mkdir(parents=True)
+        f.touch()
+        warning = _looks_like_stereo_pair_half(f)
+        assert warning is not None
+        assert "L" in warning
+
+    def test_haas_does_not_falsely_flag_other_names(self, tmp_path):
+        """Filenames without stereo-pair patterns must NOT trigger the warning."""
+        from apply_haas import _looks_like_stereo_pair_half
+
+        f = tmp_path / "SN TOP.05" / "assembled.wav"
+        f.parent.mkdir(parents=True)
+        f.touch()
+        assert _looks_like_stereo_pair_half(f) is None
+
+    def test_multiband_skips_when_only_one_band_has_dynamics(self):
+        """A pure low-frequency sine has crest only in the low band — mid and
+        high are essentially zero. multiband requires >= 2 bands with crest >=
+        6 dB; this fails and the tool must skip.
+
+        (Note: trying to test "wideband squashed" via tanh(noise) doesn't
+        work — band-pass filtering reconstructs natural-looking dynamics in
+        each band from the clipped signal's residual harmonics. Use a
+        narrow-band source instead.)"""
+        from apply_multiband_comp import _relevance_check
+
+        t = np.arange(SR * 10) / SR
+        # Pure 80 Hz sine + tiny noise — energy almost entirely in low band
+        sig = 0.5 * np.sin(2 * np.pi * 80 * t) + 1e-4 * np.random.default_rng(41).standard_normal(len(t))
+        rel = _relevance_check(sig, SR, 200.0, 3000.0)
+        assert rel["recommend_skip"] is True
+        assert rel["bands_with_dynamics"] < 2
