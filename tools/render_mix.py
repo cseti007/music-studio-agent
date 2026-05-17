@@ -18,7 +18,7 @@ import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
 from pedalboard import Compressor, Gain, Limiter, Pedalboard, Reverb
-from scipy.signal import butter as _butter, sosfilt as _sosfilt, sosfiltfilt as _sosfiltfilt
+from scipy.signal import butter as _butter, resample_poly as _resample_poly, sosfilt as _sosfilt, sosfiltfilt as _sosfiltfilt
 
 # Optional reverb support — loaded from apply_reverb in same directory
 try:
@@ -378,6 +378,19 @@ def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
     return out
 
 
+def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
+    """4x-oversampled true peak in dBFS for a (2, N) stereo buffer.
+
+    pedalboard.Limiter only constrains the sample peak; inter-sample peaks
+    can still exceed the ceiling after codec encoding (Spotify Ogg/Vorbis,
+    Apple AAC). This second-pass measurement reveals them.
+    """
+    up_l = _resample_poly(master[0], oversample, 1)
+    up_r = _resample_poly(master[1], oversample, 1)
+    tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
+    return 20.0 * np.log10(max(tp, 1e-12))
+
+
 def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
     """Apply EQ filter chain to master bus. master: (2, N). Zero-phase (sosfiltfilt)."""
     if not _HAS_EQ:
@@ -563,13 +576,27 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         master *= 10.0 ** (gain_db / 20.0)
         print(f"  Applied gain: {gain_db:+.1f} dB")
 
-    # True peak limiting
+    # True peak limiting: pedalboard.Limiter handles sample peak; we then
+    # measure ISP at 4x oversampling and scale down if the codec-relevant
+    # true peak still exceeds the ceiling.
     tp_limit = master_cfg.get("true_peak_dbfs", -2.0)
     board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
     master = board(master.astype(np.float32), sr).astype(np.float64)
 
-    peak_final = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
-    print(f"  Peak after limiter: {peak_final:.1f} dBFS")
+    sample_peak_after = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+    tp_measured = _measure_true_peak_dbfs(master)
+    if tp_measured > tp_limit:
+        isp_scale_db = tp_limit - tp_measured
+        master *= 10.0 ** (isp_scale_db / 20.0)
+        tp_final = tp_limit
+        print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
+              f"true {tp_measured:.2f} dBTP -> {tp_final:.2f} dBTP "
+              f"(ISP correction {isp_scale_db:+.2f} dB)")
+    else:
+        tp_final = tp_measured
+        print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
+              f"true {tp_final:.2f} dBTP")
+    peak_final = tp_final
 
     # Write output
     if output_wav is None:
@@ -590,7 +617,8 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         "lufs_target": target_lufs,
         "true_peak_limit_dbfs": tp_limit,
         "integrated_lufs": round(loudness, 2) if np.isfinite(loudness) else None,
-        "peak_dbfs": round(peak_final, 2),
+        "true_peak_dbtp": round(peak_final, 2),
+        "sample_peak_dbfs": round(sample_peak_after, 2),
         "duration_s": round(max_length / sr, 3),
     }
     report_path = output_wav.with_name(output_wav.stem + "_report.json")

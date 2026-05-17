@@ -68,13 +68,35 @@ def _find_active_segment(signal: np.ndarray, sr: int, duration_sec: float, thres
     return signal[:end], 0
 
 
+def _parabolic_refine(corr_abs: np.ndarray, peak_idx: int) -> float:
+    """Sub-sample peak offset from a 3-point parabolic fit around peak_idx.
+
+    Given the discrete cross-correlation magnitudes y0, y1, y2 at three
+    consecutive lags (peak_idx-1, peak_idx, peak_idx+1), fits a parabola and
+    returns the offset (-0.5..+0.5) of the true continuous peak from peak_idx.
+
+    Returns 0.0 if peak is at the edge or the fit is degenerate.
+    """
+    if peak_idx <= 0 or peak_idx >= len(corr_abs) - 1:
+        return 0.0
+    y0 = float(corr_abs[peak_idx - 1])
+    y1 = float(corr_abs[peak_idx])
+    y2 = float(corr_abs[peak_idx + 1])
+    denom = y0 - 2.0 * y1 + y2
+    if abs(denom) < 1e-12:
+        return 0.0
+    offset = (y0 - y2) / (2.0 * denom)
+    # Clamp — a value outside ±0.5 means we picked the wrong peak bin
+    return float(np.clip(offset, -0.5, 0.5))
+
+
 def _compute_alignment(
     ref: np.ndarray,
     tgt: np.ndarray,
     sr: int,
     max_delay_ms: float,
-) -> tuple[int, bool, float]:
-    """Compute sample delay and polarity between ref and tgt.
+) -> tuple[float, bool, float]:
+    """Compute sub-sample delay and polarity between ref and tgt.
 
     Returns (delay_samples, polarity_flip, correlation_score).
 
@@ -82,6 +104,10 @@ def _compute_alignment(
     delay_samples < 0: tgt arrived BEFORE ref → shift tgt later
     polarity_flip: True if signals are inverted relative to each other
     correlation_score: normalised peak correlation [-1, 1]
+
+    Note: scipy.signal.correlate(ref, tgt) peaks at lag = -delay when tgt is
+    late relative to ref, so we negate the lag to expose the human-friendly
+    convention (positive = tgt later).
     """
     max_samples = int(max_delay_ms * sr / 1000.0)
 
@@ -94,34 +120,66 @@ def _compute_alignment(
 
     # restrict search window
     mask = np.abs(lags) <= max_samples
-    restricted = np.where(mask, np.abs(corr), -np.inf)
+    corr_abs = np.abs(corr)
+    restricted = np.where(mask, corr_abs, -np.inf)
     peak_idx = int(np.argmax(restricted))
 
-    delay_samples = int(lags[peak_idx])
+    # Sub-sample refinement via parabolic interpolation around the peak
+    sub_offset = _parabolic_refine(corr_abs, peak_idx)
+
+    # Negate so delay > 0 means tgt is later than ref (matches docstring).
+    delay_samples = -(float(lags[peak_idx]) + sub_offset)
     polarity_flip = bool(corr[peak_idx] < 0)
     correlation_score = float(corr[peak_idx] / max(n, 1))
 
     return delay_samples, polarity_flip, correlation_score
 
 
-def _apply_correction(signal: np.ndarray, delay_samples: int, polarity_flip: bool) -> np.ndarray:
-    """Apply integer-sample delay correction and optional polarity flip."""
-    out = -signal.copy() if polarity_flip else signal.copy()
-
-    if delay_samples == 0:
-        return out
-
-    result = np.zeros_like(out)
-    if delay_samples > 0:
-        # tgt is late → shift left (advance)
-        d = min(delay_samples, len(out))
-        result[: len(out) - d] = out[d:]
+def _integer_shift(signal: np.ndarray, samples: int) -> np.ndarray:
+    """Shift by integer samples. Positive = delay (later), negative = advance (earlier)."""
+    if samples == 0:
+        return signal.copy()
+    result = np.zeros_like(signal)
+    if samples > 0:
+        d = min(samples, len(signal))
+        result[d:] = signal[: len(signal) - d]
     else:
-        # tgt is early → shift right (delay)
-        d = min(-delay_samples, len(out))
-        result[d:] = out[: len(out) - d]
-
+        d = min(-samples, len(signal))
+        result[: len(signal) - d] = signal[d:]
     return result
+
+
+def _fractional_shift(signal: np.ndarray, samples: float, n_taps: int = 31) -> np.ndarray:
+    """Shift `signal` by `samples` (can be non-integer) using a windowed-sinc FIR.
+
+    Positive `samples` = delay (later); negative = advance (earlier).
+    Integer part is handled by an integer shift; the fractional part is
+    realised by a Hann-windowed sinc impulse of length n_taps.
+    """
+    int_part = int(np.floor(samples))
+    frac = float(samples - int_part)
+    if abs(frac) < 1e-6:
+        return _integer_shift(signal, int_part)
+
+    # Windowed-sinc fractional delay FIR. sinc(k - frac) shifts by `frac` samples.
+    k = np.arange(-(n_taps // 2), n_taps // 2 + 1)
+    h = np.sinc(k - frac) * np.hanning(n_taps)
+    h /= h.sum()
+    filtered = np.convolve(signal, h, mode="same")
+    return _integer_shift(filtered, int_part)
+
+
+def _apply_correction(signal: np.ndarray, delay_samples: float, polarity_flip: bool) -> np.ndarray:
+    """Apply sub-sample delay correction and optional polarity flip.
+
+    `delay_samples > 0` means tgt is late vs ref → we advance tgt by that much
+    (shift earlier in time), i.e. apply a negative-direction shift.
+    """
+    out = -signal.copy() if polarity_flip else signal.copy()
+    if abs(delay_samples) < 1e-9:
+        return out
+    # _fractional_shift convention: positive samples = delay; we want to advance.
+    return _fractional_shift(out, -delay_samples)
 
 
 def align_phase(
@@ -189,8 +247,9 @@ def align_phase(
         "reference": str(reference_path),
         "target": str(target_path),
         "output": str(out_path),
-        "delay_samples": delay_samples,
+        "delay_samples": round(delay_samples, 3),
         "delay_ms": delay_ms,
+        "subsample_alignment": True,
         "polarity_flip": polarity_flip,
         "correlation_score": round(correlation_score, 4),
         "segment_sec_used": round(seg_len / ref_sr, 2),

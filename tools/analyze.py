@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import butter, sosfilt, welch
+from scipy.signal import butter, resample_poly, sosfilt, welch
 
 _CONFIG_PATH = Path("config.toml")
 _FALLBACK_TARGET_LUFS = -18.0
@@ -35,6 +35,17 @@ DEFAULT_TARGET_LUFS = _config_target_lufs()
 def _rms_db(signal: np.ndarray) -> float:
     rms = np.sqrt(np.mean(signal ** 2))
     return float(20 * np.log10(max(rms, 1e-10)))
+
+
+def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
+    """ITU-R BS.1770-4 style true peak via polyphase upsampling.
+
+    Inter-sample peaks emerge after DAC reconstruction or codec encoding
+    (Ogg Vorbis, AAC). Oversampling reveals them before they cause clipping.
+    """
+    up = resample_poly(signal, oversample, 1)
+    peak = float(np.max(np.abs(up)))
+    return float(20 * np.log10(max(peak, 1e-10)))
 
 
 def _band_rms_db(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> float:
@@ -481,7 +492,8 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
     except Exception:
         integrated_lufs = -120.0
     lra = _lra(lufs_input, sr, meter)
-    true_peak = float(20 * np.log10(max(np.max(np.abs(mono)), 1e-10)))
+    sample_peak = float(20 * np.log10(max(np.max(np.abs(mono)), 1e-10)))
+    true_peak = _true_peak_dbfs(mono)
     crest_factor = _crest_factor_db(mono)
     noise_floor = round(_noise_floor_db(mono, sr), 1)
     dynamic_range = round(_dynamic_range_db(mono, sr), 1)
@@ -523,6 +535,7 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
             "integrated_lufs": round(integrated_lufs, 1),
             "loudness_range_lu": lra,
             "true_peak_dbfs": round(true_peak, 1),
+            "sample_peak_dbfs": round(sample_peak, 1),
             "dynamic_range_db": dynamic_range,
             "crest_factor_db": crest_factor,
         },

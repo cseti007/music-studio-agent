@@ -133,7 +133,40 @@ def _lufs_normalize(mono: np.ndarray, sr: int, target_lufs: float = -18.0) -> np
     return mono * gain_lin
 
 
+_ACTIVITY_FRAME_MS = 100.0
+_ACTIVITY_THRESHOLD_DB = -45.0
+
+
+def _activity_envelope(mono: np.ndarray, sr: int) -> np.ndarray:
+    """Boolean array (one per ~100ms frame): True if stem is active in that frame.
+
+    "Active" = frame RMS above _ACTIVITY_THRESHOLD_DB. Used to detect frames
+    where two stems play simultaneously — only those frames matter for masking.
+    """
+    frame_len = int(_ACTIVITY_FRAME_MS * sr / 1000.0)
+    n_frames = len(mono) // frame_len
+    if n_frames == 0:
+        return np.zeros(0, dtype=bool)
+    thresh_lin = 10.0 ** (_ACTIVITY_THRESHOLD_DB / 20.0)
+    rms = np.array([
+        np.sqrt(np.mean(mono[i * frame_len:(i + 1) * frame_len] ** 2))
+        for i in range(n_frames)
+    ])
+    return rms > thresh_lin
+
+
+def _gated_audio(mono: np.ndarray, sr: int, active: np.ndarray) -> np.ndarray:
+    """Concatenate only the active frames into a single buffer for PSD analysis."""
+    frame_len = int(_ACTIVITY_FRAME_MS * sr / 1000.0)
+    chunks = [mono[i * frame_len:(i + 1) * frame_len] for i, on in enumerate(active) if on]
+    if not chunks:
+        return np.zeros(0, dtype=np.float64)
+    return np.concatenate(chunks)
+
+
 def _third_octave_psd_db(mono: np.ndarray, sr: int) -> list[dict]:
+    if len(mono) < 1024:
+        return []
     nperseg = min(len(mono), 32768)
     freqs, psd = welch(mono, fs=sr, nperseg=nperseg, average="mean")
     psd_db = 10.0 * np.log10(psd + 1e-20)
@@ -170,12 +203,41 @@ def _severity(gap_db: float) -> str:
     return ""
 
 
+_MIN_COACTIVITY_RATIO = 0.15
+
+
+def _coactivity_ratio(env_a: np.ndarray, env_b: np.ndarray) -> float:
+    """Fraction of frames where BOTH stems are simultaneously active.
+
+    Denominator is union-of-active (Jaccard-like) so a stem that plays only in
+    the chorus while another plays only in the verse scores near 0, instead of
+    being penalised by the full-song length.
+    """
+    n = min(len(env_a), len(env_b))
+    if n == 0:
+        return 0.0
+    a = env_a[:n]
+    b = env_b[:n]
+    union = int(np.sum(a | b))
+    if union == 0:
+        return 0.0
+    intersect = int(np.sum(a & b))
+    return float(intersect / union)
+
+
 def find_masking_pairs(
     stem_bands: dict[str, list[dict]],
+    stem_activity: dict[str, np.ndarray] | None = None,
     threshold_db: float = 6.0,
     floor_db: float = -45.0,
 ) -> list[dict]:
-    """For each 1/3-octave band, find stem pairs competing within threshold_db."""
+    """For each 1/3-octave band, find stem pairs competing within threshold_db.
+
+    When stem_activity is supplied, a pair is suppressed if the two stems
+    don't co-occur in time often enough (co-activity ratio below
+    _MIN_COACTIVITY_RATIO). This kills false positives like
+    "rhythm guitar (verses) vs lead vocal (choruses)".
+    """
     # Build hz → {stem: db} index
     hz_index: dict[float, dict[str, float]] = {}
     for stem, bands in stem_bands.items():
@@ -185,6 +247,16 @@ def find_masking_pairs(
             if db < floor_db:
                 continue
             hz_index.setdefault(hz, {})[stem] = db
+
+    # Pre-compute pair co-activity once per pair
+    coactivity: dict[tuple[str, str], float] = {}
+    if stem_activity:
+        names = list(stem_activity.keys())
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                coactivity[tuple(sorted([a, b]))] = _coactivity_ratio(
+                    stem_activity[a], stem_activity[b]
+                )
 
     masking_events: list[dict] = []
     for hz in sorted(hz_index):
@@ -208,8 +280,13 @@ def find_masking_pairs(
                 pair_key = tuple(sorted([stem_a, stem_b]))
                 if pair_key in seen:
                     continue
+                # Time-gating: require the pair to actually co-occur
+                if coactivity:
+                    co = coactivity.get(pair_key, 1.0)
+                    if co < _MIN_COACTIVITY_RATIO:
+                        continue
                 seen.add(pair_key)
-                masking_events.append({
+                event = {
                     "hz": hz,
                     "severity": sev,
                     "gap_db": round(gap, 1),
@@ -217,7 +294,10 @@ def find_masking_pairs(
                         {"name": stem_a, "db": round(db_a, 1)},
                         {"name": stem_b, "db": round(db_b, 1)},
                     ],
-                })
+                }
+                if coactivity:
+                    event["coactivity"] = round(coactivity.get(pair_key, 0.0), 2)
+                masking_events.append(event)
 
     # Sort: severity first, then hz
     sev_order = {"CRITICAL": 0, "HIGH": 1, "MODERATE": 2}
@@ -288,9 +368,10 @@ def _masking_section(events: list[dict], threshold_db: float) -> str:
 
         hz_lbl = _hz_label(e["hz"])
         a, b = e["stems"][0], e["stems"][1]
+        co_lbl = f"  co={e['coactivity']:.2f}" if "coactivity" in e else ""
         lines.append(
             f"  {hz_lbl}  {a['name']} ({a['db']:+.1f} dBFS)  vs  "
-            f"{b['name']} ({b['db']:+.1f} dBFS)  [{e['gap_db']:.1f} dB gap]"
+            f"{b['name']} ({b['db']:+.1f} dBFS)  [{e['gap_db']:.1f} dB gap]{co_lbl}"
         )
 
     lines += [
@@ -332,16 +413,24 @@ def detect_masking(
 
     print(f"Analyzing {len(stems)} stems...", flush=True)
     stem_bands: dict[str, list[dict]] = {}
+    stem_activity: dict[str, np.ndarray] = {}
     stem_names = list(stems.keys())
 
     for i, (name, path) in enumerate(stems.items(), 1):
         print(f"  [{i}/{len(stems)}] {name}", flush=True)
         mono, sr = _load_mono(path)
         mono = _lufs_normalize(mono, sr, lufs_target)
-        stem_bands[name] = _third_octave_psd_db(mono, sr)
+        activity = _activity_envelope(mono, sr)
+        stem_activity[name] = activity
+        # PSD on the active portion only — silent regions don't contribute
+        gated = _gated_audio(mono, sr, activity)
+        if len(gated) > 0:
+            stem_bands[name] = _third_octave_psd_db(gated, sr)
+        else:
+            stem_bands[name] = []
 
     print("Detecting masking pairs...", flush=True)
-    events = find_masking_pairs(stem_bands, threshold_db=threshold_db)
+    events = find_masking_pairs(stem_bands, stem_activity=stem_activity, threshold_db=threshold_db)
 
     report = {
         "stems": {name: str(path) for name, path in stems.items()},

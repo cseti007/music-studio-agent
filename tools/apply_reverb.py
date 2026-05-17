@@ -1,8 +1,18 @@
 """Apply reverb to an audio stem.
 
-Algorithmic reverb (Freeverb via pedalboard) with pre-delay and HP/LP on the return.
+Two engines:
+  Algorithmic (Freeverb via pedalboard) — default, parameter-driven (room_size,
+                                          damping, etc.). Fast, characterful
+                                          for small/medium spaces and plates.
+  Convolution (--ir IR.wav)              — convolves the stem with an impulse
+                                          response. Authentic for halls,
+                                          rooms, hardware emulations.
 
-Two modes:
+Both engines share the same pre-delay, HP/LP-on-return, gate, and wet/dry
+plumbing. With --ir, the algorithmic parameters (room_size, damping, width)
+are ignored; the IR defines the tail.
+
+Two output modes:
   Insert (default): dry + wet signal mixed to output. Use for inline per-track reverb.
   Send (--send):    wet only output. Use to generate a reverb return bus that
                     render_mix.py can mix alongside the dry track.
@@ -11,17 +21,13 @@ Pre-delay keeps the direct transient clean before the reverb tail kicks in — e
 for punch on snare and drums.
 
 Usage:
-  # snare plate reverb, inline
+  # snare plate (algorithmic)
   python apply_reverb.py output/terido/SN\\ TOP/assembled_eq_comp.wav \\
       --preset snare_plate --output-dir output/terido/SN\\ TOP
 
-  # reverb return only (send style)
-  python apply_reverb.py output/terido/SN\\ TOP/assembled_eq_comp.wav \\
-      --preset snare_plate --send --output-dir output/terido/SN\\ TOP
-
-  # custom settings
-  python apply_reverb.py input.wav --pre-delay 40 --room-size 0.6 --wet 0.25 \\
-      --hp 200 --lp 8000 --output-dir DIR
+  # large hall via impulse response (convolution)
+  python apply_reverb.py input.wav --ir irs/concert_hall.wav \\
+      --pre-delay 40 --hp 200 --lp 10000 --wet 0.15 --send --output-dir DIR
 """
 
 import argparse
@@ -170,6 +176,7 @@ def apply_reverb(
     gate_release_ms: float | None = None,
     send_mode: bool = False,
     preset_name: str | None = None,
+    ir_path: Path | None = None,
 ) -> dict:
     data, sr = sf.read(str(file_path), always_2d=True)
 
@@ -189,16 +196,21 @@ def apply_reverb(
     else:
         delayed = data.copy()
 
-    # Apply reverb (wet only from pedalboard, dry handled separately)
-    board = pedalboard.Pedalboard([
-        pedalboard.Reverb(
-            room_size=room_size,
-            damping=damping,
-            wet_level=1.0,
-            dry_level=0.0,
-            width=width,
-        )
-    ])
+    # Engine: convolution if an IR is supplied, else algorithmic Freeverb.
+    if ir_path is not None:
+        board = pedalboard.Pedalboard([
+            pedalboard.Convolution(impulse_response_filename=str(ir_path), mix=1.0)
+        ])
+    else:
+        board = pedalboard.Pedalboard([
+            pedalboard.Reverb(
+                room_size=room_size,
+                damping=damping,
+                wet_level=1.0,
+                dry_level=0.0,
+                width=width,
+            )
+        ])
     reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float64)
 
     # Trim pre-delay padding from reverb output so it aligns with dry signal
@@ -249,10 +261,12 @@ def apply_reverb(
         "input": str(file_path),
         "output": str(out_path),
         "preset": preset_name,
+        "engine": "convolution" if ir_path is not None else "freeverb",
+        "ir": str(ir_path) if ir_path is not None else None,
         "mode": "send" if send_mode else "insert",
-        "room_size": room_size,
-        "damping": damping,
-        "width": width,
+        "room_size": None if ir_path is not None else room_size,
+        "damping": None if ir_path is not None else damping,
+        "width": None if ir_path is not None else width,
         "pre_delay_ms": pre_delay_ms,
         "wet": wet,
         "dry": dry if not send_mode else 0.0,
@@ -288,6 +302,11 @@ def main() -> None:
     parser.add_argument("--lp", type=float, metavar="HZ", help="Low-pass filter on reverb return")
     parser.add_argument("--gate-hold", type=float, metavar="MS", help="Gate hold time in ms (enables gated reverb)")
     parser.add_argument("--gate-release", type=float, metavar="MS", help="Gate release time in ms (default 70ms)")
+    parser.add_argument(
+        "--ir", type=Path, metavar="WAV",
+        help="Impulse response WAV — switches engine to convolution. "
+             "Algorithmic params (room_size, damping, width) are ignored when set.",
+    )
     parser.add_argument("--list-presets", action="store_true", help="List available presets and exit")
 
     args = parser.parse_args()
@@ -304,6 +323,9 @@ def main() -> None:
         parser.error("input file is required")
     if not args.input.exists():
         print(json.dumps({"error": f"Not found: {args.input}"}), file=sys.stderr)
+        sys.exit(1)
+    if args.ir is not None and not args.ir.exists():
+        print(json.dumps({"error": f"IR file not found: {args.ir}"}), file=sys.stderr)
         sys.exit(1)
 
     # Start from preset, then apply CLI overrides
@@ -347,6 +369,7 @@ def main() -> None:
         output_dir=args.output_dir,
         preset_name=preset_name,
         send_mode=args.send,
+        ir_path=args.ir,
         **params,
     )
     print(json.dumps(result, indent=2))

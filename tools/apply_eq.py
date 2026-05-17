@@ -46,7 +46,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, iirnotch, sosfiltfilt, tf2sos
+from scipy.signal import butter, iirnotch, sosfilt, sosfiltfilt, tf2sos
 
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
@@ -199,10 +199,13 @@ def _filters_from_analysis(analysis_path: Path) -> list[dict]:
 # Core processing
 # ---------------------------------------------------------------------------
 
-def apply_eq(input_path: Path, output_dir: Path, filters: list[dict]) -> dict:
+def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str = "minimum") -> dict:
     if not filters:
         print(json.dumps({"error": "No filters specified — nothing to apply"}), file=sys.stderr)
         sys.exit(1)
+
+    if phase not in ("minimum", "zero"):
+        raise ValueError(f"phase must be 'minimum' or 'zero', got {phase!r}")
 
     data, sr = sf.read(str(input_path), always_2d=True)
 
@@ -210,11 +213,15 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict]) -> dict:
     for f in filters:
         _build_sos(f, sr)
 
+    # minimum phase = causal sosfilt (preserves transients, adds group delay)
+    # zero phase   = sosfiltfilt (pre-rings transients, no net delay)
+    filt_fn = sosfilt if phase == "minimum" else sosfiltfilt
+
     result_channels = []
     for ch in range(data.shape[1]):
         signal = data[:, ch].astype(np.float64)
         for f in filters:
-            signal = sosfiltfilt(_build_sos(f, sr), signal)
+            signal = filt_fn(_build_sos(f, sr), signal)
         result_channels.append(signal)
 
     output_data = np.stack(result_channels, axis=1)
@@ -236,6 +243,7 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict]) -> dict:
     report = {
         "input": str(input_path),
         "output": str(out_path),
+        "phase": phase,
         "filters_applied": [
             {k: v for k, v in f.items() if not k.startswith("_")} for f in filters
         ],
@@ -275,6 +283,12 @@ def main() -> None:
     parser.add_argument(
         "--list-presets", action="store_true",
         help="List available instrument presets and exit",
+    )
+    parser.add_argument(
+        "--phase", choices=["minimum", "zero"], default="minimum",
+        help="Filter phase response. minimum=causal (preserves transients, "
+             "default for insert EQ on tracks). zero=zero-phase (pre-rings "
+             "transients, recommended only for mastering / linear-phase use).",
     )
     args = parser.parse_args()
 
@@ -322,7 +336,7 @@ def main() -> None:
             print(json.dumps({"error": f"Invalid filter JSON: {e}"}), file=sys.stderr)
             sys.exit(1)
 
-    apply_eq(args.file, args.output_dir, filters)
+    apply_eq(args.file, args.output_dir, filters, phase=args.phase)
 
 
 if __name__ == "__main__":
