@@ -328,6 +328,46 @@ class TestRelevanceChecks:
         f.touch()
         assert _looks_like_stereo_pair_half(f) is None
 
+    def test_audit_session_finds_duplicates(self, tmp_path):
+        """audit_session must group tracks that share source files and
+        recommend the shortest name as primary."""
+        import json as _json
+        from audit_session import find_duplicates
+
+        # Two tracks share KICK_OUT.wav; one track has its own SNARE.wav.
+        session = {
+            "tracks": [
+                {"name": "KICK_OUT", "clips": [{"source_file": "/x/KICK_OUT.wav"}]},
+                {"name": "KICK_OUT.dup1", "clips": [{"source_file": "/y/KICK_OUT.wav"}]},
+                {"name": "SNARE", "clips": [{"source_file": "/x/SNARE.wav"}]},
+            ],
+        }
+        p = tmp_path / "session.json"
+        p.write_text(_json.dumps(session), encoding="utf-8")
+        r = find_duplicates(p)
+
+        assert r["summary"]["n_groups"] == 1
+        g = r["duplicate_groups"][0]
+        assert g["n_tracks"] == 2
+        assert g["recommend_primary"] == "KICK_OUT"
+        assert g["recommend_deactivate"] == ["KICK_OUT.dup1"]
+
+    def test_audit_session_handles_no_duplicates(self, tmp_path):
+        """A session with all unique source files must return n_groups=0."""
+        import json as _json
+        from audit_session import find_duplicates
+
+        session = {
+            "tracks": [
+                {"name": "A", "clips": [{"source_file": "/x/A.wav"}]},
+                {"name": "B", "clips": [{"source_file": "/x/B.wav"}]},
+            ],
+        }
+        p = tmp_path / "session.json"
+        p.write_text(_json.dumps(session), encoding="utf-8")
+        r = find_duplicates(p)
+        assert r["summary"]["n_groups"] == 0
+
     def test_multiband_skips_when_only_one_band_has_dynamics(self):
         """A pure low-frequency sine has crest only in the low band — mid and
         high are essentially zero. multiband requires >= 2 bands with crest >=

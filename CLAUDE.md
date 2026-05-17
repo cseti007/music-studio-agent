@@ -11,7 +11,9 @@ All processing happens via Python CLI tools in `tools/`. Claude orchestrates the
 1. Read `docs/knowledge.md` — domain knowledge base (LUFS targets, per-instrument guidelines, trends).
 2. Ask the user what session/folder they are working with today.
 3. Check `output/` for any previous analysis runs on that session.
-4. Ask what the goal is before running anything.
+4. **Run `tools/audit_session.py output/<session>/session.json --output-dir output/<session>/analysis`** — surfaces tracks that share identical source files (phase-coherent duplicates). Show the flagged groups to the user and ASK which to keep before generating mix_config. Common patterns: `<name>` + `<name>.L` + `<name>.R` triples (one stereo wav referenced three times), or `<name>` + `<name>.dup1.XX` pairs (editor accidentally cloned a track). Setting `active: false` on the suggested deactivate-list in mix_config prevents +6 dB phase-coherent doubling.
+5. Ask the user which takes / mic-blend / dup-versions to use in the render (per `mix_config.json` `active` field). Don't decide unilaterally — the `render_mix --generate-config` output explicitly says "Set active=false for alternate takes you don't want (dup versions)"; surface that decision to the user.
+6. Ask what the goal is before running anything (delivery-ready master, demo, mix-health gate against a reference, etc).
 
 ## Python environment
 
@@ -34,6 +36,7 @@ python3 tools/<script>.py
 | Tool | What it does | Key args |
 |---|---|---|
 | `tools/parse_session.py` | Parse DAW session file (.ptx, .als) into canonical session.json | `<session_file> --output-dir output/<session> --audio-dir <audio_dir>` |
+| `tools/audit_session.py` | Audit session.json for tracks that share identical source files (phase-coherent duplicates). Groups tracks by their source-file set, recommends a primary to keep and the rest to deactivate. Run at session start before generating mix_config. Outputs audit_report.json + audit_report.txt. | `<session.json> --output-dir output/<session>/analysis` |
 | `tools/apply_gain.py --per-clip` | Clip gain: normalize each clip to consistent LUFS, then assemble full stem | `--per-clip session.json --track "NAME" --output-dir output/<session>/tracks` |
 | `tools/apply_gain.py --per-channel` | Stem gain: apply single gain to assembled stem to reach LUFS target | `--per-channel assembled.wav --preset stem\|premix\|spotify\|apple\|amazon\|broadcast` |
 | `tools/analyze.py` | Analyze a stem: LUFS, LRA, crest factor, transient density, spectral centroid, stereo balance/correlation/M-S width, 1/3-octave freq response, hum detection, 10-band text spectrogram + RMS waveform + PNG | `<file> --output-dir output/<session>/tracks/<track>` |
@@ -311,6 +314,7 @@ anything else; "optional" means run it if there's a specific question to answer.
 
 | Trigger event | Required / Optional | Run this | What to read |
 |---|---|---|---|
+| Session opened — `session.json` exists, mix_config not yet generated | **Required, once** | `audit_session.py session.json` | Duplicate groups → which tracks to set `active: false` in mix_config. Always show the report to the user and ASK before deciding which copy to keep. |
 | A new `assembled.wav` (or `assembled_aligned.wav`) just landed | **Required** | `analyze.py` on that file | LUFS, hum, transient_profile, frequency_bands, frequency_bands_crest_db, stereo, pumping |
 | User provided a reference mix at session start | **Required**, once | `compare_reference.py reference target_or_raw_mix` | LUFS delta (target), spectral balance deltas (EQ goals), LRA delta (compression target) |
 | Session opened, before any EQ work | **Required** | `detect_masking.py output/<session> --stage comp` (or `--stage raw` if no comp yet) | CRITICAL + HIGH pairs → primary EQ cut targets |

@@ -12,6 +12,40 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Session-audit tool for phase-coherent duplicates
+
+A user-by-ear test on the terido_v3 mix surfaced that two drum tracks
+were being summed phase-coherently — KICK OUT and KICK OUT.dup1, both
+pointing at the same WAV in the session.json, both active in the
+mix_config — adding +6 dB to the kick-out body. The user heard it as
+"the drummer played that part twice" but it was the session editor's
+duplication, not a re-take.
+
+To make this catchable up-front (not by re-listen after delivery):
+
+- **New tool `tools/audit_session.py`** groups session.json tracks by
+  the set of source files their clips reference. Any group with more
+  than one track is a duplicate candidate; the report recommends a
+  primary to keep (shortest track name) and the rest to deactivate.
+  Output: `audit_report.json` + `audit_report.txt`. On the terido
+  session it surfaces 8 groups (KICK OUT × 2, SN TOP × 2, BASS DI × 3,
+  four vocal groups × 3 each, Urgen Serenity Master × 2).
+- **CLAUDE.md Session start checklist** gains a required step
+  immediately after reading knowledge.md: run audit_session.py, show
+  the grouped report to the user, and ASK which copy to keep before
+  generating mix_config.
+- **CLAUDE.md Analysis decision tree** gains a "session opened, mix_config
+  not yet generated" trigger with `audit_session.py` as the required tool.
+- **CLAUDE.md tools table** gains the new tool row.
+- **Pytest**: 2 new test cases in test_smoke.py (duplicate detection +
+  no-duplicate sanity). Total suite now 41 tests, all green.
+
+The terido_v3 dedup iteration documented in
+`output/terido_v3/session_summary.md` is what unblocked the drum-bus
+parallel-sat relevance check (LRA stayed above 4 LU once the duplicates
+weren't doubling the bus peak) and tightened the mix LRA from 3.02 to
+3.96 LU on the rendered mix.
+
 ### Iteration findings: gentle drum-bus preset, master-preset choice, ref-deck severity (cf3f1ea)
 
 Three operational rules surfaced while pushing the terido_v3 session
