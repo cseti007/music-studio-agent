@@ -99,28 +99,66 @@ run pytest. Optionally a lint step (ruff or flake8).
 
 ---
 
-## 4. Vocal toolkit (de-esser, pitch correction, vocal presets)
+## 4. Vocal toolkit (de-esser, pitch correction, vocal presets, vocal reverb)
 
-**What.** A vocal-stem-aware set of tools and presets.
+**What.** A vocal-stem-aware set of tools, presets, and reverb integration.
 
 - `apply_deesser.py` — frequency-specific sidechain compressor on the 5-8 kHz
   sibilance region
 - `apply_pitch_correct.py` — Melodyne/Auto-Tune style; librosa or world
   vocoder under the hood
-- Vocal EQ / comp presets — `vocal_lead_pop`, `vocal_lead_rock`, etc.
+- Vocal EQ / comp presets — `vocal_lead_pop`, `vocal_lead_rock`,
+  `vocal_lead_ballad`, etc. (the horgonyt_fel session needed a manual
+  `HP@80 + cut@250 + boost@4k` chain because none of the existing
+  presets fit)
+- **Vocal reverb presets** — `vocal_plate` (1.5s decay, HP@300, LP@8k),
+  `vocal_chamber` (8 ms pre-delay, 0.6s decay), `vocal_hall_wide`
+  (60 ms pre-delay, 2-3s decay)
+- **Reverb-bus architecture in render_mix** — currently every bus has
+  its own optional `reverb_send`, but the studio standard is dedicated
+  reverb buses (plate, room, hall) that multiple tracks/buses send
+  into at different levels. This becomes load-bearing once vocal mixing
+  is in scope (vocal typically sends to two reverb buses simultaneously).
+  Spec sketch:
 
-**Why.** The current repo has zero vocal-specific tooling. The 2026 streaming
-target for vocal momentary LUFS (-10 to -8 with full mix at -14) cannot be
-hit reliably without vocal-aware processing.
+  ```json
+  "reverb_buses": {
+    "plate": {"preset": "vocal_plate", "wet": 1.0},
+    "hall":  {"preset": "hall_ambient", "wet": 1.0}
+  },
+  "tracks": [
+    {"name": "Vocal", "reverb_sends": [
+      {"bus": "plate", "level": 0.2},
+      {"bus": "hall",  "level": 0.15}
+    ]}
+  ]
+  ```
+
+**Why.** The current repo has zero vocal-specific tooling. The 2026
+streaming target for vocal momentary LUFS (-10 to -8 with full mix at
+-14) cannot be hit reliably without vocal-aware processing. The
+horgonyt_fel session was the first vocal-bearing session and exposed
+the gap: the vocal stem was processed with a hand-rolled custom EQ +
+comp chain because no presets exist; it went into the mix dry because
+the reverb-bus architecture isn't there.
 
 **Scope.** Each tool ~150-250 lines + relevance check. De-esser is the
 quickest win (~100 lines, just a sidechained band-comp); pitch correction
 is the heavy item (formant preservation, phase coherence on shifted blocks
-is real DSP work).
+is real DSP work). Vocal reverb presets are trivial (3 new JSON files).
+The reverb-bus architecture in render_mix is the largest piece — about
+100 lines of routing code (independent reverb-bus rendering, return to
+master) plus mix_config schema extension.
 
 **Triggers.** Worth doing when:
-- User starts mixing sessions that contain vocals
+- User starts mixing sessions that contain vocals (the horgonyt_fel
+  vocal stem was processed manually; revisiting it would benefit from
+  proper vocal-toolkit support)
 - A specific vocal sibilance problem comes up
+
+**Status.** User explicitly deferred this in the current scope —
+"vokállal még nem foglalkoztunk, nem is kell egyelőre". Pick up when
+vocal sessions become regular.
 
 ---
 
