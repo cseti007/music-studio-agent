@@ -1,0 +1,13 @@
+{
+  "name": "hihat",
+  "description": "Hi-hat close mic",
+  "instrument": "hihat",
+  "source": "close mic",
+  "notes": "Hi-hat close mics pick up a lot of harshness in the 2-8 kHz range. HP at 200 Hz removes kick and snare bleed. The 4 kHz area is particularly problematic for metallic harshness — sweep and cut to taste. Roll off above 10-12 kHz.",
+  "filters": [
+    {"type": "highpass",  "hz": 200,  "order": 2,             "_note": "remove drum bleed"},
+    {"type": "peak",      "hz": 350,  "q": 1.5,  "db": -2.0, "_note": "cut muddy low-mids"},
+    {"type": "peak",      "hz": 4000, "q": 2.0,  "db": -2.0, "_note": "cut metallic harshness"},
+    {"type": "highshelf", "hz": 10000,"db": -2.0,             "_note": "tame harsh upper end"}
+  ]
+}

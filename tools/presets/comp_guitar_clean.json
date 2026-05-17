@@ -1,0 +1,12 @@
+{
+  "name": "comp_guitar_clean",
+  "description": "Clean electric guitar / DI — consistency and presence",
+  "notes": "Clean guitars need more compression than distorted (no amp doing the work). 4:1 ratio adds sustain and presence. 10ms attack lets the pick transient through before clamping. Adjust threshold to get 2-4 dB gain reduction on rhythm parts.",
+  "settings": {
+    "threshold_db": -15,
+    "ratio": 4,
+    "attack_ms": 10,
+    "release_ms": 80,
+    "makeup_db": null
+  }
+}

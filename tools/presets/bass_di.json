@@ -1,0 +1,12 @@
+{
+  "name": "bass_di",
+  "description": "Bass guitar DI — starting point for clean DI signal",
+  "instrument": "bass",
+  "source": "DI",
+  "notes": "Conservative starting point. Sweep 200-400 Hz cut to taste after analysis. Presence boost at 4-6 kHz optional — adds pick/finger attack.",
+  "filters": [
+    {"type": "highpass",  "hz": 40,   "order": 2,  "_note": "remove sub-sonic rumble"},
+    {"type": "peak",      "hz": 320,  "q": 1.5, "db": -3.0, "_note": "cut boxiness/mud"},
+    {"type": "lowshelf",  "hz": 100,  "db": 1.5,             "_note": "subtle body boost"}
+  ]
+}

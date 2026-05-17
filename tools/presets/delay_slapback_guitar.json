@@ -1,0 +1,13 @@
+{
+  "name": "delay_slapback_guitar",
+  "description": "Slapback echo on guitar — classic Sun Studios / rockabilly character",
+  "notes": "100ms single echo at mix 0.3. LP at 6kHz matches the frequency response of tape echo units (Echoplex, RE-201). No feedback keeps it tight. Works on both clean and lightly driven guitar. For a more modern double-tracked feel, try 20-30ms at mix 0.5 instead.",
+  "settings": {
+    "mode": "normal",
+    "delay_ms": 100,
+    "feedback": 0.0,
+    "mix": 0.3,
+    "lp_hz": 6000,
+    "send": false
+  }
+}

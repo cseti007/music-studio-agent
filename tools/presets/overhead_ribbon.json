@@ -1,0 +1,11 @@
+{
+  "name": "overhead_ribbon",
+  "description": "Drum overheads — ribbon mic (e.g. AEA R84, Royer R-121)",
+  "instrument": "overhead",
+  "source": "ribbon",
+  "notes": "Ribbons have a natural HF rolloff — the opposite of condensers. Can boost high shelf to add air/sparkle without harshness (ribbons don't distort the way condensers do). HP removes low-end bleed. No need to cut sizzle — ribbons don't have it.",
+  "filters": [
+    {"type": "highpass",  "hz": 80,   "order": 2,             "_note": "remove low-end bleed"},
+    {"type": "highshelf", "hz": 10000,"db": 2.0,              "_note": "restore air ribbons naturally roll off"}
+  ]
+}

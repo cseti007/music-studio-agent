@@ -1,0 +1,13 @@
+{
+  "name": "guitar_distorted",
+  "description": "Distorted electric guitar — amp mic (SM57, ribbon, etc.)",
+  "instrument": "guitar",
+  "source": "distorted amp mic",
+  "notes": "Distortion compresses everything — noise floor metric is unreliable (low DR is expected, not a problem). HP at 100 Hz removes bleed without killing guitar body. Cut 300-500 Hz to remove cardboard/boxy tone common on SM57 recordings. Be careful with 4-6 kHz — too much sizzle is fatiguing. Do NOT apply broadband denoising.",
+  "filters": [
+    {"type": "highpass",  "hz": 100,  "order": 2,             "_note": "remove bleed/rumble"},
+    {"type": "peak",      "hz": 400,  "q": 1.5,  "db": -3.0, "_note": "cut cardboard/boxiness"},
+    {"type": "peak",      "hz": 1000, "q": 2.0,  "db": 1.5,  "_note": "subtle mid presence"},
+    {"type": "lowpass",   "hz": 10000,"order": 2,             "_note": "roll off harsh sizzle"}
+  ]
+}

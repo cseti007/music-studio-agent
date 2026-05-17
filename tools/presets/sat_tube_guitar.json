@@ -1,0 +1,11 @@
+{
+  "name": "sat_tube_guitar",
+  "description": "Tube saturation for clean or lightly driven guitar — adds bite and harmonic presence",
+  "notes": "Asymmetry 0.4, drive 0.15: subtle enough for clean amp tones, adds the kind of even-harmonic richness a tube preamp gives for free. 70% wet keeps the original attack intact. On distorted guitars this preset has minimal audible effect since the amp saturation already dominates — use sat_tape_subtle for distorted guitars instead.",
+  "settings": {
+    "mode": "tube",
+    "drive": 0.15,
+    "asymmetry": 0.4,
+    "mix": 0.7
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "snare_top",
+  "description": "Snare drum top mic — body and crack",
+  "instrument": "snare",
+  "source": "top mic",
+  "notes": "Top mic captures body and stick crack. HP at 80 Hz removes kick bleed. 400 Hz cut removes cardboard/flat tone. 5 kHz boost brings out the stick crack. Adjust the 150-200 Hz area to taste — boost for fatness, cut for clarity.",
+  "filters": [
+    {"type": "highpass",  "hz": 80,   "order": 2,             "_note": "remove kick bleed/rumble"},
+    {"type": "peak",      "hz": 200,  "q": 2.0,  "db": 2.0,  "_note": "body/fatness — optional"},
+    {"type": "peak",      "hz": 400,  "q": 2.0,  "db": -3.0, "_note": "cut cardboard/boxiness"},
+    {"type": "peak",      "hz": 5000, "q": 2.0,  "db": 3.0,  "_note": "stick crack/presence"}
+  ]
+}

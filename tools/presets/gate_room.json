@@ -1,0 +1,14 @@
+{
+  "name": "gate_room",
+  "description": "Room mic — gated room for punch; closes between drum hits to tighten the ambience",
+  "notes": "Room mics need a gentler gate: -40dB range preserves natural-sounding bleed rather than going silent. Longer attack (8ms) smooths the gate open without the 'click' that fast-attack room gating causes. 200ms hold and 150ms release keep the room tail sounding organic.",
+  "settings": {
+    "threshold_db": -35,
+    "range_db": -40,
+    "attack_ms": 8,
+    "hold_ms": 200,
+    "release_ms": 150,
+    "hysteresis_db": 6,
+    "rms_window_ms": 10
+  }
+}

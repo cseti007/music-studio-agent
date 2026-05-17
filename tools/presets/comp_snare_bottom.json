@@ -1,0 +1,12 @@
+{
+  "name": "comp_snare_bottom",
+  "description": "Snare drum bottom mic — snare wire resonance, parallel",
+  "notes": "Extreme parallel compression (mix 0.3 = 30% wet). The compressed copy brings up the snare wire resonance and rattle. 30% blend preserves the natural wire sound while adding density. The dry signal (70%) keeps the original character.",
+  "settings": {
+    "threshold_db": -25,
+    "ratio": 10,
+    "attack_ms": 2,
+    "release_ms": 50,
+    "mix": 0.3
+  }
+}

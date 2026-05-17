@@ -1,0 +1,12 @@
+{
+  "name": "comp_kick_sub",
+  "description": "Kick drum sub/outside mic — body and weight control",
+  "notes": "Faster attack and higher ratio on the sub mic — its job is low-end weight, not transient definition. Parallel blend (mix 0.5) preserves the sub's natural envelope while adding compressed sustain underneath.",
+  "settings": {
+    "threshold_db": -15,
+    "ratio": 4,
+    "attack_ms": 5,
+    "release_ms": 50,
+    "mix": 0.5
+  }
+}

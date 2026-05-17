@@ -1,0 +1,13 @@
+{
+  "name": "kick_in",
+  "description": "Kick drum inside/beater mic — attack and click",
+  "instrument": "kick",
+  "source": "inside mic",
+  "notes": "Inside mic captures attack/beater click. Primary goal: define the transient. Cut the boomy/cardboard 250-600 Hz zone, boost 2-4 kHz for click. Minimal low-end work — leave that to the sub/outside mic.",
+  "filters": [
+    {"type": "highpass",  "hz": 30,   "order": 2,             "_note": "remove sub-sonic rumble"},
+    {"type": "peak",      "hz": 400,  "q": 1.0,  "db": -4.0, "_note": "cut cardboard/honk"},
+    {"type": "peak",      "hz": 3000, "q": 2.0,  "db": 3.0,  "_note": "boost beater click/attack"},
+    {"type": "lowpass",   "hz": 10000,"order": 2,             "_note": "roll off high-freq hiss"}
+  ]
+}

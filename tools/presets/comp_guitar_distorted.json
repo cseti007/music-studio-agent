@@ -1,0 +1,12 @@
+{
+  "name": "comp_guitar_distorted",
+  "description": "Distorted electric guitar — gentle glue only",
+  "notes": "Distorted guitars are already heavily compressed by the amp. Additional compression is mainly for glue and consistency, NOT tonal shaping. Very gentle: 2:1 ratio, slow attack (30ms). Over-compression destroys aggression and feels lifeless.",
+  "settings": {
+    "threshold_db": -10,
+    "ratio": 2,
+    "attack_ms": 30,
+    "release_ms": 50,
+    "makeup_db": 1
+  }
+}

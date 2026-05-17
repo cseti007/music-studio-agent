@@ -19,3 +19,9 @@ spectrograms/
 # analysis output
 *.json
 *.png
+
+# but keep instrument presets — these ship with the repo
+!tools/presets/*.json
+
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json

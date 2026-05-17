@@ -1,0 +1,13 @@
+{
+  "name": "kick_sub",
+  "description": "Kick drum sub/outside mic — body and low-end weight",
+  "instrument": "kick",
+  "source": "sub or outside mic",
+  "notes": "Sub/outside mic provides the body and low-end thump. Target: 60-120 Hz for punch and weight. Cut mid-range buildup — outside mic picks up more shell resonance and boxiness than the inside mic.",
+  "filters": [
+    {"type": "highpass",  "hz": 20,   "order": 2,             "_note": "remove rumble, keep sub"},
+    {"type": "lowshelf",  "hz": 90,   "db": 2.0,              "_note": "subtle sub/punch boost"},
+    {"type": "peak",      "hz": 350,  "q": 1.0,  "db": -4.0, "_note": "cut boxiness"},
+    {"type": "lowpass",   "hz": 5000, "order": 2,             "_note": "remove mid/high content"}
+  ]
+}

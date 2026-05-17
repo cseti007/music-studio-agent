@@ -1,0 +1,12 @@
+{
+  "name": "comp_bass_slap",
+  "description": "Slap bass \u2014 fast attack to level uneven thumb hits, high ratio for consistency",
+  "notes": "8ms attack catches dynamic variation between hits while preserving the slap click. 5:1 ratio aggressively levels out the loudest hits. 60ms release resets fast enough between slaps at 100-160 BPM. Threshold -20dB catches even the quieter hits. Use instead of comp_bass_di when slap technique is uneven.",
+  "settings": {
+    "threshold_db": -20,
+    "ratio": 5,
+    "attack_ms": 8,
+    "release_ms": 60,
+    "makeup_db": null
+  }
+}

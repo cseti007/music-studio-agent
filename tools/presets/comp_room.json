@@ -1,0 +1,12 @@
+{
+  "name": "comp_room",
+  "description": "Drum room mic — pumping/breathing effect",
+  "notes": "The room mic pump effect is the goal here, not transparent compression. Fast attack (3ms) slams down on drum hits instantly. Fast release (30ms) lets the room 'explode' back up between hits — this audible pump is the desired character. High ratio (8:1) and low threshold ensure heavy gain reduction. High makeup gain restores the swelling room sound.",
+  "settings": {
+    "threshold_db": -18,
+    "ratio": 8,
+    "attack_ms": 3,
+    "release_ms": 30,
+    "makeup_db": 8
+  }
+}

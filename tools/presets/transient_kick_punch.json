@@ -1,0 +1,1 @@
+{"name": "transient_kick_punch", "description": "More click/attack on kick, slightly tighter decay", "settings": {"attack_db": 4.0, "sustain_db": -2.0}}

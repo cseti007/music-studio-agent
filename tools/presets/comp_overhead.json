@@ -1,0 +1,12 @@
+{
+  "name": "comp_overhead",
+  "description": "Drum overheads — gentle glue, preserve cymbal decay",
+  "notes": "Very slow attack (100ms) — let the cymbal transient through unimpeded. Moderate ratio (3.5:1). Purpose: glue the overheads together, not control dynamics. Many engineers skip compression on overheads entirely — use this sparingly.",
+  "settings": {
+    "threshold_db": -12,
+    "ratio": 3.5,
+    "attack_ms": 100,
+    "release_ms": 70,
+    "makeup_db": null
+  }
+}

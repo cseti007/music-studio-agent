@@ -1,0 +1,14 @@
+{
+  "name": "gate_snare_bottom",
+  "description": "Snare bottom (wire) mic — very tight gate to isolate wire rattle only",
+  "notes": "Bottom mic captures only the wire rattle on the hit — very short decay. 60ms hold is enough. Hard -80dB range since the bottom mic has no useful content between hits. Threshold slightly lower than top mic because wire rattle has less energy than the stick hit.",
+  "settings": {
+    "threshold_db": -32,
+    "range_db": -80,
+    "attack_ms": 1,
+    "hold_ms": 60,
+    "release_ms": 40,
+    "hysteresis_db": 6,
+    "rms_window_ms": 3
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "comp_kick_in",
+  "description": "Kick drum inside/beater mic — punch and consistency",
+  "notes": "Slow-ish attack (15ms) lets the initial snap and click pass before compression engages body. Fast release (40ms) recovers before the next hit. Low ratio keeps the kick punchy rather than squashed.",
+  "settings": {
+    "threshold_db": -12,
+    "ratio": 2,
+    "attack_ms": 15,
+    "release_ms": 40,
+    "makeup_db": 1
+  }
+}

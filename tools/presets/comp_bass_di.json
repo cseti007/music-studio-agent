@@ -1,0 +1,12 @@
+{
+  "name": "comp_bass_di",
+  "description": "Bass guitar DI — consistency and sustain",
+  "notes": "Slow attack (25ms) preserves the pick/pluck transient attack. Moderate ratio (3:1) — higher ratio kills the feel. Longer release (100ms) avoids choking on fast passages. For synth bass or 808s, reduce attack to 5-10ms.",
+  "settings": {
+    "threshold_db": -15,
+    "ratio": 3,
+    "attack_ms": 25,
+    "release_ms": 100,
+    "makeup_db": null
+  }
+}

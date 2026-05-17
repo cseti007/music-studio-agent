@@ -1,0 +1,13 @@
+{
+  "name": "cymbal",
+  "description": "Crash/ride cymbal close mic",
+  "instrument": "cymbal",
+  "source": "close mic",
+  "notes": "Similar to hi-hat but crash/ride have more sustain and lower fundamental. HP at 150-200 Hz. Crash and ride differ: ride has a more focused bell sound (3-5 kHz), crash is broader. This is a shared starting point — adjust per cymbal.",
+  "filters": [
+    {"type": "highpass",  "hz": 150,  "order": 2,             "_note": "remove drum bleed"},
+    {"type": "peak",      "hz": 350,  "q": 1.5,  "db": -2.0, "_note": "cut muddy low-mids"},
+    {"type": "peak",      "hz": 5000, "q": 2.0,  "db": -1.5, "_note": "tame harshness"},
+    {"type": "highshelf", "hz": 12000,"db": -2.0,             "_note": "roll off upper edge"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "sat_tape_drums",
+  "description": "Tape saturation for drum bus — adds weight, glue, and density",
+  "notes": "Drive 0.3 at 80% wet: enough saturation to thicken the drum bus without dulling the transients. The symmetric tanh adds both even and odd harmonics, which fills out the drum sound in a way that compression alone cannot. Use on the assembled drum bus after gating and compression.",
+  "settings": {
+    "mode": "tape",
+    "drive": 0.3,
+    "mix": 0.8
+  }
+}

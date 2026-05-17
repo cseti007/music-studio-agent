@@ -1,0 +1,12 @@
+{
+  "name": "overhead_condenser",
+  "description": "Drum overheads — condenser mic (e.g. U87, small diaphragm)",
+  "instrument": "overhead",
+  "source": "condenser",
+  "notes": "Condensers capture high-frequency detail well but can be harsh above 8 kHz — roll off the top rather than boosting. HP at 100-120 Hz removes kick and floor tom bleed (let close mics handle the low end). Cut 4-6 kHz to tame harsh cymbal sizzle. Do NOT boost high shelf on condensers — roll off instead.",
+  "filters": [
+    {"type": "highpass",  "hz": 120,  "order": 2,             "_note": "remove low-end kit bleed"},
+    {"type": "peak",      "hz": 5000, "q": 1.5,  "db": -2.0, "_note": "tame harsh cymbal sizzle"},
+    {"type": "highshelf", "hz": 12000,"db": -3.0,             "_note": "roll off excess air/hiss"}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "comp_snare_top",
+  "description": "Snare drum top mic — crack and body",
+  "notes": "Fast attack (3ms) clamps down quickly after the initial stick crack passes. Higher ratio (6:1) adds depth and presence without killing the snap. Long release (100ms) smoothly lifts back after the hit.",
+  "settings": {
+    "threshold_db": -15,
+    "ratio": 6,
+    "attack_ms": 3,
+    "release_ms": 100,
+    "makeup_db": null
+  }
+}

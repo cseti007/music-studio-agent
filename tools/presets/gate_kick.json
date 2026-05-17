@@ -1,0 +1,14 @@
+{
+  "name": "gate_kick",
+  "description": "Kick drum — tight gate to remove bleed between hits",
+  "notes": "Fast attack (1ms) preserves the beater click. 100ms hold covers the kick body and sub tail. 50ms release closes cleanly without an audible snap. -80dB range = effectively silent when closed.",
+  "settings": {
+    "threshold_db": -30,
+    "range_db": -80,
+    "attack_ms": 1,
+    "hold_ms": 100,
+    "release_ms": 50,
+    "hysteresis_db": 6,
+    "rms_window_ms": 3
+  }
+}

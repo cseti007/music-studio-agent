@@ -1,0 +1,13 @@
+{
+  "name": "delay_pingpong_send",
+  "description": "Ping-pong delay send — alternating L/R echoes, wide stereo effect",
+  "notes": "200ms ping-pong at feedback 0.45: fills the stereo field without muddying the mono center. Send mode outputs wet-only — route this to a return bus and blend to taste. LP at 5kHz prevents high-frequency buildup on feedback tails. Typical send level: -6 to -12 dB on the return fader.",
+  "settings": {
+    "mode": "pingpong",
+    "delay_ms": 200,
+    "feedback": 0.45,
+    "mix": 0.8,
+    "lp_hz": 5000,
+    "send": true
+  }
+}

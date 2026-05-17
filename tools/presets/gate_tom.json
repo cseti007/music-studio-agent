@@ -1,0 +1,14 @@
+{
+  "name": "gate_tom",
+  "description": "Tom mic — removes kick and snare bleed between tom hits",
+  "notes": "Toms ring longer than kick or snare, so hold (150ms) and release (100ms) are longer. -60dB range gives natural-sounding closure rather than complete silence. Wider hysteresis (10dB) prevents chattering on rim hits or ghost strokes.",
+  "settings": {
+    "threshold_db": -30,
+    "range_db": -60,
+    "attack_ms": 2,
+    "hold_ms": 150,
+    "release_ms": 100,
+    "hysteresis_db": 10,
+    "rms_window_ms": 5
+  }
+}

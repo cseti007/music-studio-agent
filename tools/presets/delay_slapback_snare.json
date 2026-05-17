@@ -1,0 +1,13 @@
+{
+  "name": "delay_slapback_snare",
+  "description": "Slapback echo on snare — single short echo adds size without reverb wash",
+  "notes": "80ms slapback: just long enough to sound like a room reflection, short enough to stay tight. No feedback — one echo only. LP at 8kHz darkens the echo so it sits behind the dry hit. Mix 0.2 = subtle; raise to 0.35 for a more obvious rockabilly feel. Insert mode.",
+  "settings": {
+    "mode": "normal",
+    "delay_ms": 80,
+    "feedback": 0.0,
+    "mix": 0.2,
+    "lp_hz": 8000,
+    "send": false
+  }
+}

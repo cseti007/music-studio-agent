@@ -1,0 +1,32 @@
+# music-mix-agent pipeline configuration
+# All tools read this file from the project root directory.
+
+[gain]
+
+# Per-clip mode (apply_gain --per-clip):
+# Normalizes each clip to this LUFS level before assembling the stem.
+# -18 LUFS is the standard clip gain target for mixing — it provides
+# headroom for plugins while equalizing level differences between clips
+# recorded at different gain settings.
+per_clip_target_lufs = -18.0
+
+# Per-channel mode (apply_gain --per-channel):
+# Default preset when no --preset flag is given.
+# Available: stem (-18 LUFS), premix (-18 LUFS / -3 dBTP), spotify (-14 LUFS),
+#            apple (-16 LUFS), broadcast (-23 LUFS)
+per_channel_preset = "stem"
+
+
+[align]
+# Maximum search range for delay detection in milliseconds.
+# 20ms = ~6.9m at 343 m/s — more than enough for any studio mic placement.
+max_delay_ms = 20.0
+
+# Length of the active audio segment used for cross-correlation.
+# 10 seconds is well above the minimum needed for reliable results.
+segment_duration_sec = 10.0
+
+
+[analyze]
+# Defaults for analyze.py (not yet implemented — placeholder)
+# default_target_lufs = -18.0

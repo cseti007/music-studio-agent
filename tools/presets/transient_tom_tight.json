@@ -1,0 +1,1 @@
+{"name": "transient_tom_tight", "description": "Tighten tom ring — useful when decay_time_ms > 200ms", "settings": {"attack_db": 0.0, "sustain_db": -8.0}}

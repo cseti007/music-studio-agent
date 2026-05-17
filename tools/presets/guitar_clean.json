@@ -1,0 +1,12 @@
+{
+  "name": "guitar_clean",
+  "description": "Clean electric guitar — DI or amp mic",
+  "instrument": "guitar",
+  "source": "clean",
+  "notes": "Clean guitar has full harmonic content. HP at 150 Hz removes rumble without losing body. Presence boost at 3-5 kHz helps cut through mix. Adjust 250-500 Hz boost/cut depending on how much warmth/mud is present.",
+  "filters": [
+    {"type": "highpass",  "hz": 150,  "order": 2,              "_note": "remove low rumble"},
+    {"type": "peak",      "hz": 350,  "q": 1.5,  "db": -2.0,  "_note": "cut mud if boxy"},
+    {"type": "peak",      "hz": 3500, "q": 2.0,  "db": 2.0,   "_note": "presence/clarity"}
+  ]
+}

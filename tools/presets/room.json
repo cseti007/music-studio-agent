@@ -1,0 +1,12 @@
+{
+  "name": "room",
+  "description": "Drum room mic (close or far room)",
+  "instrument": "room",
+  "source": "room mic",
+  "notes": "Room mics give the drum sound space and glue. Aggressive HP removes low-end mud — you want the kit's energy, not the room's low-end buildup. Cut 200-350 Hz to reduce undefined low-mid muddiness. Process order matters: EQ before compression on room mics, never after. Compression creates the pump effect.",
+  "filters": [
+    {"type": "highpass",  "hz": 150,  "order": 2,             "_note": "remove low-end mud"},
+    {"type": "peak",      "hz": 280,  "q": 1.5,  "db": -3.0, "_note": "cut undefined low-mid"},
+    {"type": "peak",      "hz": 700,  "q": 1.5,  "db": -2.0, "_note": "cut boxiness"}
+  ]
+}

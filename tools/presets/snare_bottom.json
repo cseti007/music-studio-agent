@@ -1,0 +1,12 @@
+{
+  "name": "snare_bottom",
+  "description": "Snare drum bottom mic — snare wire character",
+  "instrument": "snare",
+  "source": "bottom mic",
+  "notes": "Bottom mic is almost entirely for the snare wire rattle. Aggressive HP at 600 Hz removes kick bleed and body (let the top mic handle that). Boost 3-5 kHz to emphasize wire. Roll off highs above 12 kHz. This mic is usually blended low in the mix.",
+  "filters": [
+    {"type": "highpass",  "hz": 600,  "order": 2,             "_note": "remove kick bleed and body"},
+    {"type": "peak",      "hz": 4000, "q": 2.0,  "db": 3.0,  "_note": "snare wire presence"},
+    {"type": "lowpass",   "hz": 12000,"order": 2,             "_note": "roll off harsh highs"}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "delay_pre_delay",
+  "description": "Short pre-delay — pushes reverb back, separates dry source from reverb tail",
+  "notes": "25ms single echo at mix 1.0 (insert): the dry signal is delayed by 25ms before entering the reverb chain. Use by running apply_delay first (insert mode, no mix blend needed since mix=1.0 replaces the signal), then apply_reverb on the output. This separates the dry hit from the reverb onset, improving clarity. Typical pre-delay: 15-30ms for snare, 10-20ms for vocals.",
+  "settings": {
+    "mode": "normal",
+    "delay_ms": 25,
+    "feedback": 0.0,
+    "mix": 1.0,
+    "send": false
+  }
+}

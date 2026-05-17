@@ -1,0 +1,11 @@
+{
+  "name": "sat_tube_bass",
+  "description": "Tube saturation for bass DI — even harmonics add warmth and audibility on small speakers",
+  "notes": "Asymmetry 0.5 tilts saturation toward even harmonics (2nd harmonic = octave below, adds warmth; 4th harmonic = two octaves). Drive 0.2 is conservative — enough to fill out the mid-range presence without audible distortion. 60% wet preserves the clean DI attack. Use after apply_eq and apply_compression, before apply_amp if amp simulation is also used.",
+  "settings": {
+    "mode": "tube",
+    "drive": 0.2,
+    "asymmetry": 0.5,
+    "mix": 0.6
+  }
+}

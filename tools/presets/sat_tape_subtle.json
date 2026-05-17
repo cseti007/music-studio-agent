@@ -1,0 +1,10 @@
+{
+  "name": "sat_tape_subtle",
+  "description": "Gentle tape saturation — adds warmth and cohesion without audible distortion",
+  "notes": "Low drive (0.1) with 50% parallel blend: the dry signal preserves transient definition while the saturated copy adds body. Good on drum bus, room mics, or as a final mix glue pass.",
+  "settings": {
+    "mode": "tape",
+    "drive": 0.1,
+    "mix": 0.5
+  }
+}

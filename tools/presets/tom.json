@@ -1,0 +1,13 @@
+{
+  "name": "tom",
+  "description": "Tom close mic (rack or floor tom)",
+  "instrument": "tom",
+  "source": "close mic",
+  "notes": "Floor tom has lower fundamentals (70-90 Hz) than rack toms (120-200 Hz). Adjust the sustain boost frequency accordingly. Cut 400-600 Hz to remove cardboard/boxy tone. Boost 2-5 kHz for stick attack. This preset is a general starting point — the main differentiation between rack and floor is the sustain frequency.",
+  "filters": [
+    {"type": "highpass",  "hz": 50,   "order": 2,             "_note": "remove rumble"},
+    {"type": "peak",      "hz": 150,  "q": 2.0,  "db": 2.0,  "_note": "sustain body (adjust: rack 120-200 Hz, floor 70-90 Hz)"},
+    {"type": "peak",      "hz": 500,  "q": 1.5,  "db": -3.0, "_note": "cut cardboard/boxiness"},
+    {"type": "peak",      "hz": 4000, "q": 2.0,  "db": 2.0,  "_note": "stick attack presence"}
+  ]
+}

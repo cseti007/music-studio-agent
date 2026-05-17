@@ -1,0 +1,12 @@
+{
+  "name": "comp_tom",
+  "description": "Tom close mic — punch and sustain",
+  "notes": "5ms attack lets the stick crack pass, then compresses the body. Higher ratio (5:1) adds sustain and thickness to the tom hit. Moderate release (45ms) recovers cleanly. Toms are infrequent hits so compression mainly shapes the character of each hit rather than controlling overall level.",
+  "settings": {
+    "threshold_db": -12,
+    "ratio": 5,
+    "attack_ms": 5,
+    "release_ms": 45,
+    "makeup_db": null
+  }
+}

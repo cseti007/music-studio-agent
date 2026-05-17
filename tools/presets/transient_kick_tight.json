@@ -1,0 +1,1 @@
+{"name": "transient_kick_tight", "description": "Tighten boomy kick — cut sustain without touching the attack", "settings": {"attack_db": 0.0, "sustain_db": -8.0}}

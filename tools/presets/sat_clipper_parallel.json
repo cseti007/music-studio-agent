@@ -1,0 +1,10 @@
+{
+  "name": "sat_clipper_parallel",
+  "description": "Soft clipper in parallel — adds presence, density, and upper harmonic content",
+  "notes": "Hard cubic clipper at drive 0.5 produces strong odd harmonics (3rd, 5th) that add presence and aggression. At 20% wet the effect is subtle but audible: the mix gains density and edge without sounding distorted. Classic trick on snare or the full mix. Higher mix values (0.3-0.4) give audible grit — use on parallel snare or drum bus.",
+  "settings": {
+    "mode": "clipper",
+    "drive": 0.5,
+    "mix": 0.2
+  }
+}

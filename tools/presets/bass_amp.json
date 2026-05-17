@@ -1,0 +1,12 @@
+{
+  "name": "bass_amp",
+  "description": "Bass guitar amp mic — mic recording starting point",
+  "instrument": "bass",
+  "source": "mic",
+  "notes": "Amp mics: prefer cutting over boosting. HP higher than DI (80-120 Hz) to remove unnecessary LF before the mix. Cuts only — boosting with mic increases feedback risk.",
+  "filters": [
+    {"type": "highpass",  "hz": 80,   "order": 2,  "_note": "remove sub, tighten low end"},
+    {"type": "peak",      "hz": 350,  "q": 1.5, "db": -3.0, "_note": "cut boxiness"},
+    {"type": "lowpass",   "hz": 7000, "order": 2,  "_note": "roll off high-frequency noise"}
+  ]
+}

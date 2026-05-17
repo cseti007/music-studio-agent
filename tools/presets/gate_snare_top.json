@@ -1,0 +1,14 @@
+{
+  "name": "gate_snare_top",
+  "description": "Snare top mic — removes hi-hat and cymbal bleed between hits",
+  "notes": "Fast attack (1ms) catches the stick crack immediately. 80ms hold covers snare body. -60dB range leaves a hint of room rather than dead silence, which sounds more natural on snare. Hysteresis 8dB prevents chattering on ghost notes.",
+  "settings": {
+    "threshold_db": -28,
+    "range_db": -60,
+    "attack_ms": 1,
+    "hold_ms": 80,
+    "release_ms": 60,
+    "hysteresis_db": 8,
+    "rms_window_ms": 5
+  }
+}
