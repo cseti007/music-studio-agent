@@ -300,6 +300,12 @@ def _tonal_balance_section(mono: np.ndarray, sr: int, ref_path: Path | None) -> 
 
 
 def _stems_section(stems_dir: Path | None) -> dict:
+    """Detect per-bus pumping. The detector cannot distinguish comp artifact
+    from musical strumming/groove pulse from envelope statistics alone, so a
+    `true` flag is a SUSPICION, not a verdict — verdict is YELLOW (review),
+    not RED (broken). Only RED is used here for the "no stems" error case.
+    Agent should disambiguate per CLAUDE.md "Interpreting pumping_detected".
+    """
     if stems_dir is None or not stems_dir.is_dir():
         return {"available": False, "note": "no stems/ directory — run render_mix --stems first"}
 
@@ -319,8 +325,10 @@ def _stems_section(stems_dir: Path | None) -> dict:
             "bus": f.stem.replace("stem_", ""),
             "pumping": pump,
         })
-    verdict = RED if any_pumping else GREEN
-    return {"available": True, "verdict": verdict, "buses": results}
+    verdict = YELLOW if any_pumping else GREEN
+    note = ("one or more stems flagged — verify musical-pulse vs comp-artifact "
+            "per CLAUDE.md 'Interpreting pumping_detected'") if any_pumping else None
+    return {"available": True, "verdict": verdict, "buses": results, "note": note}
 
 
 def _masking_section(session_dir: Path) -> dict:
@@ -399,15 +407,16 @@ def _render_text(report: dict) -> str:
 
     P = report["stems"]
     lines.append("")
-    lines.append("STEM PUMPING / OVER-COMPRESSION")
+    lines.append("STEM PUMPING / OVER-COMPRESSION (suspicion — verify musical pulse)")
     lines.append("-" * 60)
     if not P["available"]:
         lines.append(f"  (skipped — {P.get('note', '')})")
     else:
         for b in P["buses"]:
             pump = b["pumping"]
-            tag = RED if pump["pumping_detected"] else GREEN
-            detail = f"{pump['pump_rate_hz']} Hz, depth {pump['modulation_depth_db']} dB" \
+            tag = YELLOW if pump["pumping_detected"] else GREEN
+            detail = (f"{pump['pump_rate_hz']} Hz, depth {pump['modulation_depth_db']} dB "
+                      f"(verify: musical pulse vs comp artifact)") \
                 if pump["pumping_detected"] else "clean"
             lines.append(f"  {tag} {b['bus']:<10}  : {detail}")
 

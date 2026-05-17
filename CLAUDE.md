@@ -229,11 +229,51 @@ Read all of these fields from analysis.json and comment on each that is outside 
 | transient_profile.decay_time_ms | transient_profile.decay_time_ms | kick < 150ms, snare < 100ms | Percussive only. Long decay → Sustain- may tighten. Overhead/room mics: ignore. |
 | hum_detection.hum_detected | hum_detection.hum_detected | false | true: apply notch filters per hum_detection.harmonics |
 | frequency_bands_crest_db.* | frequency_bands_crest_db (per band) | 8-15 dB healthy | < 6 dB: band is squashed (avoid multiband / parallel sat on that band). > 18 dB: band is loose (multiband can help). |
-| pumping.pumping_detected | pumping.pumping_detected | false | true: a previous comp/multiband/clipper step is over-aggressive — revert or soften and retry. Check pump_rate_hz to identify the source (matches the release time / sidechain). |
+| pumping.pumping_detected | pumping.pumping_detected | false | true is a **suspicion, not a verdict** — manually disambiguate: is it (a) comp/multiband/clipper artifact, or (b) musical strumming/groove? See "Interpreting pumping_detected" below. |
 
 **Rule:** if all metrics are within range and the spectrogram looks normal for the instrument type,
 say so explicitly ("analysis looks clean — no action needed before next processing step").
 Do not invent problems. Do not recommend processing without a specific reason from the data.
+
+### Interpreting pumping_detected
+
+The pumping detector measures low-frequency envelope modulation (1-5 Hz). It
+fires on both real comp artifacts AND on naturally periodic musical material
+(strumming, hi-hat patterns, repeated kick hits at song tempo). It cannot
+distinguish them from envelope statistics alone — that's the agent's job.
+
+When `pumping_detected: true` appears, before reverting or softening any
+upstream step, run this checklist:
+
+1. **Did the flag appear AFTER a compression / multiband / clipper step?**
+   Compare the analysis JSON from before and after that step. If pumping
+   was `false` before and `true` after, the step caused it — soften the
+   release or reduce the ratio and retry.
+
+2. **Is `pump_rate_hz` close to the song tempo's quarter or eighth note?**
+   At 120 BPM: quarter = 2.0 Hz, eighth = 4.0 Hz, dotted quarter = 1.33 Hz.
+   At 82 BPM (typical rock ballad): quarter = 1.37 Hz. If pump_rate matches
+   the groove pulse, it's likely musical — strumming, kick-snare backbeat,
+   or hi-hat pattern showing up in the envelope, NOT a comp artifact.
+
+3. **What stem is it on?**
+   - Guitar (especially rhythm): periodic strumming pulse — usually musical
+   - Bass: usually follows the kick pattern — musical pulse
+   - Drum buses (per-stem mode): kick pattern — musical pulse
+   - Vocal, master mix, sustained pad: more suspect — comp artifact more likely
+   - Per-instrument with clearly uniform decay everywhere: comp artifact
+
+4. **Does the `modulation_depth_db` exceed `lf_excess_db` by a lot?**
+   - High depth + moderate excess (e.g. depth 18 dB, excess 5 dB) often = musical
+   - High depth + high excess (e.g. depth 8 dB, excess 30 dB) = comp artifact
+   - Synthetic continuous-noise pumping test signals show excess > 20 dB.
+
+If the conclusion is "musical pulse, not artifact": **say so explicitly in the
+verdict and do not revert**. Note it in the session summary so the next
+analysis pass doesn't re-flag it as a problem.
+
+If the conclusion is "comp artifact": revert or soften the offending step,
+re-render, re-analyze, confirm the flag clears.
 
 ## Analysis tool decision tree — when to run what
 
@@ -411,9 +451,13 @@ phase shift, transient smearing, and artifacts.
    - Exciter → spectral_centroid_hz should rise, air_8khz_plus_rms_db should rise
 4. If the metric did not move in the intended direction, **revert** —
    the tool either didn't help or just shifted the problem.
-5. Additionally check `analyze.pumping.pumping_detected`. If it flips to
-   `true` after a comp / multiband / clipper step, the step was too
-   aggressive — revert or soften and retry.
+5. Additionally check `analyze.pumping.pumping_detected`. If it **flips to
+   true** after a comp / multiband / clipper step (i.e. was `false` before
+   the step and `true` after), the step is the cause — revert or soften
+   and retry. If it was already `true` before the step (musical pulse —
+   common on guitar / drum buses), the step did not cause it; do not
+   revert on that ground. See "Interpreting pumping_detected" for the
+   musical-vs-artifact disambiguation checklist.
 
 **Do not chain make-it-hit tools blindly.** A typical "make it hit harder"
 session adds at most ONE of: clipper, multiband, or parallel-sat per bus.
