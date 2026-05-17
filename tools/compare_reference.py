@@ -139,6 +139,79 @@ def _recommendations(
     return recs
 
 
+# Maximum number of peak EQ filters --apply will inject. The strongest deltas
+# win; more than ~6 filters chained tend to phase-smear rather than help.
+_APPLY_MAX_FILTERS = 6
+# Cap individual filter gain so a single band swing can't push the chain
+# into clipping / extreme resonance.
+_APPLY_MAX_FILTER_DB = 6.0
+_APPLY_DEFAULT_Q = 1.5
+
+
+def _filters_from_delta(
+    delta_bands: list[dict],
+    threshold_db: float,
+    max_filters: int = _APPLY_MAX_FILTERS,
+) -> list[dict]:
+    """Convert per-band deltas into a list of peak-EQ filter specs.
+
+    Each filter is the inverse of the delta: if the target is +3 dB above
+    reference at 2 kHz, we insert a peak EQ cut of -3 dB at 2 kHz.
+
+    Filters are sorted by |delta| descending; only the top `max_filters`
+    are returned, and each gain is clamped to ±_APPLY_MAX_FILTER_DB.
+    """
+    candidates = [b for b in delta_bands if abs(b["delta_db"]) >= threshold_db]
+    candidates.sort(key=lambda b: -abs(b["delta_db"]))
+    filters = []
+    for b in candidates[:max_filters]:
+        db = -b["delta_db"]
+        db = max(-_APPLY_MAX_FILTER_DB, min(_APPLY_MAX_FILTER_DB, db))
+        filters.append({
+            "type": "peak",
+            "hz": float(b["hz"]),
+            "q": _APPLY_DEFAULT_Q,
+            "db": round(db, 1),
+            "_auto": f"compare_reference: target was {b['delta_db']:+.1f} dB vs ref at {b['hz']} Hz",
+        })
+    return filters
+
+
+def _apply_eq_to_target(
+    target_path: Path,
+    output_path: Path,
+    filters: list[dict],
+    phase: str = "minimum",
+) -> None:
+    """Run the generated EQ filter chain on the target file via apply_eq.
+
+    Imports apply_eq from the same directory so we don't duplicate the
+    biquad implementations. Output goes to `output_path` directly (we
+    bypass apply_eq's stem-based naming).
+    """
+    sys.path.insert(0, str(Path(__file__).parent))
+    from apply_eq import _build_sos  # noqa: E402
+    from scipy.signal import sosfilt, sosfiltfilt  # noqa: E402
+
+    data, sr = sf.read(str(target_path), always_2d=True)
+    filt_fn = sosfilt if phase == "minimum" else sosfiltfilt
+
+    out_channels = []
+    for ch in range(data.shape[1]):
+        signal = data[:, ch].astype(np.float64)
+        for f in filters:
+            signal = filt_fn(_build_sos(f, sr), signal)
+        out_channels.append(signal)
+    output_data = np.stack(out_channels, axis=1)
+
+    peak = float(np.max(np.abs(output_data)))
+    if peak > 1.0:
+        output_data = output_data / peak
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(output_path), output_data, sr, subtype="PCM_24")
+
+
 def _ascii_chart(delta_bands: list[dict], threshold_db: float) -> str:
     if not delta_bands:
         return ""
@@ -227,6 +300,8 @@ def compare_reference(
     target_path: Path,
     output_dir: Path,
     threshold_db: float = 2.0,
+    apply_output: Path | None = None,
+    apply_phase: str = "minimum",
 ) -> dict:
     ref_data, ref_sr = sf.read(str(reference_path), always_2d=True)
     tgt_data, tgt_sr = sf.read(str(target_path), always_2d=True)
@@ -281,12 +356,14 @@ def compare_reference(
         }
 
     recs = _recommendations(delta_bands, threshold_db)
+    auto_filters = _filters_from_delta(delta_bands, threshold_db)
 
     report = {
         "reference": str(reference_path),
         "target": str(target_path),
         "threshold_db": threshold_db,
         "loudness_match_offset_db": round(lufs_offset, 2),
+        "auto_eq_filters": auto_filters,
         "loudness": {
             "reference_lufs": round(ref_lufs, 1),
             "target_lufs": round(tgt_lufs, 1),
@@ -317,6 +394,23 @@ def compare_reference(
     txt_path.write_text(summary, encoding="utf-8")
 
     print(summary)
+
+    # Auto-apply mode: bake the inverse-delta EQ chain into a new WAV.
+    if apply_output is not None:
+        if not auto_filters:
+            print(f"\n--apply requested but no bands exceed threshold {threshold_db} dB — nothing to do.")
+        else:
+            print(f"\n--apply: writing EQ-matched output to {apply_output}")
+            print(f"  filters ({len(auto_filters)}, phase={apply_phase}):")
+            for f in auto_filters:
+                hz_lbl = f"{f['hz']:6.0f} Hz" if f['hz'] < 1000 else f"{f['hz']/1000:5.2f} kHz"
+                print(f"    {hz_lbl}  Q={f['q']:.1f}  {f['db']:+.1f} dB")
+            _apply_eq_to_target(target_path, apply_output, auto_filters, phase=apply_phase)
+            report["apply_output"] = str(apply_output)
+            report["apply_phase"] = apply_phase
+            # Update the json report with the apply info
+            json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
     return report
 
 
@@ -336,6 +430,16 @@ def main() -> None:
         "--threshold", type=float, default=2.0, metavar="DB",
         help="dB threshold for flagging and generating EQ recommendations (default: 2.0)",
     )
+    parser.add_argument(
+        "--apply", type=Path, metavar="WAV",
+        help="Auto-generate inverse-delta peak EQ filters from the spectral "
+             "comparison and write a corrected WAV to this path. Up to 6 filters, "
+             "each capped at ±6 dB.",
+    )
+    parser.add_argument(
+        "--apply-phase", choices=["minimum", "zero"], default="minimum",
+        help="Phase response for --apply (default: minimum; use zero for mastering chains).",
+    )
     args = parser.parse_args()
 
     for p in (args.reference, args.target):
@@ -343,7 +447,12 @@ def main() -> None:
             print(json.dumps({"error": f"Not found: {p}"}), file=sys.stderr)
             sys.exit(1)
 
-    compare_reference(args.reference, args.target, args.output_dir, args.threshold)
+    compare_reference(
+        args.reference, args.target, args.output_dir,
+        threshold_db=args.threshold,
+        apply_output=args.apply,
+        apply_phase=args.apply_phase,
+    )
 
 
 if __name__ == "__main__":

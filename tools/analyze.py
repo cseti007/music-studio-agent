@@ -48,17 +48,36 @@ def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
     return float(20 * np.log10(max(peak, 1e-10)))
 
 
-def _band_rms_db(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> float:
+def _band_filter(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> np.ndarray:
     nyq = sr / 2.0
     high_norm = min(high_hz / nyq, 0.999)
     low_norm = low_hz / nyq
-
     if low_norm <= 0.001:
         sos = butter(4, high_norm, btype="low", output="sos")
     else:
         sos = butter(4, [low_norm, high_norm], btype="band", output="sos")
+    return sosfilt(sos, signal)
 
-    return _rms_db(sosfilt(sos, signal))
+
+def _band_rms_db(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> float:
+    return _rms_db(_band_filter(signal, sr, low_hz, high_hz))
+
+
+def _band_crest_db(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> float:
+    """Peak-to-RMS ratio (crest factor) within a frequency band.
+
+    High crest = transient-rich / dynamic (room to compress).
+    Low crest  = sustained / already compressed.
+
+    Used to decide whether multiband comp / sub-synth / parallel sat would
+    actually do anything useful in that band.
+    """
+    band = _band_filter(signal, sr, low_hz, high_hz)
+    rms = float(np.sqrt(np.mean(band ** 2)))
+    peak = float(np.max(np.abs(band)))
+    if rms < 1e-10:
+        return 0.0
+    return round(20.0 * np.log10(peak / rms), 1)
 
 
 def _noise_floor_db(signal: np.ndarray, sr: int, frame_sec: float = 0.1) -> float:
@@ -302,6 +321,75 @@ def _lra(data: np.ndarray, sr: int, meter: pyln.Meter) -> float:
         return 0.0
 
 
+def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
+    """Detect compressor pumping artifact via low-frequency envelope modulation.
+
+    Pumping = audible periodic dipping of the signal level caused by a release
+    time tuned wrong (or hit too hard) on a compressor. Spectrally it shows up
+    as energy in the signal's amplitude envelope around 1-5 Hz.
+
+    Method:
+      1. Compute a short-window RMS envelope (10 ms hop).
+      2. High-pass the envelope above 0.5 Hz to remove the overall level.
+      3. Look at envelope spectral peak in 1-5 Hz vs. the 5-15 Hz reference.
+      4. Pumping is detected if the 1-5 Hz peak exceeds the reference by
+         >= 6 dB and the absolute modulation depth exceeds ~5%.
+    """
+    hop_ms = 10.0
+    hop = max(1, int(sr * hop_ms / 1000.0))
+    n_frames = len(signal) // hop
+    if n_frames < 200:
+        return {"pumping_detected": False, "pump_rate_hz": None, "modulation_depth_db": None,
+                "note": "signal too short for pumping analysis"}
+
+    env = np.array([
+        np.sqrt(np.mean(signal[i * hop:(i + 1) * hop] ** 2) + 1e-20)
+        for i in range(n_frames)
+    ])
+    env_sr = sr / hop  # ~100 Hz
+
+    # Remove DC and very slow drift (< 0.5 Hz)
+    from scipy.signal import butter as _butter_local
+    sos_hp = _butter_local(2, 0.5 / (env_sr / 2.0), btype="high", output="sos")
+    env_hp = sosfilt(sos_hp, env)
+
+    # Spectrum of the envelope
+    nperseg = min(len(env_hp), 1024)
+    freqs, psd = welch(env_hp, fs=env_sr, nperseg=nperseg)
+
+    def _band_peak_db(lo, hi):
+        mask = (freqs >= lo) & (freqs < hi)
+        if not mask.any():
+            return -120.0
+        peak = float(np.max(psd[mask]))
+        return 10.0 * np.log10(peak + 1e-20)
+
+    pump_peak_db = _band_peak_db(1.0, 5.0)
+    ref_peak_db = _band_peak_db(5.0, 15.0)
+    excess_db = pump_peak_db - ref_peak_db
+
+    # Modulation depth: peak-to-trough swing in envelope (dB), as a sanity gate
+    p95 = float(np.percentile(env, 95))
+    p5 = float(np.percentile(env, 5))
+    if p5 < 1e-9 or p95 < 1e-9:
+        depth_db = 0.0
+    else:
+        depth_db = 20.0 * np.log10(p95 / p5)
+
+    pumping = bool(excess_db >= 6.0 and depth_db >= 5.0)
+
+    # Identify the actual pump rate within 1-5 Hz
+    mask = (freqs >= 1.0) & (freqs < 5.0)
+    pump_rate = float(freqs[mask][int(np.argmax(psd[mask]))]) if mask.any() else None
+
+    return {
+        "pumping_detected": pumping,
+        "pump_rate_hz": round(pump_rate, 2) if pump_rate is not None else None,
+        "modulation_depth_db": round(depth_db, 1),
+        "lf_excess_db": round(excess_db, 1),
+    }
+
+
 def _crest_factor_db(signal: np.ndarray) -> float:
     """Peak-to-RMS ratio in dB. High = dynamic material, low = compressed."""
     rms = np.sqrt(np.mean(signal ** 2))
@@ -439,6 +527,11 @@ def _stats_summary_text(stats: dict) -> str:
         corr = stereo.get("lr_correlation", "n/a")
         width = stereo.get("ms_width_ratio", "n/a")
         lines.append(f"  Stereo: balance {abs(bal):.1f} dB ({side})  |  LR corr {corr}  |  M/S width {width}")
+    pump = stats.get("pumping")
+    if pump and pump.get("pumping_detected"):
+        rate = pump.get("pump_rate_hz", "n/a")
+        depth = pump.get("modulation_depth_db", "n/a")
+        lines.append(f"  [!] Pumping: {rate} Hz, depth {depth} dB — likely over-compressed")
     return "\n".join(lines)
 
 
@@ -511,6 +604,10 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
         f"{name}_rms_db": round(_band_rms_db(mono, sr, lo, hi), 1)
         for name, (lo, hi) in freq_bands.items()
     }
+    frequency_bands_crest_db = {
+        f"{name}_crest_db": _band_crest_db(mono, sr, lo, hi)
+        for name, (lo, hi) in freq_bands.items()
+    }
 
     print("  [2/5] Spectral analysis (mel spectrogram)...", flush=True)
     text_spec = _text_spectrogram(mono, sr)
@@ -518,13 +615,16 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
     print("  [3/5] Frequency response (1/3-octave Welch PSD)...", flush=True)
     freq_response = _frequency_response(mono, sr)
 
-    print("  [4/5] Hum detection...", flush=True)
+    print("  [4/6] Hum detection...", flush=True)
     hum = _detect_hum(mono, sr)
 
-    print("  [5/5] Onset detection + transient profile...", flush=True)
+    print("  [5/6] Onset detection + transient profile...", flush=True)
     transient_density = _transient_density(mono, sr)
     spec_centroid = _spectral_centroid_hz(mono, sr)
     transient_prof = _transient_profile(mono, sr)
+
+    print("  [6/6] Pumping / over-compression detection...", flush=True)
+    pumping = _detect_pumping(mono, sr)
 
     stats = {
         "file": str(file_path),
@@ -540,12 +640,14 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
             "crest_factor_db": crest_factor,
         },
         "frequency_bands": frequency_bands,
+        "frequency_bands_crest_db": frequency_bands_crest_db,
         "noise_floor_dbfs": noise_floor,
         "hum_detection": hum,
         "frequency_response": freq_response,
         "transient_density_per_sec": transient_density,
         "spectral_centroid_hz": spec_centroid,
         "transient_profile": transient_prof,
+        "pumping": pumping,
         "recommended_gain_db": recommended_gain,
         "spectrogram_text": text_spec,
     }

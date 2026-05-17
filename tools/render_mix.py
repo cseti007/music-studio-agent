@@ -360,6 +360,69 @@ def _apply_bus_reverb(buf: np.ndarray, sr: int, preset_name: str, wet: float) ->
     return (reverb_out * wet).T  # (2, N)
 
 
+def _bus_parallel_sat_relevance_check(buf: np.ndarray, sr: int, bus_name: str) -> dict:
+    """Decide whether parallel saturation on a drum bus would help.
+
+    Conditions:
+      - Bus crest factor > 10 dB (transient life left to saturate)
+      - Bus is the drum bus (other instruments don't benefit the same way)
+    """
+    rms = float(np.sqrt(np.mean(buf ** 2)))
+    peak = float(np.max(np.abs(buf)))
+    crest_db = 20.0 * np.log10(peak / max(rms, 1e-10)) if rms > 1e-10 else 0.0
+
+    meter = pyln.Meter(sr)
+    try:
+        lra = float(meter.loudness_range(buf.T))
+    except Exception:
+        lra = 0.0
+
+    issues = []
+    if crest_db < 10.0:
+        issues.append(f"crest {crest_db:.1f} dB < 10 — bus already squashed; parallel sat adds fuzz, not punch")
+    if lra < 4.0:
+        issues.append(f"LRA {lra:.1f} LU < 4 — too compressed for parallel sat to add life")
+    if bus_name.lower() != "drums":
+        issues.append(f"bus is '{bus_name}', not 'drums' — parallel sat preset tuned for drum kit")
+
+    return {
+        "tool": "drum_bus_parallel_sat",
+        "bus": bus_name,
+        "crest_db": round(crest_db, 1),
+        "lra_lu": round(lra, 1),
+        "recommend_skip": bool(issues),
+        "issues": issues,
+    }
+
+
+def _parallel_saturate(buf: np.ndarray, mode: str, drive: float, mix: float) -> np.ndarray:
+    """Blend a saturated copy of `buf` back into the dry signal.
+
+    mode: 'tube'   = asymmetric tanh (even harmonics, warmth)
+          'tape'   = symmetric tanh   (odd+even, smooth)
+          'clipper'= cubic soft clip  (odd, presence)
+    drive: 0.0-1.0, amount of saturation push
+    mix: 0.0-1.0, blend amount of the saturated copy on top of the dry
+    """
+    if drive <= 0 or mix <= 0:
+        return buf
+    in_rms = np.sqrt(np.mean(buf ** 2) + 1e-12)
+    x = buf * (1.0 + drive * 3.0)
+    if mode == "tube":
+        # Asymmetric: positive side soft-clips earlier
+        sat = np.where(x >= 0, np.tanh(x * 1.2), np.tanh(x))
+    elif mode == "clipper":
+        # Cubic soft clip — odd harmonics
+        clipped = np.clip(x, -1.0, 1.0)
+        sat = clipped - (clipped ** 3) / 3.0
+    else:  # tape
+        sat = np.tanh(x)
+    out_rms = np.sqrt(np.mean(sat ** 2) + 1e-12)
+    if out_rms > 1e-10:
+        sat = sat * (in_rms / out_rms)
+    return buf + sat * mix
+
+
 def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
     """Symmetric tanh soft clipping (tape saturation). buf: (2, N). RMS-normalized.
 
@@ -378,6 +441,74 @@ def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
     return out
 
 
+def _soft_clip(buf: np.ndarray, threshold_db: float, knee_db: float = 1.5) -> np.ndarray:
+    """Cubic soft clipper. Above threshold the signal is gradually rounded
+    over a knee_db transition; far above threshold it asymptotes to the
+    ceiling. Generates mostly odd-order harmonics, like a console clipper.
+
+    Use BEFORE the brick-wall limiter for modern loudness without "squashed"
+    feel: clipper handles the peaks musically, limiter just catches strays.
+    """
+    threshold_lin = 10.0 ** (threshold_db / 20.0)
+    knee_lin = 10.0 ** (knee_db / 20.0)
+    out = buf.copy()
+    abs_buf = np.abs(buf)
+
+    # Three zones: below knee start, inside knee, above knee
+    knee_start = threshold_lin / knee_lin
+    knee_end = threshold_lin * knee_lin
+
+    # Knee region: smooth cubic transition
+    in_knee = (abs_buf >= knee_start) & (abs_buf < knee_end)
+    if in_knee.any():
+        # Normalise position in the knee to [0, 1]
+        x = (abs_buf[in_knee] - knee_start) / (knee_end - knee_start)
+        # Cubic ease-out that asymptotes near the ceiling
+        gain = 1.0 - x * x * (3.0 - 2.0 * x) * (1.0 - threshold_lin / abs_buf[in_knee])
+        out[in_knee] = np.sign(buf[in_knee]) * abs_buf[in_knee] * gain
+
+    # Above-knee region: hard ceiling at threshold
+    above = abs_buf >= knee_end
+    if above.any():
+        out[above] = np.sign(buf[above]) * threshold_lin
+
+    return out
+
+
+def _hard_clip(buf: np.ndarray, threshold_db: float) -> np.ndarray:
+    threshold_lin = 10.0 ** (threshold_db / 20.0)
+    return np.clip(buf, -threshold_lin, threshold_lin)
+
+
+def _clipper_relevance_check(master: np.ndarray, sr: int) -> dict:
+    """Decide whether a clipper would do anything useful BEFORE applying it.
+
+    Conditions for use:
+      - Sample peak headroom > 2 dB (so the clipper has somewhere to work)
+      - LRA > 4 LU after glue comp (so we're not crushing already-flat material)
+    """
+    sample_peak_db = 20.0 * np.log10(float(np.max(np.abs(master))) + 1e-12)
+    meter = pyln.Meter(sr)
+    try:
+        lra = float(meter.loudness_range(master.T))
+    except Exception:
+        lra = 0.0
+
+    issues = []
+    if sample_peak_db < -10:
+        issues.append(f"peak {sample_peak_db:.1f} dBFS — nothing for clipper to clip")
+    if lra < 4.0:
+        issues.append(f"LRA {lra:.1f} LU — already too compressed, clipper will add fatigue")
+
+    return {
+        "tool": "master_clipper",
+        "sample_peak_dbfs": round(sample_peak_db, 2),
+        "lra_lu": round(lra, 1),
+        "recommend_skip": bool(issues),
+        "issues": issues,
+    }
+
+
 def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
     """4x-oversampled true peak in dBFS for a (2, N) stereo buffer.
 
@@ -389,6 +520,104 @@ def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
     up_r = _resample_poly(master[1], oversample, 1)
     tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
     return 20.0 * np.log10(max(tp, 1e-12))
+
+
+def _ms_encode(master: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """L/R stereo → (mid, side). Energy-preserving (no 1/sqrt(2) factor)."""
+    mid = (master[0] + master[1]) * 0.5
+    side = (master[0] - master[1]) * 0.5
+    return mid, side
+
+
+def _ms_decode(mid: np.ndarray, side: np.ndarray) -> np.ndarray:
+    """(mid, side) → L/R stereo."""
+    L = mid + side
+    R = mid - side
+    return np.vstack([L, R])
+
+
+def _ms_relevance_check(master: np.ndarray, ms_cfg: dict, sr: int) -> dict:
+    """Decide whether M/S processing would help.
+
+    Conditions:
+      - The mix has actual side content (rms(side) / rms(mid) > 0.05).
+        A near-mono mix won't benefit and could just create stereo problems.
+      - If side gain > 0 dB is configured, the existing width can't already be huge
+        (ms_width_ratio < 0.5), or we risk breaking mono compatibility.
+    """
+    mid, side = _ms_encode(master)
+    rms_m = float(np.sqrt(np.mean(mid ** 2) + 1e-12))
+    rms_s = float(np.sqrt(np.mean(side ** 2) + 1e-12))
+    width_ratio = rms_s / max(rms_m, 1e-10)
+
+    issues = []
+    if width_ratio < 0.05:
+        issues.append(
+            f"M/S width {width_ratio:.3f} < 0.05 — mix is near-mono, M/S processing has no audible target"
+        )
+    side_eq = ms_cfg.get("side_eq", [])
+    side_boost = any(f.get("db", 0) > 0 for f in side_eq)
+    if side_boost and width_ratio > 0.5:
+        issues.append(
+            f"side EQ boost requested but width {width_ratio:.3f} > 0.5 — risk of mono-compat breakage"
+        )
+
+    return {
+        "tool": "ms_processing",
+        "ms_width_ratio": round(width_ratio, 3),
+        "recommend_skip": bool(issues),
+        "issues": issues,
+    }
+
+
+def _ms_apply_eq(channel: np.ndarray, sr: int, filters: list) -> np.ndarray:
+    """Apply EQ chain to a single mono channel (mid or side). Zero-phase."""
+    if not _HAS_EQ or not filters:
+        return channel
+    out = channel.copy()
+    for f in filters:
+        ftype = f.get("type", "")
+        if ftype == "highpass":
+            sos = _hp_sos(f["hz"], f.get("order", 2), sr)
+        elif ftype == "lowpass":
+            sos = _lp_sos(f["hz"], f.get("order", 2), sr)
+        elif ftype == "highshelf":
+            sos = _highshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
+        elif ftype == "lowshelf":
+            sos = _lowshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
+        elif ftype == "peak":
+            sos = _peak_sos(f["hz"], f.get("q", 1.0), f["db"], sr)
+        else:
+            continue
+        out = _sosfiltfilt(sos, out)
+    return out
+
+
+def _apply_ms_processing(master: np.ndarray, sr: int, ms_cfg: dict) -> tuple[np.ndarray, dict]:
+    """Run M/S processing on the master chain. Returns (processed_master, report)."""
+    rel = _ms_relevance_check(master, ms_cfg, sr)
+    if rel["recommend_skip"]:
+        return master, {"settings": ms_cfg, "relevance_check": rel, "applied": False}
+
+    mid, side = _ms_encode(master)
+
+    # Mid/Side independent gains
+    mid_gain_db = float(ms_cfg.get("mid_gain_db", 0.0))
+    side_gain_db = float(ms_cfg.get("side_gain_db", 0.0))
+    if mid_gain_db != 0.0:
+        mid = mid * 10.0 ** (mid_gain_db / 20.0)
+    if side_gain_db != 0.0:
+        side = side * 10.0 ** (side_gain_db / 20.0)
+
+    # Mid/Side independent EQ
+    mid = _ms_apply_eq(mid, sr, ms_cfg.get("mid_eq", []))
+    side = _ms_apply_eq(side, sr, ms_cfg.get("side_eq", []))
+
+    return _ms_decode(mid, side), {
+        "settings": ms_cfg,
+        "relevance_check": rel,
+        "applied": True,
+    }
 
 
 def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
@@ -507,6 +736,20 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             buf = _tape_saturate(buf, sat_drive)
             print(f"  Bus '{bus_name}': + tape saturation drive={sat_drive}")
 
+        # Parallel saturation: blend a saturated copy back in. Make-it-hit
+        # tool — guarded by relevance_check (drum bus only, must have crest).
+        psat_cfg = cfg.get("parallel_saturation")
+        if psat_cfg:
+            rel = _bus_parallel_sat_relevance_check(buf, sr, bus_name)
+            if rel["recommend_skip"]:
+                print(f"  Bus '{bus_name}': parallel sat SKIPPED — {'; '.join(rel['issues'])}")
+            else:
+                mode = str(psat_cfg.get("mode", "tube"))
+                drive = float(psat_cfg.get("drive", 0.5))
+                mix = float(psat_cfg.get("mix", 0.2))
+                buf = _parallel_saturate(buf, mode, drive, mix)
+                print(f"  Bus '{bus_name}': + parallel sat ({mode}, drive={drive}, mix={mix})")
+
         reverb_cfg = cfg.get("reverb_send")
         if reverb_cfg:
             if not _HAS_REVERB:
@@ -553,6 +796,46 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         print(f"  Master comp: {master_comp['threshold_db']}dB threshold  {master_comp.get('ratio', 2.0)}:1  "
               f"att={master_comp.get('attack_ms', 10.0)}ms  rel={master_comp.get('release_ms', 300.0)}ms  "
               f"-> GR {gr_lufs:+.1f} LUFS  peak {peak_post_comp:.1f} dBFS")
+
+    # Master clipper (optional). Place between glue comp and EQ — clipper
+    # shapes peaks musically; the brick-wall limiter at the end only catches
+    # what's left. Skipped automatically if relevance_check flags issues.
+    clipper_cfg = master_cfg.get("clipper")
+    clipper_report: dict | None = None
+    if clipper_cfg:
+        rel = _clipper_relevance_check(master, sr)
+        clipper_report = {"settings": clipper_cfg, "relevance_check": rel}
+        if rel["recommend_skip"]:
+            print(f"  Clipper: SKIPPED — {'; '.join(rel['issues'])}")
+        else:
+            mode = str(clipper_cfg.get("mode", "soft")).lower()
+            threshold = float(clipper_cfg.get("threshold_db", -1.0))
+            knee = float(clipper_cfg.get("knee_db", 1.5))
+            peak_pre = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+            if mode == "hard":
+                master = _hard_clip(master, threshold)
+            else:
+                master = _soft_clip(master, threshold, knee)
+            peak_post = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+            print(f"  Master clipper ({mode}): threshold {threshold:.1f} dBFS  "
+                  f"knee {knee:.1f} dB  -> peak {peak_pre:.1f} → {peak_post:.1f} dBFS")
+            clipper_report["applied"] = True
+
+    # M/S processing (optional). Place AFTER glue comp + clipper, BEFORE
+    # final master EQ — gives M/S the cleanest input to widen, then the
+    # master EQ still has the last spectral say.
+    ms_cfg = master_cfg.get("ms")
+    ms_report: dict | None = None
+    if ms_cfg:
+        master, ms_report = _apply_ms_processing(master, sr, ms_cfg)
+        if ms_report.get("applied"):
+            mid_g = ms_cfg.get("mid_gain_db", 0.0)
+            side_g = ms_cfg.get("side_gain_db", 0.0)
+            print(f"  M/S: mid {mid_g:+.1f} dB, side {side_g:+.1f} dB  "
+                  f"(width ratio {ms_report['relevance_check']['ms_width_ratio']:.3f})")
+        else:
+            issues = ms_report["relevance_check"]["issues"]
+            print(f"  M/S: SKIPPED — {'; '.join(issues)}")
 
     # Master bus EQ (optional, zero-phase)
     master_eq = master_cfg.get("eq")
@@ -620,6 +903,8 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         "true_peak_dbtp": round(peak_final, 2),
         "sample_peak_dbfs": round(sample_peak_after, 2),
         "duration_s": round(max_length / sr, 3),
+        "clipper": clipper_report,
+        "ms": ms_report,
     }
     report_path = output_wav.with_name(output_wav.stem + "_report.json")
     with open(report_path, "w") as f:

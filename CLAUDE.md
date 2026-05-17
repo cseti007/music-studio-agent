@@ -46,9 +46,34 @@ python3 tools/<script>.py
 | `tools/apply_amp.py` | Tube amp simulation + cabinet EQ for bass DI. Asymmetric soft clipping (even harmonics) + cabinet frequency response. Presets: ampeg_svt, ampeg_svt_driven, ampeg_slap, slap_bass, di_clean. | `<file> --preset NAME [--drive 0-1] [--asymmetry 0-1] [--hp HZ] [--lp HZ] [--low-shelf-hz HZ] [--low-shelf-db DB] [--mid-hz HZ] [--mid-db DB] [--mid-q Q] --output-dir DIR` |
 | `tools/apply_saturation.py` | Harmonic saturation: tape (symmetric tanh, even+odd), tube (asymmetric tanh, even harmonics → warmth), clipper (cubic soft clip, odd harmonics → presence). RMS-normalized output. Parallel mode via --mix. Presets: sat_tape_subtle, sat_tape_drums, sat_tube_bass, sat_tube_guitar, sat_clipper_parallel. | `<file> --output-dir DIR [--preset NAME] [--mode tape\|tube\|clipper] [--drive 0-1] [--asymmetry 0-1] [--mix 0-1]` |
 | `tools/apply_delay.py` | Delay/echo: normal (slapback, single echo, multi-tap with feedback) and pingpong (alternating L/R, mono→stereo). BPM-synced via --bpm + --division. HP/LP on wet signal. Send mode (--send) for bus return routing. Presets: delay_slapback_snare, delay_slapback_guitar, delay_pingpong_send, delay_pre_delay. | `<file> --output-dir DIR [--preset NAME] [--mode normal\|pingpong] [--delay-ms MS] [--feedback 0-0.95] [--mix 0-1] [--bpm BPM] [--division eighth\|dotted-eighth\|...] [--hp HZ] [--lp HZ] [--send]` |
-| `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB]` |
+| `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 dBFS before comparison. Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
-| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, comp_preset, saturation (tape), reverb_send. Master chain: glue comp + EQ + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. | `output/<session> --generate-config` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
+| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. | `output/<session> --generate-config` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
+| `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last — it tells you if the mix is ready or what still needs work.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
+
+### Make-it-hit tools — DATA-GATED, NOT DEFAULT
+
+These tools add perceived loudness, weight, or width. **They are NOT default
+processing steps.** Each one ships with a built-in `relevance_check` that
+analyses the input and may set `recommend_skip: true` with reasons. When that
+happens, the tool refuses to write audio (unless `--force` is passed) and
+writes a report explaining why. **Honour the skip.** See "Make-it-hit decision
+rules" below for when each one is allowed.
+
+| Tool | What it does | Key args |
+|---|---|---|
+| `tools/apply_subharm.py` | Sub-bass harmonic synthesizer: generates 2nd/3rd harmonics of the 40-80 Hz fundamental so the low end translates to phones / laptops / BT speakers via the missing-fundamental psychoacoustic. Refuses if the stem has no sub content (sub_60hz < -35 dBFS) or sub is already squashed (band crest < 8 dB). Presets: subharm_subtle, subharm_kick, subharm_strong. | `<file> --output-dir DIR --preset NAME [--drive N] [--harmonic-mix 0-1] [--force]` |
+| `tools/apply_haas.py` | Stereo widener via channel delay (5-25 ms). Mono-compat caveat — comb-filters when summed. Refuses on already-wide stems (ms_width > 0.3) or bass-heavy stems (mud risk). Presets: haas_guitar, haas_vocal_doubler, haas_synth_pad. | `<file> --output-dir DIR --preset NAME [--delay-ms MS] [--side L\|R] [--wet 0-1] [--force]` |
+| `tools/apply_exciter.py` | HF harmonic generator (Aphex-style). HP + saturate + mix back in. Refuses on already-bright stems (air band > -40 dBFS or centroid > 4 kHz). Presets: exciter_vocal_air, exciter_acoustic_guitar, exciter_dull_mix. | `<file> --output-dir DIR --preset NAME [--hp-hz HZ] [--drive N] [--mix 0-1] [--force]` |
+| `tools/apply_multiband_comp.py` | 3-band multiband compressor with Linkwitz-Riley LR4 crossovers. Independent threshold/ratio/attack/release per band. Refuses on already-squashed material (< 2 bands with crest >= 6 dB) or short signals (< 5s). Presets: mb_master_glue, mb_drum_bus, mb_bass. | `<file> --output-dir DIR --preset NAME [--low-thr DB] [--low-ratio N] [--mid-thr DB] ... [--force]` |
+
+In addition, three make-it-hit features live INSIDE `render_mix.py` as master/bus chain options:
+
+- **Master clipper** — soft cubic or hard clip before the brick-wall limiter. Configured under `master.clipper: {threshold_db, knee_db, mode}`. Refuses if sample peak < -10 dBFS or LRA < 4 LU (nothing to clip / already crushed).
+- **M/S processing** — independent mid and side EQ + gain. Configured under `master.ms: {mid_eq, side_eq, mid_gain_db, side_gain_db}`. Refuses on near-mono mixes (width < 0.05) or when boosting side on already-wide mixes (width > 0.5).
+- **Drum bus parallel saturation** — blend a tube/tape/clipper-saturated copy of the drum bus back in. Configured under `buses.drums.parallel_saturation: {mode, drive, mix}`. Refuses on bus crest < 10 dB, LRA < 4 LU, or non-drum buses.
+
+The skip/apply decision and reason go into `mix_report.json` for the render and `<tool>_report.json` for each standalone tool.
 
 ## Output structure
 
@@ -185,6 +210,8 @@ Read all of these fields from analysis.json and comment on each that is outside 
 | transient_profile.transient_prominence_std_db | transient_profile.transient_prominence_std_db | < half of mean | std > mean on ANY instrument → uneven playing. Primary unevenness indicator for slap bass. Suggests compression. |
 | transient_profile.decay_time_ms | transient_profile.decay_time_ms | kick < 150ms, snare < 100ms | Percussive only. Long decay → Sustain- may tighten. Overhead/room mics: ignore. |
 | hum_detection.hum_detected | hum_detection.hum_detected | false | true: apply notch filters per hum_detection.harmonics |
+| frequency_bands_crest_db.* | frequency_bands_crest_db (per band) | 8-15 dB healthy | < 6 dB: band is squashed (avoid multiband / parallel sat on that band). > 18 dB: band is loose (multiband can help). |
+| pumping.pumping_detected | pumping.pumping_detected | false | true: a previous comp/multiband/clipper step is over-aggressive — revert or soften and retry. Check pump_rate_hz to identify the source (matches the release time / sidechain). |
 
 **Rule:** if all metrics are within range and the spectrogram looks normal for the instrument type,
 say so explicitly ("analysis looks clean — no action needed before next processing step").
@@ -294,6 +321,58 @@ The file should contain three sections:
 - Any hum eliminated
 
 After writing the file, tell the user where it was saved.
+
+## Make-it-hit decision rules
+
+The make-it-hit tools (subharm, haas, exciter, multiband, master clipper,
+M/S, drum bus parallel sat) exist to **add perceived loudness, weight, or
+width**. They are powerful and easy to overuse — agents pattern-match to
+"more processing = better mix" and stack them. **DO NOT.** Use only when
+the analysis data justifies it. The 2026 rock-mix best practice is "don't
+over-process — keep the band's raw energy".
+
+**Required data evidence before applying each tool:**
+
+| Tool | Required evidence (from analyze.py or render output) |
+|---|---|
+| Master clipper | Mix LUFS > -12 after glue comp; LRA > 4 LU; sample peak > -10 dBFS |
+| Sub-bass synth (`apply_subharm`) | `frequency_bands.sub_60hz_rms_db` >= -35; `frequency_bands_crest_db.sub_60hz_crest_db` >= 8; stem is bass or kick |
+| Drum bus parallel sat | Drum bus crest factor > 10 dB; LRA > 4 LU; user explicitly asked for "punchier drums" or a "fatter kit" |
+| Spectral exciter | `spectral_centroid_hz` < 4000; `frequency_bands.air_8khz_plus_rms_db` < -40 |
+| M/S width | `stereo.ms_width_ratio` < 0.2 if side boost; do NOT boost side if width > 0.5 |
+| Haas widener | `stereo.ms_width_ratio` < 0.3; NOT on bass / low-centroid stems |
+| Multiband comp | At least 2 bands with `frequency_bands_crest_db` >= 6 dB; duration > 5s |
+| compare_reference --apply | Largest delta band > 2 dB AND it's a tonal/balance issue (not an obvious EQ omission earlier in the chain) |
+
+**If the data does not match, DO NOT apply the tool.** The `relevance_check`
+in each tool's report will say `recommend_skip: true` with specific reasons.
+That is the source of truth — do not override with `--force` unless the user
+explicitly asks.
+
+**Process budget:** a single stem chain should not exceed 4 processing
+steps total (typically: gain → EQ → comp → one fx). If you are about to add
+a 5th step, **stop and re-examine** whether the earlier steps actually
+solved the problem. More processing on already-processed audio compounds
+phase shift, transient smearing, and artifacts.
+
+**Re-analyze after every make-it-hit step:**
+
+1. Apply the tool.
+2. Immediately run `analyze.py` on the output.
+3. Compare the targeted metric:
+   - Sub-bass synth on a bass DI → sub_60hz_rms_db should rise ~3-6 dB
+   - Master clipper → integrated_lufs should rise 1-3 dB without LRA collapsing
+   - Multiband → per-band crest should tighten in the targeted band
+   - Exciter → spectral_centroid_hz should rise, air_8khz_plus_rms_db should rise
+4. If the metric did not move in the intended direction, **revert** —
+   the tool either didn't help or just shifted the problem.
+5. Additionally check `analyze.pumping.pumping_detected`. If it flips to
+   `true` after a comp / multiband / clipper step, the step was too
+   aggressive — revert or soften and retry.
+
+**Do not chain make-it-hit tools blindly.** A typical "make it hit harder"
+session adds at most ONE of: clipper, multiband, or parallel-sat per bus.
+Stacking all three creates fatigue, not punch.
 
 ## Ground rules
 
