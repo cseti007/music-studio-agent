@@ -136,6 +136,14 @@ output/
 
 **Session-level analysis always goes to `output/<session>/analysis/`** — never to the session root or mixes/ folder.
 
+**Why analysis files live in three places (don't try to consolidate):**
+Each analysis file is co-located with the asset it describes — this is intentional scoping, not clutter.
+1. **Per-stem analysis** (`analysis.json`, `spectrogram.{png,txt}`, `*_report.json`) lives **next to the stem's audio** in `tracks/<track>/`. Opening a single stem's folder shows its audio + every analysis and processing report for it in one place.
+2. **Session-level / cross-stem analysis** (`audit_report`, `masking_report`, `comparison`, `mix_health`) lives in `analysis/` because it spans multiple stems and doesn't belong to any single one.
+3. **Master-level analysis** (`master_<fmt>_report.json`, `master_health_<fmt>.{json,txt}`) lives in `masters/` **next to the matching `master_<fmt>.wav`** — same co-locate principle as the per-stem case.
+
+Moving any of these into a single flat `analysis/` would either break the audio-next-to-analysis property or force a duplicated mirror directory tree.
+
 ## mix_config.json bus and master fields
 
 ```json
