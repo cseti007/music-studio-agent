@@ -881,6 +881,25 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
               f"true {tp_final:.2f} dBTP")
     peak_final = tp_final
 
+    # Post-limiter LUFS correction. pedalboard.Limiter applies automatic
+    # makeup gain that pushes sample peak up to the threshold, so the
+    # post-limiter loudness drifts above target. Re-measure and re-apply
+    # gain if the actual LUFS deviates by more than 0.3 LU, while keeping
+    # true peak within the ceiling.
+    loudness_post = meter.integrated_loudness(master.T)
+    if np.isfinite(loudness_post):
+        delta_post = target_lufs - loudness_post
+        if abs(delta_post) > 0.3:
+            current_tp = _measure_true_peak_dbfs(master)
+            headroom_db = tp_limit - current_tp
+            corrected_gain_db = delta_post if delta_post < 0 else min(delta_post, headroom_db)
+            master *= 10.0 ** (corrected_gain_db / 20.0)
+            print(f"  Post-limiter LUFS: {loudness_post:.2f} -> applying {corrected_gain_db:+.2f} dB "
+                  f"(target {target_lufs}, headroom {headroom_db:+.2f} dB)")
+            loudness_post = meter.integrated_loudness(master.T)
+            peak_final = _measure_true_peak_dbfs(master)
+    loudness = loudness_post
+
     # Write output
     if output_wav is None:
         out_dir = Path(config.get("output_dir", "."))

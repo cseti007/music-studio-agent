@@ -69,9 +69,17 @@ def _resolve_audio(filename: str, audio_dir: Path | None) -> str:
     matches = list(audio_dir.glob(filename))
     if matches:
         return str(matches[0])
-    # case-insensitive fallback
+    # Unicode-normalized fallback: ptftool output (NFC, common on Linux)
+    # and disk names (NFD, common on macOS-originated filesystems) can
+    # represent the same character with different code-point sequences.
+    import unicodedata
+    target_nfc = unicodedata.normalize("NFC", filename)
+    target_nfd = unicodedata.normalize("NFD", filename)
     lower = filename.lower()
     for p in audio_dir.iterdir():
+        disk_nfc = unicodedata.normalize("NFC", p.name)
+        if disk_nfc == target_nfc or disk_nfc == target_nfd:
+            return str(p)
         if p.name.lower() == lower:
             return str(p)
     return filename  # unresolved — return as-is

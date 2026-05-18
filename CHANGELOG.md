@@ -80,6 +80,16 @@ per-stem `analysis.json` lacked time-series and tonal-context data.
   duplicated `spectrogram.txt`). The .txt file is the canonical
   human-readable view; the JSON now holds structured data only.
 
+### parse_session: NFC/NFD Unicode normalisation in audio-file resolution
+
+`parse_session.py _resolve_audio()` now matches a clip's `source_file`
+to disk under both NFC and NFD Unicode forms. Pro Tools ptftool emits
+filenames NFC-normalised on Linux output, while audio-folder filenames
+imported from macOS-originated drives can be NFD-normalised — same
+visual character ("ő", "ű", "á"), different code-point sequence. The
+previous code-point-equality match silently failed on these, leaving
+the clip's `source_file` unresolved. Now both forms resolve correctly.
+
 ### Documentation polish (ebfdfc7)
 
 - Documented why analysis files live in three places (per-stem in
