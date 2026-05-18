@@ -847,7 +847,6 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
             "spectral_flux_per_second": spec_flux,
         },
         "recommended_gain_db": recommended_gain,
-        "spectrogram_text": text_spec,
     }
 
     if stereo is not None:
