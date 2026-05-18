@@ -71,6 +71,8 @@ analyze              -- LUFS, LRA, crest, transients, spectrum, stereo,
                         envelopes (RMS / LUFS short-term / spectral flux)
 batch_analyze        -- parallel multiprocessing wrapper around analyze
                         (5-6x faster than the serial loop on 8 cores)
+level_notes          -- per-note volume leveling on a target time range
+                        (opt-in: fixes uneven slap/finger bass takes)
 detect_masking       -- find frequency conflicts between stems (time-gated)
 align_phase          -- phase-align drum mics to kick reference (sub-sample)
 apply_eq             -- notch hum, carve frequencies, instrument presets
@@ -94,6 +96,8 @@ compare_reference    -- spectral + LUFS comparison against a reference track,
                         optional --apply for auto inverse-delta EQ chain
 render_mix           -- sum to stereo, bus routing, master chain
                         (master.clipper / master.ms / parallel_sat — all guarded)
+bus_balance          -- per-bus LUFS contribution report (opt-in
+                        diagnostic — "is bass too loud vs drums?" objectively)
 mix_health           -- green/yellow/red scorecard. REQUIRED before mastering.
 
   ── mix phase ends here ── master phase begins ──
