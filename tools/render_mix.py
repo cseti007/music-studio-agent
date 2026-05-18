@@ -620,12 +620,15 @@ def _apply_ms_processing(master: np.ndarray, sr: int, ms_cfg: dict) -> tuple[np.
     }
 
 
-def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
-    """Apply EQ filter chain to master bus. master: (2, N). Zero-phase (sosfiltfilt)."""
+def _apply_eq_chain(buf: np.ndarray, sr: int, filters: list, label: str = "EQ") -> np.ndarray:
+    """Apply a chain of EQ filters to a stereo buffer. buf: (2, N). Zero-phase (sosfiltfilt).
+
+    `label` is used only for warning prints (e.g. "master EQ" or "bus 'drums' EQ").
+    """
     if not _HAS_EQ:
-        print("  WARNING: apply_eq.py not importable — skipping master EQ")
-        return master
-    out = master.copy()
+        print(f"  WARNING: apply_eq.py not importable — skipping {label}")
+        return buf
+    out = buf.copy()
     for f in filters:
         ftype = f.get("type", "")
         if ftype == "highpass":
@@ -639,10 +642,15 @@ def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
         elif ftype == "peak":
             sos = _peak_sos(f["hz"], f.get("q", 1.0), f["db"], sr)
         else:
-            print(f"  WARNING: unknown master EQ filter type '{ftype}' — skipped")
+            print(f"  WARNING: unknown {label} filter type '{ftype}' — skipped")
             continue
         out = _sosfiltfilt(sos, out, axis=1)
     return out
+
+
+# Backwards-compat alias — older code calls _apply_master_eq
+def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
+    return _apply_eq_chain(master, sr, filters, label="master EQ")
 
 
 def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: bool = False, stage: str | None = None) -> None:
@@ -717,6 +725,16 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         bus_pan = cfg.get("pan", 0.0)
         if bus_pan != 0.0:
             buf = _pan(buf, bus_pan)
+
+        bus_eq = cfg.get("eq")
+        if bus_eq:
+            buf = _apply_eq_chain(buf, sr, bus_eq, label=f"bus '{bus_name}' EQ")
+            filter_summary = ", ".join(
+                f"{f.get('type', '?')}@{f.get('hz', '?')}Hz"
+                + (f" {f.get('db', 0):+.1f}dB" if f.get("db") is not None else "")
+                for f in bus_eq
+            )
+            print(f"  Bus '{bus_name}': + EQ ({filter_summary})")
 
         preset = cfg.get("comp_preset")
         if preset:

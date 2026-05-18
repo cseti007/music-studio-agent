@@ -155,6 +155,9 @@ Moving any of these into a single flat `analysis/` would either break the audio-
   "drums": {
     "volume_db": 0.0,          // bus fader
     "pan": 0.0,                // -1.0 (L) to 1.0 (R), applied after volume
+    "eq": [                    // optional per-bus EQ (zero-phase, applied after volume/pan, BEFORE comp). Same filter schema as master.eq (peak / highshelf / lowshelf / highpass / lowpass)
+      {"type": "peak", "hz": 5000, "q": 1.2, "db": -2.0}  // e.g. cut drum cymbals here without touching guitar/vocal presence
+    ],
     "comp_preset": "comp_drum_bus",  // optional bus compressor preset. Use comp_drum_bus_gentle if the render mix_health LRA falls below 4 LU (the default 4:1 preset crushes dynamics, which then blocks the master clipper and drum bus parallel-sat relevance checks downstream).
     "saturation": {"drive": 0.3},   // optional tape saturation (symmetric tanh)
     "parent_bus": null         // routes into this parent bus
@@ -184,7 +187,7 @@ Moving any of these into a single flat `analysis/` would either break the audio-
 }
 ```
 
-Bus processing order: volume → pan → comp_preset → saturation → parallel_saturation (guarded) → reverb_send
+Bus processing order: volume → pan → **eq (per-bus, zero-phase)** → comp_preset → saturation → parallel_saturation (guarded) → reverb_send
 Master processing order: sum buses → glue comp → clipper (guarded) → M/S (guarded) → EQ → LUFS norm → ISP-aware true-peak limiter
 
 ## Workflow
@@ -343,7 +346,7 @@ anything else; "optional" means run it if there's a specific question to answer.
 | `master_health` returned yellow or red | **Required loop, but read which section** | Tweak `--master-preset` or chain params, re-run `master_mix`, re-run `master_health`. **Hard gates** (LUFS, true peak, phase, punch) red = must fix. **Reference deck red** alone = tonal advisory only; ship if the hard gates are green (see knowledge.md "Reference deck is a tonal GUIDE"). | Same — until green on hard gates |
 | Between processing stages (eq → comp → fx), want to see if masking improved | Optional | `detect_masking.py output/<session> --stage <stage>` | Compare critical/high counts to the earlier run |
 | After rendering, want to compare against reference for master EQ tweaks | Optional | `compare_reference.py reference mixes/mix.wav --output-dir output/<session>/analysis [--apply ...]` | Spectral delta in the rendered mix — feeds master EQ |
-| Mix or master is "done" but no reference track was provided; want a style-aware sanity check (does this sound like the intended genre) | Optional | `style_check.py mix.wav --style <modern_rock\|classic_rock\|pop\|hip_hop\|jazz_acoustic> --output-dir output/<session>/analysis` | 0-100 score + GREEN/YELLOW/RED verdict + per-band EQ recommendations vs. the genre's expected tonal balance, LUFS, LRA, and crest |
+| Mix or master is "done" but no reference track was provided; want a style-aware sanity check (does this sound like the intended genre) | Optional | `style_check.py mix.wav --style <modern_rock\|classic_rock\|pop\|hip_hop\|jazz_acoustic> --output-dir output/<session>/analysis` | 0-100 score + GREEN/YELLOW/RED verdict + per-band EQ recommendations vs. the genre's expected tonal balance, LUFS, LRA, and crest. **Read borderline ([OK*]) bands explicitly** — these are GREEN but at severity ≥ 0.7 (within 30% of the YELLOW threshold). A band sitting at +2.3 dB delta with ±2.5 dB tolerance is GREEN, but it's also "barely GREEN" — call it out so the user knows the verdict is on the edge, not comfortably inside spec. |
 | After `render_mix --render --stems`, want objective per-bus loudness data (e.g. "is the bass actually too loud relative to drums?") | Optional | `bus_balance.py <mix_config.json>` | Effective LUFS contribution per bus (volume_db applied + parent-chain summed). Top-level buses (`[T]`) are the ones summed into master; sub-buses shown for reference. Use to settle perception arguments with measurement. |
 | Source stem has uneven per-note dynamics (slap/finger bass take with wildly varying note levels — per-clip gain can't help because each clip has many notes) | Optional | `level_notes.py <input.wav> --output <out.wav> --end SEC [--start SEC]` | Detects onsets, lifts only the quiet notes via a short ~95 ms boost envelope (no overlap between notes, no reduction of loud notes). Safety-scaled to the modified segment only. Run on the assembled stem before EQ/comp. |
 | Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |

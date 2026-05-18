@@ -577,6 +577,54 @@ class TestStyleCheck:
         assert verdict == "GREEN"
         assert score == 100
 
+    def test_borderline_flag_thresholds(self):
+        """severity 0.7 is the borderline threshold for a GREEN check.
+
+        Below 0.7 → plain GREEN; 0.7..1.0 → GREEN with borderline=True;
+        above 1.0 → no longer GREEN (becomes YELLOW or RED — no borderline).
+        """
+        from style_check import _grade_value
+
+        # Severity 0.4 (well within tolerance): not borderline
+        verdict, severity = _grade_value(measured=-10.4, target=-10.0, tolerance=1.0)
+        assert verdict == "GREEN"
+        assert severity < 0.7, f"got severity {severity}"
+
+        # Severity ~0.8 (close to the yellow threshold): borderline territory
+        verdict, severity = _grade_value(measured=-10.8, target=-10.0, tolerance=1.0)
+        assert verdict == "GREEN"
+        assert severity >= 0.7
+
+        # Severity 1.2 (past tolerance): no longer GREEN
+        verdict, severity = _grade_value(measured=-11.2, target=-10.0, tolerance=1.0)
+        assert verdict == "YELLOW"
+
+
+class TestRenderMixBusEQ:
+    """Per-bus EQ chain in render_mix. Validates that `_apply_eq_chain` runs
+    on a synthetic stereo buffer and shapes the spectrum as expected."""
+
+    def test_apply_eq_chain_attenuates_target_band(self):
+        from render_mix import _apply_eq_chain
+
+        sr = 48000
+        n = sr  # 1 second
+        # White-noise-like input across both channels
+        rng = np.random.default_rng(42)
+        buf = rng.standard_normal((2, n)) * 0.1
+
+        # A 5 kHz peak EQ cut of -6 dB Q=2.0 should reduce 4-6 kHz energy
+        filters = [{"type": "peak", "hz": 5000, "q": 2.0, "db": -6.0}]
+        out = _apply_eq_chain(buf, sr, filters, label="test EQ")
+
+        # Energy in the 4-6 kHz band should drop substantially
+        from scipy.signal import welch
+        f_in, p_in = welch(buf[0], fs=sr, nperseg=2048)
+        f_out, p_out = welch(out[0], fs=sr, nperseg=2048)
+        mask = (f_in >= 4000) & (f_in <= 6000)
+        ratio_db = 10 * np.log10(np.mean(p_out[mask]) / np.mean(p_in[mask]))
+        assert ratio_db < -4, f"4-6 kHz attenuation only {ratio_db:.1f} dB, expected < -4 dB"
+
 
 class TestChainRecall:
     """build_chain → mix_chain.json → replay_chain --dry-run round-trip.

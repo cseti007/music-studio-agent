@@ -193,6 +193,7 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "name": "integrated_lufs", "measured": round(integrated_lufs, 1),
         "target": target_lufs, "delta": round(integrated_lufs - target_lufs, 1),
         "tolerance": profile["lufs"]["tolerance_lu"], "verdict": v, "severity": round(s, 2),
+        "borderline": bool(v == "GREEN" and s >= 0.7),
     })
 
     # LRA — range based
@@ -202,6 +203,7 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "name": "lra_lu", "measured": round(lra, 1),
         "target": profile["lra"]["target_lu"], "range": [lra_min, lra_max],
         "verdict": v, "severity": round(s, 2),
+        "borderline": bool(v == "GREEN" and s >= 0.7),
     })
 
     # Crest — range based
@@ -211,6 +213,7 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "name": "crest_factor_db", "measured": crest,
         "target": profile["crest_factor"]["target_db"], "range": [cr_min, cr_max],
         "verdict": v, "severity": round(s, 2),
+        "borderline": bool(v == "GREEN" and s >= 0.7),
     })
 
     # 5 band checks
@@ -221,13 +224,15 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
             "name": f"band_{band_name}", "measured": meas,
             "target": band_spec["target"], "delta": round(meas - band_spec["target"], 1),
             "tolerance": band_spec["tolerance"], "verdict": v, "severity": round(s, 2),
+            "borderline": bool(v == "GREEN" and s >= 0.7),
         })
 
     verdict, score = _verdict_for_checks(checks)
     counts = {
-        "green":  sum(1 for c in checks if c["verdict"] == "GREEN"),
-        "yellow": sum(1 for c in checks if c["verdict"] == "YELLOW"),
-        "red":    sum(1 for c in checks if c["verdict"] == "RED"),
+        "green":      sum(1 for c in checks if c["verdict"] == "GREEN"),
+        "borderline": sum(1 for c in checks if c.get("borderline")),
+        "yellow":     sum(1 for c in checks if c["verdict"] == "YELLOW"),
+        "red":        sum(1 for c in checks if c["verdict"] == "RED"),
     }
 
     result = {
@@ -270,6 +275,13 @@ def _bar(measured: float, target: float, scale_db: float = 6.0, width: int = 30)
 
 
 _COLOR_TAG = {"GREEN": "[OK]", "YELLOW": "[~~]", "RED": "[!!]"}
+_BORDERLINE_TAG = "[OK*]"  # green but near the yellow threshold (severity >= 0.7)
+
+
+def _tag_for(c: dict) -> str:
+    if c.get("borderline"):
+        return _BORDERLINE_TAG
+    return _COLOR_TAG[c["verdict"]]
 
 
 def _format_text_report(result: dict, profile: dict) -> str:
@@ -277,17 +289,20 @@ def _format_text_report(result: dict, profile: dict) -> str:
     lines.append(f"STYLE CHECK — {result['style_profile']} (profile v{result['profile_version']})")
     lines.append("=" * 70)
     lines.append(f"Mix: {result['mix_file']}")
+    borderline_part = ""
+    if result['counts'].get('borderline'):
+        borderline_part = f"   [{result['counts']['borderline']} borderline]"
     lines.append(f"Verdict: {result['verdict']}    Score: {result['score']}/100    "
                  f"({result['counts']['green']} green / "
                  f"{result['counts']['yellow']} yellow / "
-                 f"{result['counts']['red']} red)")
+                 f"{result['counts']['red']} red){borderline_part}")
     lines.append("")
     lines.append(profile.get("description", ""))
     lines.append("")
     lines.append("LOUDNESS / DYNAMICS")
     lines.append("-" * 70)
     for c in result["checks"][:3]:
-        tag = _COLOR_TAG[c["verdict"]]
+        tag = _tag_for(c)
         if "range" in c:
             r = c["range"]
             lines.append(f"  {tag} {c['name']:<18}  measured {c['measured']:>6.1f}   "
@@ -300,12 +315,25 @@ def _format_text_report(result: dict, profile: dict) -> str:
     lines.append("TONAL BALANCE (LUFS-normalised, dBFS RMS, bar = measured-vs-target ±6 dB)")
     lines.append("-" * 70)
     for c in result["checks"][3:]:
-        tag = _COLOR_TAG[c["verdict"]]
+        tag = _tag_for(c)
         bar = _bar(c["measured"], c["target"])
         name = c["name"].replace("band_", "")
         lines.append(f"  {tag} {name:<18}  {c['measured']:>6.1f} dB  [{bar}] "
                      f"Δ{c['delta']:+5.1f}  (±{c['tolerance']})")
     lines.append("")
+    # Borderline GREEN warnings (severity >= 0.7) — call them out as heads-up
+    borderlines = [c for c in result["checks"] if c.get("borderline")]
+    if borderlines:
+        lines.append("BORDERLINE (GREEN but close to YELLOW — worth noting)")
+        lines.append("-" * 70)
+        for c in borderlines:
+            name = c["name"].replace("band_", "")
+            sev = c.get("severity", 0)
+            if "delta" in c:
+                lines.append(f"  [OK*] {name:<18}  delta {c['delta']:+.1f}  (severity {sev:.2f}, tolerance ±{c.get('tolerance', '?')})")
+            else:
+                lines.append(f"  [OK*] {name:<18}  measured {c['measured']} (severity {sev:.2f}, range {c.get('range', '?')})")
+        lines.append("")
     # Recommendations from each RED / YELLOW band
     recs: list[str] = []
     for c in result["checks"]:
