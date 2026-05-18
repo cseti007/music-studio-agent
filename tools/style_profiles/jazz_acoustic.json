@@ -20,6 +20,11 @@
     "target_db": 17.0,
     "range_db": [14.0, 20.0]
   },
+  "default_bus_volume_db": {
+    "drums":  -3.0,
+    "bass":   -1.0,
+    "guitar":  0.0
+  },
   "tonal_balance_dbfs": {
     "sub_60hz":       {"target": -30.0, "tolerance": 4.0},
     "low_60_250hz":   {"target": -19.0, "tolerance": 2.5},

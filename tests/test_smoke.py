@@ -577,6 +577,41 @@ class TestStyleCheck:
         assert verdict == "GREEN"
         assert score == 100
 
+    def test_all_profiles_have_default_bus_volume_db(self):
+        """Every shipped style profile must specify default_bus_volume_db
+        for the three core buses (drums, bass, guitar)."""
+        from style_check import list_profiles, load_profile
+
+        for name in list_profiles():
+            p = load_profile(name)
+            assert "default_bus_volume_db" in p, f"{name} missing default_bus_volume_db"
+            buses = p["default_bus_volume_db"]
+            for bus in ("drums", "bass", "guitar"):
+                assert bus in buses, f"{name}: missing {bus} bus default"
+                assert isinstance(buses[bus], (int, float)), (
+                    f"{name}.{bus} should be numeric, got {type(buses[bus]).__name__}"
+                )
+
+    def test_render_mix_style_bus_defaults_loaded(self):
+        """render_mix._load_style_bus_defaults returns the profile's bus defaults
+        when given a known style, empty dict for unknown/None."""
+        from render_mix import _load_style_bus_defaults
+
+        # Known profile
+        defaults = _load_style_bus_defaults("modern_rock")
+        assert defaults["drums"] == 0.0
+        assert defaults["bass"] == 0.0
+        assert defaults["guitar"] == -3.0
+
+        # hip_hop should push bass louder, guitar way back
+        hh = _load_style_bus_defaults("hip_hop")
+        assert hh["bass"] == 1.0
+        assert hh["guitar"] == -4.0
+
+        # Unknown / None falls back to empty (caller defaults to 0.0)
+        assert _load_style_bus_defaults(None) == {}
+        assert _load_style_bus_defaults("not_a_real_genre") == {}
+
     def test_borderline_flag_thresholds(self):
         """severity 0.7 is the borderline threshold for a GREEN check.
 

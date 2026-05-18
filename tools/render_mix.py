@@ -116,12 +116,39 @@ def _resolve_stage_file(config_file: str, stage: str) -> str:
 # Config generation
 # ---------------------------------------------------------------------------
 
-def generate_config(session_dir: Path, output_path: Path) -> None:
+def _load_style_bus_defaults(style: str | None) -> dict[str, float]:
+    """Look up `default_bus_volume_db` from the named style profile.
+
+    Returns {} if `style` is None or the profile doesn't exist / lacks
+    the field. Callers should fall back to 0.0 for any bus not in the
+    returned dict.
+    """
+    if not style:
+        return {}
+    profile_path = Path(__file__).resolve().parent / "style_profiles" / f"{style}.json"
+    if not profile_path.exists():
+        print(f"WARNING: style profile '{style}' not found at {profile_path} — "
+              f"using neutral 0 dB bus defaults", file=sys.stderr)
+        return {}
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"WARNING: could not read style profile '{style}': {exc}", file=sys.stderr)
+        return {}
+    return profile.get("default_bus_volume_db", {})
+
+
+def generate_config(session_dir: Path, output_path: Path, style: str | None = None) -> None:
     sr = 48000
     session_json = session_dir / "session.json"
     if session_json.exists():
         with open(session_json) as f:
             sr = json.load(f).get("sample_rate", 48000)
+
+    style_bus_defaults = _load_style_bus_defaults(style)
+    if style_bus_defaults:
+        print(f"Using style '{style}' bus defaults: "
+              + ", ".join(f"{k}={v:+.1f}" for k, v in style_bus_defaults.items()))
 
     tracks_root = session_dir / "tracks"
     scan_dir = tracks_root if tracks_root.is_dir() else session_dir
@@ -172,11 +199,15 @@ def generate_config(session_dir: Path, output_path: Path) -> None:
                 "parent_bus": "guitar",
             }
 
+    # Top-level bus volume_db: use the style profile default if given, else 0 dB
+    def _bus_default(name: str) -> float:
+        return float(style_bus_defaults.get(name, 0.0))
+
     buses = {
-        "drums":  {"volume_db": 0.0, "comp_preset": "comp_drum_bus", "parent_bus": None},
-        "bass":   {"volume_db": 0.0, "comp_preset": None,            "parent_bus": None},
+        "drums":  {"volume_db": _bus_default("drums"),  "comp_preset": "comp_drum_bus", "parent_bus": None},
+        "bass":   {"volume_db": _bus_default("bass"),   "comp_preset": None,            "parent_bus": None},
         **gtr_sub_buses,
-        "guitar": {"volume_db": 0.0, "comp_preset": None,            "parent_bus": None},
+        "guitar": {"volume_db": _bus_default("guitar"), "comp_preset": None,            "parent_bus": None},
     }
 
     mixes_dir = session_dir / "mixes"
@@ -979,6 +1010,10 @@ Examples:
     )
     parser.add_argument("input", help="Session output dir (--generate-config) or mix_config.json (--render)")
     parser.add_argument("--generate-config", action="store_true", help="Scan session dir and write mix_config.json")
+    parser.add_argument("--style", default=None,
+                        help="Style profile for genre-aware bus volume defaults during --generate-config "
+                             "(modern_rock / classic_rock / pop / hip_hop / jazz_acoustic). "
+                             "Without it, every bus starts at 0 dB.")
     parser.add_argument("--config", default=None, help="Config output path (default: <session_dir>/mix_config.json)")
     parser.add_argument("--render", action="store_true", help="Render mix from config")
     parser.add_argument("--output", default=None, help="Output WAV path (default: <output_dir>/mix.wav)")
@@ -996,7 +1031,7 @@ Examples:
         if not session_dir.is_dir():
             parser.error(f"Not a directory: {session_dir}")
         config_path = Path(args.config) if args.config else session_dir / "mix_config.json"
-        generate_config(session_dir, config_path)
+        generate_config(session_dir, config_path, style=args.style)
 
     elif args.render:
         config_path = Path(args.input)

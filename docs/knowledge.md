@@ -1086,6 +1086,22 @@ Every profile JSON has the same shape:
 | `lra` | `target_lu`, `range_lu` | Loudness Range. Range-based grading: inside [min, max] = green. |
 | `crest_factor` | `target_db`, `range_db` | Sample peak vs RMS, range-graded. |
 | `tonal_balance_dbfs` | `{sub_60hz, low_60_250hz, mid_250_2khz, high_2_8khz, air_8khz_plus}` each with `target` + `tolerance` | **Wideband band-RMS measured at the profile's LUFS target**, not iZotope-TBC PSD-curve numbers. Calibrated against real-world streaming masters. |
+| `default_bus_volume_db` | `{drums, bass, guitar}` each with a dB number | Starting `volume_db` for each top-level bus when running `render_mix --generate-config --style NAME`. The neutral-0-dB default rarely matches modern conventions — these per-genre starting points encode the industry-standard bus ratio (drums+bass as foundation in rock, vocal-forward in pop, sub-dominated in hip-hop, etc.). |
+
+### Genre-typical bus starting points (current profile values)
+
+| Profile | drums | bass | guitar | Logic |
+|---|---|---|---|---|
+| **modern_rock** | 0 | 0 | -3 | drums + bass as foundation, guitar 3 dB below |
+| **classic_rock** | 0 | -1 | -1 | midrange-prominent, less sub bass than modern |
+| **pop** | -1 | -1 | -3 | vocal-forward genre (guitars give the vocal space) |
+| **hip_hop** | -1 | +1 | -4 | 808 bass drives the genre; guitar (if any) heavily backed off |
+| **jazz_acoustic** | -3 | -1 | 0 | gentle drums for dynamics; guitar/piano on top |
+
+The agent and user iterate from these starting points; they're a reference,
+not a final answer. After `--style` generation, listen to the first render
+and adjust on a per-session basis (e.g. a particularly bass-heavy bass DI
+might need an extra -2 dB, as the v5 terido iteration documented).
 
 ### How the grading works
 
