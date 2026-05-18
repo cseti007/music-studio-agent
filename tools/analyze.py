@@ -438,9 +438,14 @@ def _stereo_metrics(data: np.ndarray) -> dict:
     }
 
 
-def _transient_density(signal: np.ndarray, sr: int) -> float:
-    """Onset events per second — higher = more transient, lower = sustained."""
-    onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
+def _transient_density(signal: np.ndarray, sr: int, onset_env: np.ndarray | None = None) -> float:
+    """Onset events per second — higher = more transient, lower = sustained.
+
+    `onset_env` may be passed in to avoid recomputing librosa's onset_strength
+    when the caller has already computed it (e.g. for spectral_flux).
+    """
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
     onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
     duration = len(signal) / sr
     if duration < 0.1:
@@ -519,6 +524,154 @@ def _transient_profile(signal: np.ndarray, sr: int) -> dict:
     }
 
 
+def _onsets_sec(signal: np.ndarray, sr: int) -> list[float]:
+    """Onset times in seconds — same detector as _transient_density, exposed as raw list."""
+    frames = librosa.onset.onset_detect(y=signal.astype(np.float32), sr=sr)
+    times = librosa.frames_to_time(frames, sr=sr)
+    return [round(float(t), 3) for t in times]
+
+
+def _tempo_bpm(signal: np.ndarray, sr: int) -> float | None:
+    """Estimated tempo in BPM. Returns None for short signals or unstable estimates."""
+    if len(signal) / sr < 4.0:
+        return None
+    try:
+        tempo, _ = librosa.beat.beat_track(y=signal.astype(np.float32), sr=sr)
+        bpm = float(np.atleast_1d(tempo)[0])
+        if not np.isfinite(bpm) or bpm < 30.0 or bpm > 300.0:
+            return None
+        return round(bpm, 1)
+    except Exception:
+        return None
+
+
+def _rms_envelope_db_per_sec(signal: np.ndarray, sr: int) -> list[float]:
+    """RMS envelope downsampled to 1 Hz, expressed in dBFS.
+
+    Length matches int(duration_sec) — one sample per second. Useful for
+    spotting section-level dynamics (intro / verse / chorus loudness shifts).
+    """
+    duration = len(signal) / sr
+    n_seconds = max(1, int(duration))
+    samples_per_sec = sr
+    out: list[float] = []
+    for i in range(n_seconds):
+        chunk = signal[i * samples_per_sec : (i + 1) * samples_per_sec]
+        if len(chunk) == 0:
+            break
+        rms = float(np.sqrt(np.mean(chunk ** 2) + 1e-12))
+        out.append(round(20.0 * np.log10(max(rms, 1e-10)), 1))
+    return out
+
+
+def _lufs_short_term(data: np.ndarray, sr: int) -> list[float]:
+    """BS.1770 short-term LUFS (3 s window) sampled every 1 s.
+
+    Returns the loudness curve over time — complements integrated_lufs (single
+    number) by showing where in the track the loudness sits. The 1 s step
+    keeps cost bounded on long stems (long takes used to spawn 4000+ meter
+    calls at the previous 0.1 s spacing).
+    """
+    duration = len(data) / sr
+    if duration < 3.0:
+        return []
+
+    meter = pyln.Meter(sr, block_size=3.0)
+    step_samples = sr  # 1 s step
+    block_samples = int(3.0 * sr)
+    out: list[float] = []
+    pos = 0
+    while pos + block_samples <= len(data):
+        block = data[pos : pos + block_samples]
+        try:
+            lufs = float(meter.integrated_loudness(block))
+        except Exception:
+            lufs = -120.0
+        if not np.isfinite(lufs):
+            lufs = -120.0
+        out.append(round(lufs, 1))
+        pos += step_samples
+    return out
+
+
+def _spectral_flux_per_sec(signal: np.ndarray, sr: int, onset_env: np.ndarray | None = None) -> list[float]:
+    """Spectral flux (onset strength) downsampled to 1 Hz.
+
+    Useful for section detection — flux peaks at intro→verse→chorus boundaries
+    where the spectral content changes substantially. Reuses `onset_env` if
+    the caller already computed it.
+    """
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
+    # librosa default hop = 512 → frames-per-sec ≈ sr/512
+    frames_per_sec = sr / 512.0
+    duration = len(signal) / sr
+    n_seconds = max(1, int(duration))
+    out: list[float] = []
+    for i in range(n_seconds):
+        lo = int(i * frames_per_sec)
+        hi = int((i + 1) * frames_per_sec)
+        if lo >= len(onset_env):
+            break
+        out.append(round(float(np.mean(onset_env[lo:hi])), 3))
+    return out
+
+
+# Krumhansl-Schmuckler key profiles (major and minor pitch-class weights)
+_KRUMHANSL_MAJOR = np.array(
+    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+)
+_KRUMHANSL_MINOR = np.array(
+    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+)
+_PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+
+def _estimated_key(signal: np.ndarray, sr: int) -> dict:
+    """Krumhansl-Schmuckler key estimation from a chroma profile.
+
+    Correlates the mean chroma vector against all 24 rotated major/minor
+    Krumhansl profiles. The best-matching rotation is the key; confidence is
+    the correlation coefficient. Tonal stems give clean answers; non-tonal
+    stems (drums, noise) give low confidence (<0.5).
+    """
+    if len(signal) / sr < 4.0:
+        return {"key": None, "mode": None, "confidence": 0.0}
+
+    try:
+        # chroma_stft is 5-10× faster than chroma_cqt on long stems and is
+        # accurate enough for rock-style tonal estimation.
+        chroma = librosa.feature.chroma_stft(y=signal.astype(np.float32), sr=sr)
+    except Exception:
+        return {"key": None, "mode": None, "confidence": 0.0}
+
+    profile = chroma.mean(axis=1)
+    if profile.sum() < 1e-6:
+        return {"key": None, "mode": None, "confidence": 0.0}
+
+    profile = profile / (np.linalg.norm(profile) + 1e-12)
+    maj_n = _KRUMHANSL_MAJOR / np.linalg.norm(_KRUMHANSL_MAJOR)
+    min_n = _KRUMHANSL_MINOR / np.linalg.norm(_KRUMHANSL_MINOR)
+
+    best_score = -1.0
+    best_key = 0
+    best_mode = "major"
+    for shift in range(12):
+        rolled = np.roll(profile, -shift)
+        for mode_name, ref in (("major", maj_n), ("minor", min_n)):
+            score = float(np.dot(rolled, ref))
+            if score > best_score:
+                best_score = score
+                best_key = shift
+                best_mode = mode_name
+
+    return {
+        "key": _PITCH_NAMES[best_key],
+        "mode": best_mode,
+        "confidence": round(best_score, 2),
+    }
+
+
 def _stats_summary_text(stats: dict) -> str:
     lines = ["", "STATS SUMMARY", "-" * 54]
     loud = stats.get("loudness", {})
@@ -529,6 +682,15 @@ def _stats_summary_text(stats: dict) -> str:
     td = stats.get("transient_density_per_sec", "n/a")
     sc = stats.get("spectral_centroid_hz", "n/a")
     lines.append(f"  Transient density: {td} /s  |  Spectral centroid: {sc} Hz")
+    tempo = stats.get("tempo_bpm")
+    key = stats.get("estimated_key", {}) or {}
+    key_str = f"{key.get('key')} {key.get('mode')}" if key.get("key") else "n/a"
+    key_conf = key.get("confidence")
+    tempo_str = f"{tempo} BPM" if tempo is not None else "n/a"
+    if key_conf is not None and key.get("key"):
+        lines.append(f"  Tempo: {tempo_str}  |  Estimated key: {key_str} (conf {key_conf})")
+    else:
+        lines.append(f"  Tempo: {tempo_str}  |  Estimated key: {key_str}")
     tp = stats.get("transient_profile", {})
     if tp and tp.get("onset_count", 0) > 0:
         prom = tp.get("transient_prominence_db", "n/a")
@@ -593,7 +755,7 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
 
     print(f"Analyzing: {file_path.name}  ({duration:.1f}s, {channels}ch, {sr}Hz)", flush=True)
 
-    print("  [1/5] Loudness metrics (LUFS, LRA, crest factor)...", flush=True)
+    print("  [1/8] Loudness metrics (LUFS, LRA, crest factor)...", flush=True)
     meter = pyln.Meter(sr)
     lufs_input = data if channels > 1 else mono
     try:
@@ -625,22 +787,34 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
         for name, (lo, hi) in freq_bands.items()
     }
 
-    print("  [2/5] Spectral analysis (mel spectrogram)...", flush=True)
+    print("  [2/8] Spectral analysis (mel spectrogram)...", flush=True)
     text_spec = _text_spectrogram(mono, sr)
 
-    print("  [3/5] Frequency response (1/3-octave Welch PSD)...", flush=True)
+    print("  [3/8] Frequency response (1/3-octave Welch PSD)...", flush=True)
     freq_response = _frequency_response(mono, sr)
 
-    print("  [4/6] Hum detection...", flush=True)
+    print("  [4/8] Hum detection...", flush=True)
     hum = _detect_hum(mono, sr)
 
-    print("  [5/6] Onset detection + transient profile...", flush=True)
-    transient_density = _transient_density(mono, sr)
+    print("  [5/8] Onset detection + transient profile...", flush=True)
+    # Compute onset_env once and share it across transient_density + spectral_flux
+    onset_env_shared = librosa.onset.onset_strength(y=mono.astype(np.float32), sr=sr)
+    transient_density = _transient_density(mono, sr, onset_env=onset_env_shared)
     spec_centroid = _spectral_centroid_hz(mono, sr)
     transient_prof = _transient_profile(mono, sr)
+    onsets = _onsets_sec(mono, sr)
 
-    print("  [6/6] Pumping / over-compression detection...", flush=True)
+    print("  [6/8] Pumping / over-compression detection...", flush=True)
     pumping = _detect_pumping(mono, sr)
+
+    print("  [7/8] Tempo + key estimation...", flush=True)
+    tempo_bpm = _tempo_bpm(mono, sr)
+    estimated_key = _estimated_key(mono, sr)
+
+    print("  [8/8] Envelopes (RMS dB, LUFS short-term, spectral flux)...", flush=True)
+    rms_env = _rms_envelope_db_per_sec(mono, sr)
+    lufs_st = _lufs_short_term(lufs_input, sr)
+    spec_flux = _spectral_flux_per_sec(mono, sr, onset_env=onset_env_shared)
 
     stats = {
         "file": str(file_path),
@@ -664,6 +838,14 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
         "spectral_centroid_hz": spec_centroid,
         "transient_profile": transient_prof,
         "pumping": pumping,
+        "tempo_bpm": tempo_bpm,
+        "estimated_key": estimated_key,
+        "onsets_sec": onsets,
+        "envelopes": {
+            "rms_db_per_second": rms_env,
+            "lufs_short_term": lufs_st,
+            "spectral_flux_per_second": spec_flux,
+        },
         "recommended_gain_db": recommended_gain,
         "spectrogram_text": text_spec,
     }

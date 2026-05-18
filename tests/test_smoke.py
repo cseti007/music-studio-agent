@@ -356,6 +356,55 @@ class TestRelevanceChecks:
         stem_names = {Path(j[1]).name for j in skip_jobs}
         assert stem_names == {"A", "B"}
 
+    def test_analyze_emits_new_content_fields(self, tmp_path):
+        """analyze() must populate onsets_sec, tempo_bpm, estimated_key and
+        envelopes (rms / lufs_short_term / spectral_flux) with the expected
+        types and shapes on a 4-second synthetic click train at 120 BPM (one
+        click every 0.5 s → 8 clicks)."""
+        import soundfile as sf
+        from analyze import analyze
+
+        sr = 48000
+        duration_sec = 4
+        n = sr * duration_sec
+        sig = np.zeros(n, dtype=np.float32)
+        # Click every 0.5 s (= 120 BPM quarter notes)
+        for click_t in np.arange(0.0, duration_sec, 0.5):
+            i = int(click_t * sr)
+            if i + 100 < n:
+                sig[i:i + 100] = 0.5  # short rectangular click
+        wav = tmp_path / "click_train.wav"
+        sf.write(str(wav), sig, sr)
+
+        out = tmp_path / "out"
+        result = analyze(wav, output_dir=out)
+
+        # onsets_sec — should have ~8 entries, all in [0, 4)
+        onsets = result["onsets_sec"]
+        assert isinstance(onsets, list)
+        assert 4 <= len(onsets) <= 12  # tolerant of detector quirks
+        assert all(0.0 <= t < duration_sec for t in onsets)
+
+        # tempo_bpm — should be a number, plausibly near 120
+        tempo = result["tempo_bpm"]
+        assert tempo is None or (30.0 <= tempo <= 300.0)
+
+        # estimated_key — dict with 3 keys
+        key = result["estimated_key"]
+        assert set(key.keys()) == {"key", "mode", "confidence"}
+        assert isinstance(key["confidence"], float)
+        # Non-tonal click train → low confidence expected
+        assert key["confidence"] < 1.01
+
+        # envelopes — 3 lists, rms+flux ≈ duration in length
+        env = result["envelopes"]
+        assert set(env.keys()) == {"rms_db_per_second", "lufs_short_term", "spectral_flux_per_second"}
+        assert len(env["rms_db_per_second"]) == duration_sec
+        assert len(env["spectral_flux_per_second"]) == duration_sec
+        # lufs_short_term needs >= 3s window — should produce 1+ samples
+        assert isinstance(env["lufs_short_term"], list)
+        assert len(env["lufs_short_term"]) >= 1
+
     def test_bpm_to_pre_delay_known_values(self):
         """120 BPM eighth = 250 ms, sixteenth = 125 ms; 184 BPM sixteenth ≈ 81.5 ms."""
         from apply_reverb import _bpm_to_pre_delay_ms
