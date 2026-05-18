@@ -231,7 +231,71 @@ the stems separately (~120 lines).
 
 ---
 
-## 7. Spatial / Dolby Atmos output
+## 7. VST3 / AU plugin support
+
+**What.** A `tools/apply_vst.py` generic runner that loads a VST3 (or AU
+on macOS) plugin via pedalboard's already-shipped `pedalboard.load_plugin()`
+API, sets parameters from CLI flags or a JSON preset, and renders the
+processed WAV. Optionally extend the existing `apply_eq` / `apply_compression`
+/ `apply_reverb` tools with a `--vst <path>` flag that bypasses the
+built-in DSP and routes through a user-supplied plugin.
+
+**Why.** Specific situations where the built-in DSP is the limiting
+factor:
+- **Mastering quality jump** — iZotope Ozone 11, FabFilter Pro-L 2, Pro-MB,
+  Pro-Q 4 dynamic EQ outperform the current `master_mix.py transparent`
+  preset on absolute pro-tier delivery.
+- **Distinctive character** — Soundtoys Decapitator (saturation),
+  Valhalla VintageVerb (reverb), Slate VMR (channel strip), Waves SSL
+  G-Bus give signature colours the built-in math approximations can't
+  fully reproduce.
+- **Dynamic / multiband EQ** — Pro-Q 4's dynamic mode + per-band mid-side
+  processing is in a different league than scipy biquads.
+
+**Scope.**
+- **MVP** (~200 lines): `tools/apply_vst.py` standalone runner.
+  `--plugin <path>` `--param NAME=VALUE` (repeatable). Output: WAV +
+  report.json with the parameter dictionary that was applied.
+- **Preset layer** (~150 lines): per-plugin JSON presets under
+  `tools/presets/vst_<plugin>_<name>.json`. `--list-vst-plugins` scans
+  system-typical VST3 dirs.
+- **Integration** (~300 lines): `--vst <path>` flag on existing tools;
+  `mix_chain.json` schema gains a `vst` step type; `replay_chain` does
+  graceful fallback to the built-in DSP when the plugin isn't available
+  on the target machine (the chain still completes, just sounds
+  different — flagged in the run log).
+
+**Trade-offs to remember.**
+- **Reproducibility cost**: a chain step that depends on FabFilter Pro-Q
+  can't be exactly replayed on a machine without Pro-Q installed.
+  Mitigation: the chain `vst` step always records the parameter snapshot,
+  so a built-in EQ approximation can be auto-generated from the captured
+  params (lossy but valid).
+- **Plugin ownership**: the repo ships only the wrapper. The user has to
+  own and install the actual VSTs. Pro plugin bundles (Waves Mercury,
+  iZotope Music Production Suite) cost $500-$2000.
+- **pedalboard Linux stability**: `pedalboard.load_plugin()` has been
+  reported to stall on certain VST3s under JUCE 7 on Linux. MVP must
+  smoke-test on a known-good free plugin (Surge XT, TAL-Reverb-4) to
+  establish that the path works on the user's machine before claiming
+  generic support.
+
+**Triggers.** Worth doing when:
+- A specific session has a quality requirement the built-in DSP can't
+  reach (e.g. final commercial master needing Ozone 11).
+- The user acquires a pro plugin bundle and wants CLI-driven access to
+  it for batch processing.
+- A specific plugin's character (Decapitator's grit, Pro-Q's dynamic
+  EQ) becomes a recurring need across sessions.
+
+**Status.** Explored 2026-05-18. User has only a few free plugins and
+no concrete use case yet, so deferred. The pedalboard infrastructure is
+already in place (no new dependencies needed), so when the trigger
+fires the MVP is genuinely 1 day of work.
+
+---
+
+## 8. Spatial / Dolby Atmos output
 
 **What.** Object-based render path. `render_mix --atmos` produces an ADM BWF
 file with bed channels + objects (per-track positional metadata). Optionally
