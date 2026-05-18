@@ -909,6 +909,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             output_wav = stages_dir / f"mix_stage_{stage}.wav"
         else:
             output_wav = out_dir / "mix.wav"
+    output_wav.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(output_wav), master.T, sr, subtype="PCM_24")
 
     report = {
@@ -934,7 +935,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
 
     if render_stems:
         stems_dir = output_wav.parent.parent / "stems"
-        stems_dir.mkdir(exist_ok=True)
+        stems_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nStems -> {stems_dir}/")
         for bus_name, buf in processed.items():
             stem_path = stems_dir / f"stem_{bus_name}.wav"

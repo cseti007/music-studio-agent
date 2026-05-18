@@ -1015,6 +1015,63 @@ Never recommend a change just because a value is "not ideal". The ear is the fin
 
 ---
 
+## LUFS vs. Perceived Loudness — Measurement Equality ≠ Perceptual Equality
+
+A common pitfall when balancing busses with `bus_balance.py`: two busses can
+sit at the *exact same* integrated LUFS yet sound very different in loudness
+to a listener. This is not a bug in the measurement — it's a known limitation
+of the BS.1770 K-weighting model when applied to spectrally dissimilar
+content (bass vs midrange-dominated guitar, for example). When the user says
+"the bass sounds louder than the guitar" but the LUFS values are identical,
+**trust the ear** — adjust the bus volume down by 1–3 dB and re-render.
+
+### Why this happens
+
+| Factor | Mechanism |
+|---|---|
+| **K-weighting low-frequency rolloff** | BS.1770 applies a 12 dB/octave high-pass at ~100 Hz. Sub/low-bass energy is *under-counted* by the meter — the bass track has more acoustic energy than its LUFS number suggests. |
+| **K-weighting mid-shelf** | A ~4 dB high-shelf boost above 2 kHz over-emphasises the midrange-presence band where guitars dominate. The guitar's LUFS reading is *inflated* relative to its perceived contribution. |
+| **Consumer headphone bias** | Most consumer/audiophile headphones (Harman target, Sennheiser/AKG/Sony tunings) boost 50–100 Hz by +3 to +6 dB vs flat. On headphones the bass perception is amplified beyond what speakers (or the meter) show. |
+| **Tactile loudness** | Sub-bass is not only heard but felt (chest resonance, head/skull vibration). The meter doesn't measure tactile energy; the listener integrates it into perceived loudness. |
+| **Sustained vs transient content** | Bass plays sustained notes (long average loudness); guitar plays punctuated transients (high peaks, quiet inter-onsets). The integrated LUFS averages both to the same number, but the listener's loudness perception tracks the *sustained* energy. |
+
+### Practical rule of thumb
+
+When the measured LUFS of two busses is equal but they don't *sound* equal:
+
+| Spectral difference | Typical perception bias | Suggested compensation |
+|---|---|---|
+| Bass-heavy bus (sub + low dominant) vs midrange bus | bass perceived +1 to +3 dB louder | drop bass bus by 1–3 dB |
+| Kick + bass bus vs vocal bus | kick/bass perceived louder than the meter shows | drop low-end stems by 1–2 dB |
+| Hard-panned (±0.7+) bus vs centered bus | panned bus perceived slightly quieter than centered (constant-power pan is true at LUFS level but binaural integration favours centered content) | optional +0.5–1 dB on the panned bus *if mono compatibility matters* |
+
+### What this means for `style_check.py` profiles
+
+The style profile tonal-balance targets are wideband band-RMS at the
+profile's LUFS target. They tell you the spectral balance is correct
+*on the meter*. They do NOT guarantee perceptual loudness equality
+between busses. After a render passes `style_check` GREEN on tonal
+balance, still A/B-listen on headphones — if a bus pops out or hides,
+adjust the `volume_db` and re-render. Don't override the ear because
+the measurement looks balanced.
+
+### Field-test reference: terido v4 → v5
+
+After v4 hit drum = bass = guitar = -19 LUFS exactly on `bus_balance`, the
+listener reported the bass still felt 1–2 dB hotter on stereo headphones.
+v5 dropped the bass bus by 2 dB (volume_db -1 → -3). Documenting this so
+the next session-opener doesn't repeat the "but the LUFS numbers are
+equal" debate.
+
+### Sources
+
+- iZotope, ["What Are LUFS?"](https://www.izotope.com/en/learn/what-are-lufs) — K-weighting filter shape
+- Mastering.to, ["What is LUFS"](https://mastering.to/blog/what-is-lufs) — explicit "12 dB/octave HP at 100 Hz" filter description
+- Yurii Arefyev, ["LUFS Is Not Loudness: What Artists Still Don't Understand"](https://medium.com/@arefyevstudio/lufs-is-not-loudness-what-artists-still-dont-understand-d539b1bffdf6) (March 2026) — perceptual-vs-measured loudness gap
+- Harman target curve — published research on consumer headphone bass bias
+
+---
+
 ## Style Profiles — Reference-Free Genre Grading
 
 `tools/style_check.py mix.wav --style NAME` grades a finished mix against one of five built-in profiles in `tools/style_profiles/`: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference track is supplied, the profile **is** the reference.
