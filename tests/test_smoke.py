@@ -506,3 +506,103 @@ class TestRelevanceChecks:
         rel = _relevance_check(sig, SR, 200.0, 3000.0)
         assert rel["recommend_skip"] is True
         assert rel["bands_with_dynamics"] < 2
+
+
+class TestChainRecall:
+    """build_chain → mix_chain.json → replay_chain --dry-run round-trip.
+
+    Confirms that:
+      - build_chain reads *_report.json files and produces a valid mix_chain.json
+      - The chain steps are topologically ordered (predecessor before successor)
+      - replay_chain --dry-run can produce argv lines for every step type
+    """
+
+    def test_build_chain_reads_reports_and_orders_topologically(self, tmp_path):
+        import json
+        from build_chain import build_chain
+
+        # Fake a session: one stem with gain → eq → comp reports
+        session = tmp_path / "fake_session"
+        stem_dir = session / "tracks" / "KICK"
+        stem_dir.mkdir(parents=True)
+
+        (stem_dir / "gain_report.json").write_text(json.dumps({
+            "track": "KICK",
+            "output": str(stem_dir / "assembled.wav"),
+            "mode": "per-clip-no-normalize",
+            "peak_ceiling_db": -1.0,
+        }), encoding="utf-8")
+        # Note: write reports in REVERSE topological order to verify the sort
+        (stem_dir / "comp_report.json").write_text(json.dumps({
+            "input":  str(stem_dir / "assembled_eq.wav"),
+            "output": str(stem_dir / "assembled_eq_comp.wav"),
+            "preset": "comp_kick",
+            "settings": {"threshold_db": -10, "ratio": 4, "attack_ms": 5,
+                         "release_ms": 50, "makeup_db": 2, "mix": 1.0},
+        }), encoding="utf-8")
+        (stem_dir / "eq_report.json").write_text(json.dumps({
+            "input":  str(stem_dir / "assembled.wav"),
+            "output": str(stem_dir / "assembled_eq.wav"),
+            "preset_used": "kick_in",
+            "filters_applied": [],
+            "phase": "minimum",
+        }), encoding="utf-8")
+
+        chain = build_chain(session)
+        assert len(chain["stems"]) == 1
+        steps = chain["stems"][0]["chain"]
+        assert [s["step"] for s in steps] == ["gain_per_clip", "eq", "comp"]
+        assert chain["stems"][0]["name"] == "KICK"
+
+    def test_replay_chain_dry_run_emits_argv_for_each_step(self, tmp_path):
+        import json
+        from replay_chain import _build_argv
+
+        session_json = tmp_path / "session.json"
+        session_json.write_text("{}", encoding="utf-8")
+
+        sample_steps = [
+            {"step": "gain_per_clip",
+             "input": "session.json:KICK", "output": str(tmp_path / "KICK" / "assembled.wav"),
+             "args": {"normalize": False, "peak_ceiling_db": -1.0}},
+            {"step": "eq",
+             "input": str(tmp_path / "KICK" / "assembled.wav"),
+             "output": str(tmp_path / "KICK" / "assembled_eq.wav"),
+             "args": {"preset": "kick_in", "phase": "minimum"}},
+            {"step": "comp",
+             "input": str(tmp_path / "KICK" / "assembled_eq.wav"),
+             "output": str(tmp_path / "KICK" / "assembled_eq_comp.wav"),
+             "args": {"preset": "comp_kick", "threshold_db": -10, "ratio": 4,
+                      "attack_ms": 5, "release_ms": 50, "makeup_db": 2, "mix": 1.0}},
+            {"step": "gate",
+             "input": "x.wav", "output": "x_gate.wav",
+             "args": {"preset": "gate_kick", "threshold_db": -30, "range_db": -80,
+                      "attack_ms": 1, "hold_ms": 100, "release_ms": 50}},
+            {"step": "amp",
+             "input": "x.wav", "output": "x_amp.wav",
+             "args": {"preset": "ampeg_svt", "drive": 0.35}},
+            {"step": "reverb",
+             "input": "x.wav", "output": "x_reverb.wav",
+             "args": {"preset": "room_drums", "wet": 0.1}},
+            {"step": "transient",
+             "input": "x.wav", "output": "x_transient.wav",
+             "args": {"preset": "transient_kick_punch", "attack_db": 3.0}},
+            {"step": "saturation",
+             "input": "x.wav", "output": "x_sat.wav",
+             "args": {"preset": "sat_tape_subtle", "mode": "tape"}},
+            {"step": "delay",
+             "input": "x.wav", "output": "x_delay.wav",
+             "args": {"mode": "pingpong", "delay_ms": 187.0, "feedback": 0.4, "mix": 0.25}},
+            {"step": "align_phase",
+             "input": "x.wav", "output": "x_aligned.wav",
+             "args": {"reference": "ref.wav", "max_delay_ms": 20.0, "segment_sec": 10.0}},
+        ]
+
+        for step in sample_steps:
+            argv = _build_argv(step, session_json)
+            assert argv is not None, f"unsupported step type: {step['step']}"
+            # Every argv should start with the python interpreter and a tool path
+            assert "python" in argv[0].lower() or argv[0].endswith("python")
+            assert argv[1].endswith(".py")
+            # Critical: every step's argv must include --output-dir
+            assert "--output-dir" in argv, f"{step['step']}: argv missing --output-dir"

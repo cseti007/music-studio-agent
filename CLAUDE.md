@@ -56,6 +56,8 @@ python3 tools/<script>.py
 | `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. | `output/<session> --generate-config` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
 | `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
 | `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 6 chain presets (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_mb\|...] [--target-lufs N] [--tp-ceiling N]` |
+| `tools/build_chain.py` | Aggregate every `*_report.json` in a session's `tracks/<stem>/` folders into a single `mix_chain.json` recall sheet — the canonical record of what processing was applied to each stem, in what order, with what parameters. Non-invasive (only reads existing reports). Topo-sorts steps by input→output filename matching so a buggy historical path doesn't break ordering. | `output/<session>` |
+| `tools/replay_chain.py` | Replay a `mix_chain.json` recall sheet — rebuild the entire mix from scratch by re-running every step (via subprocess) in recorded order, then `render_mix --render --stems`. Default behaviour is overwrite-in-place (back up first if you need the previous run). `--dry-run` prints the commands without executing; `--stem NAME` replays a single stem for debugging. | `<mix_chain.json \| session_dir> [--dry-run] [--stem NAME]` |
 | `tools/master_health.py` | Master-level scorecard, complementary to mix_health. Checks: format conformance (LUFS / TP / codec-ISP estimate), per-band phase coherence (sub-mono / top-wide), per-band M/S width profile, punch index, compression-history detection, reference-deck comparison. `--all-formats` batch mode scans `master_<format>.wav` files in the output dir and produces a cross-format scorecard. Vinyl/no-limiter formats are handled correctly (TP > ceiling is expected and not flagged as red). | `[master.wav] --output-dir DIR [--format spotify\|...] [--all-formats] [--reference ref1.wav ...]` |
 | `tools/bus_balance.py` | Per-bus loudness contribution report. For a `--render --stems` output, loads each `stems/stem_<bus>.wav`, applies bus volume_db (incl. parent chain) and measures effective LUFS in the mix. Marks top-level buses (the ones that actually sum into master). Use to answer "is the bass too loud vs drums?" with data instead of vibes. | `[mix_config.json]` (defaults to `output/terido/mix_config.json`) |
 | `tools/level_notes.py` | Per-note volume leveling on a target time range. Detects onsets, measures each note's attack peak, applies a short 95 ms boost envelope (5 ms pre-fade + 30 ms hold + 60 ms fade-out — fits between onsets so boosts don't overlap and overshoot). Only lifts quiet notes (peak below `--quiet-threshold-db`), never reduces loud ones. Safety scale is segment-only. Intended for uneven slap/finger bass takes where the player swings dynamically and per-clip gain can't help (multiple notes per clip). | `<input.wav> --output <out.wav> --end SEC [--start SEC] [--target-peak-db -4] [--quiet-threshold-db -6] [--max-boost-db 15]` |
@@ -91,6 +93,7 @@ output/
 └── <session>/
     ├── session.json                  <- parse_session output
     ├── mix_config.json               <- render_mix --generate-config output (edit before rendering)
+    ├── mix_chain.json                <- build_chain output: recall sheet of every per-stem processing step (replayable)
     ├── analysis/                     <- session-level analysis (compare_reference, detect_masking)
     │   ├── masking_report.json       <- detect_masking output
     │   ├── masking_report.txt
@@ -531,6 +534,50 @@ refmatched mixes — let the LUFS normalisation + ISP-aware limiter do
 their job without re-shaping the tonal balance the refmatch step
 already settled. Picked for v3: refmatched mix → `transparent` master
 preset → all four streaming format-conformance verdicts green.
+
+## Reproducibility — mix_chain.json (recall sheet)
+
+After a session is finished (mix_health green / master delivered), generate a
+`mix_chain.json` recall sheet so the entire mix is reproducible from the
+canonical session inputs:
+
+```bash
+python3 tools/build_chain.py output/<session>
+# Writes output/<session>/mix_chain.json
+```
+
+`build_chain` aggregates every `*_report.json` under `tracks/<stem>/` into a
+single JSON that lists, per stem, the exact ordered chain of processing
+steps with their arguments. Steps are topologically sorted by input→output
+filename so the recorded order matches the actual processing order.
+
+To rebuild the mix from a chain:
+
+```bash
+python3 tools/replay_chain.py output/<session>/mix_chain.json
+# Re-runs every step in subprocess; finishes with render_mix --render --stems
+```
+
+Useful flags:
+- `--dry-run` — print the commands without executing (sanity check the chain)
+- `--stem "KICK IN.05"` — replay one stem only (debugging)
+
+**When to run `build_chain`:**
+- After `mix_health.py` passes (mix is "done") — before moving to master.
+- After a v2 / v3 iteration finishes, so each version has its own recall.
+- Before deleting any session-wide audio — the chain is the smallest possible
+  record of "how this mix was made" (a few hundred KB JSON vs. gigabytes of WAV).
+
+**Default behaviour is overwrite-in-place** — replay writes into the same
+`output/<session>/` directory the chain references. Back up first if you
+want to keep the previous run intact. (We chose this over a "_replay"
+sibling dir to avoid having every tool's path-baked references in the
+chain go stale.)
+
+The chain is a faithful record, not a fixer — if the original run had a bug
+(e.g. an align_phase output written to an accidentally-nested path), the
+recall sheet reproduces it. Edit the chain JSON by hand if you need to
+patch a historical mistake before replay.
 
 ## Ground rules
 
