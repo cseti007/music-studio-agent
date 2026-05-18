@@ -23,6 +23,9 @@ spectrograms/
 # but keep instrument presets — these ship with the repo
 !tools/presets/*.json
 
+# and keep the style profiles — these ship with the repo
+!tools/style_profiles/*.json
+
 # and keep the synthetic IR pack — ships with the repo
 !tools/irs/*.wav
 

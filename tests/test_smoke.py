@@ -508,6 +508,76 @@ class TestRelevanceChecks:
         assert rel["bands_with_dynamics"] < 2
 
 
+class TestStyleCheck:
+    """Style profile loading + verdict logic.
+
+    Confirms that:
+      - All 5 built-in profiles load and have the expected schema
+      - The grading function returns GREEN/YELLOW/RED at the right thresholds
+      - The overall score function counts checks correctly
+      - The hard-fail rule (RED LUFS or LRA → overall RED) fires
+    """
+
+    def test_all_profiles_load_with_required_keys(self):
+        from style_check import list_profiles, load_profile
+
+        names = list_profiles()
+        assert set(names) == {"modern_rock", "classic_rock", "pop", "hip_hop", "jazz_acoustic"}
+        for name in names:
+            p = load_profile(name)
+            for key in ("lufs", "lra", "crest_factor", "tonal_balance_dbfs"):
+                assert key in p, f"{name} missing required key {key}"
+            assert "integrated_target" in p["lufs"]
+            assert "tolerance_lu" in p["lufs"]
+            assert set(p["tonal_balance_dbfs"].keys()) == {
+                "sub_60hz", "low_60_250hz", "mid_250_2khz", "high_2_8khz", "air_8khz_plus"
+            }
+
+    def test_grade_value_thresholds(self):
+        from style_check import _grade_value
+
+        # within tolerance → green
+        assert _grade_value(measured=-10.0, target=-10.0, tolerance=2.0)[0] == "GREEN"
+        assert _grade_value(measured=-12.0, target=-10.0, tolerance=2.0)[0] == "GREEN"
+        # just past tolerance → yellow (severity 1.0 .. 1.5)
+        assert _grade_value(measured=-12.5, target=-10.0, tolerance=2.0)[0] == "YELLOW"
+        assert _grade_value(measured=-13.0, target=-10.0, tolerance=2.0)[0] == "YELLOW"
+        # 1.5x tolerance and beyond → red
+        assert _grade_value(measured=-13.5, target=-10.0, tolerance=2.0)[0] == "RED"
+
+    def test_grade_range_thresholds(self):
+        from style_check import _grade_range
+
+        # inside [min, max] → green
+        assert _grade_range(measured=7.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "GREEN"
+        assert _grade_range(measured=4.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "GREEN"
+        # just outside, within half-width → yellow
+        assert _grade_range(measured=3.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "YELLOW"
+        # significantly outside → red
+        assert _grade_range(measured=1.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "RED"
+
+    def test_overall_verdict_hard_fail_on_lufs(self):
+        """A RED LUFS verdict forces overall RED even if everything else is GREEN."""
+        from style_check import _verdict_for_checks
+
+        checks = [
+            {"name": "integrated_lufs", "verdict": "RED"},
+            {"name": "lra_lu",          "verdict": "GREEN"},
+            {"name": "crest_factor_db", "verdict": "GREEN"},
+        ] + [{"name": f"band_{i}", "verdict": "GREEN"} for i in range(5)]
+        verdict, score = _verdict_for_checks(checks)
+        assert verdict == "RED"
+        assert score <= 55, f"hard-fail should cap score, got {score}"
+
+    def test_overall_verdict_all_green(self):
+        from style_check import _verdict_for_checks
+
+        checks = [{"name": "x", "verdict": "GREEN"}] * 8
+        verdict, score = _verdict_for_checks(checks)
+        assert verdict == "GREEN"
+        assert score == 100
+
+
 class TestChainRecall:
     """build_chain → mix_chain.json → replay_chain --dry-run round-trip.
 

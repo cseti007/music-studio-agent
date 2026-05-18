@@ -10,6 +10,15 @@ worth doing. Ordered by how readily it fits the existing architecture.
 
 These items used to live here and have been shipped:
 
+- ~~Style-aware mix evaluation (style profiles + style_check.py)~~ — done.
+  Five built-in profiles (`modern_rock`, `classic_rock`, `pop`, `hip_hop`,
+  `jazz_acoustic`) with LUFS / LRA / crest / 5-band tonal balance targets.
+  Calibrated against real-world streaming masters; numbers are wideband
+  band-RMS at the profile's LUFS target (NOT iZotope-TBC PSD-curve values).
+  Tool emits 0-100 score + traffic-light verdict + EQ recommendations.
+- ~~Reproducibility: mix_chain.json recall sheets~~ — done. `build_chain.py`
+  aggregates every per-stem `*_report.json` into a single chain; `replay_chain.py`
+  rebuilds the full mix from it via subprocess.
 - ~~Dedicated mastering tools (master_mix + master_health, multi-format
   delivery)~~ — done (commit batch after f2eea7a). Pipeline is now
   end-to-end mix → master with format presets for Spotify, Apple,
@@ -222,62 +231,7 @@ the stems separately (~120 lines).
 
 ---
 
-## 7. Style-aware mix evaluation (style profiles + style_check.py)
-
-**What.** Named, machine-readable style profiles + a tool that grades a mix
-against one. Sketch:
-
-```json
-// style_profiles/modern_rock.json
-{
-  "name": "modern_rock",
-  "lufs_target": -14.0,
-  "lra_target_range_lu": [4, 8],
-  "tonal_balance_rms_db": {
-    "sub_60hz":     -16,
-    "low_60_250hz": -10,
-    "mid_250_2khz":  -8,
-    "high_2_8khz":  -10,
-    "air_8khz_plus":-13
-  },
-  "bus_level_ratios_db": {
-    "drums_vs_bass":   +1.5,
-    "bass_vs_guitar":  +0.5,
-    "vocal_vs_drums":  +2.0
-  },
-  "tolerance_db": 2.0
-}
-```
-
-New tool `tools/style_check.py mix.wav --style modern_rock` returns:
-> "low_60_250hz +3 dB above modern_rock spec (-10 dB target → measured -7 dB);
->  drum bus 2 dB under typical modern_rock balance vs bass."
-
-Plus optional integration: `mix_health.py --style modern_rock` would
-use the profile bands as targets instead of the generic rock check.
-
-**Why.** Currently the agent has stylistic intuition in `docs/knowledge.md`
-but no quantitative target without a user-provided reference track. Profiles
-fill that gap — they let mix_health / compare_reference work without a
-reference, and make the "this is or isn't a modern rock mix" judgment
-auditable and reproducible.
-
-**Scope.** ~5-8 profile JSONs (modern_rock, classic_rock, pop, hip_hop,
-jazz, orchestral, broadcast_speech). One new tool `style_check.py`
-(~200 lines: load profile, measure bands + LRA + bus levels, generate
-delta report, ASCII bar visualisation). Optional flag wiring in
-`mix_health.py` / `master_health.py` (~30 lines each).
-
-**Triggers.** Worth doing when:
-- Sessions arrive without a clear reference track and need a stylistic
-  target
-- The user wants an objective "is this mix in-genre" check before delivery
-- The mix_chain.json work (recall sheets) is done — they pair well, since
-  a chain + a style profile fully describes the intended outcome
-
----
-
-## 8. Spatial / Dolby Atmos output
+## 7. Spatial / Dolby Atmos output
 
 **What.** Object-based render path. `render_mix --atmos` produces an ADM BWF
 file with bed channels + objects (per-track positional metadata). Optionally

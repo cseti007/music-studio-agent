@@ -1,0 +1,30 @@
+{
+  "name": "pop",
+  "version": "1.1",
+  "description": "Modern commercial pop (Top 40 / streaming). Loud, vocal-forward, bright top, tight low end. Heavy limiting yields low LRA.",
+  "sources": [
+    "iZotope Tonal Balance Control 3 reference curve naming (Pop / Dance Pop / Electropop)",
+    "Streaming mastering guides 2025: pop target -8 to -10 LUFS integrated",
+    "Calibrated: modern_rock baseline + pop spectral shifts (high +1.5, air +2.5, sub -1)"
+  ],
+  "calibration_note": "Tonal balance targets are wideband band-RMS at integrated_target LUFS. Pop is brighter and more vocal-forward than modern rock.",
+  "lufs": {
+    "integrated_target": -9.0,
+    "tolerance_lu": 1.5
+  },
+  "lra": {
+    "target_lu": 5.0,
+    "range_lu": [3.5, 7.0]
+  },
+  "crest_factor": {
+    "target_db": 11.0,
+    "range_db": [9.0, 13.0]
+  },
+  "tonal_balance_dbfs": {
+    "sub_60hz":       {"target": -27.0, "tolerance": 3.0},
+    "low_60_250hz":   {"target": -17.0, "tolerance": 2.5},
+    "mid_250_2khz":   {"target": -20.0, "tolerance": 2.0},
+    "high_2_8khz":    {"target": -23.0, "tolerance": 2.0},
+    "air_8khz_plus":  {"target": -29.0, "tolerance": 2.5}
+  }
+}
