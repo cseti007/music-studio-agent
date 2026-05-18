@@ -12,6 +12,83 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Style-aware mix evaluation (2ab42d9)
+
+Reference-free, genre-aware mix grading.
+
+- **5 built-in style profiles** in `tools/style_profiles/`: `modern_rock`,
+  `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. Each profile fixes
+  LUFS / LRA / crest-factor / 5-band tonal-balance targets with per-target
+  tolerance. Numbers are wideband band-RMS measured at the profile's LUFS
+  target (NOT iZotope-TBC PSD-curve values) — calibrated against real
+  terido session masters and adjusted for documented genre-specific
+  spectral shifts.
+- **`tools/style_check.py mix.wav --style NAME`** measures the mix
+  (LUFS-normalised to the profile's target before spectral analysis) and
+  emits a 0–100 score, GREEN/YELLOW/RED verdict, per-check delta with
+  ASCII bar chart, and EQ recommendations for off-target bands. Hard-fail
+  rule: a RED on LUFS or LRA forces overall RED.
+- 5 new pytest cases in `TestStyleCheck` (profile schema, grade thresholds,
+  hard-fail rule, all-green score).
+
+### mix_chain.json recall sheets (7abeb77)
+
+End-to-end session reproducibility.
+
+- **`tools/build_chain.py output/<session>`** aggregates every per-stem
+  `*_report.json` into a single `mix_chain.json` listing the ordered
+  processing chain with exact parameters per stem. Non-invasive — only
+  reads existing reports, no apply_*.py changes. Topo sort is
+  filename-based (not full-path), so historical path bugs (e.g. an
+  accidentally-nested "stem/stem/file.wav") don't break ordering.
+- **`tools/replay_chain.py <chain>`** re-runs every step via subprocess
+  against the canonical CLI tools, then `render_mix --render --stems`.
+  Default behaviour is overwrite-in-place; `--dry-run` prints commands
+  without executing; `--stem NAME` replays a single stem for debugging.
+- Validated on real terido session: 64 stems → 198 chain steps,
+  dry-run argv generates correctly for every step type.
+- 2 new pytest cases in `TestChainRecall`.
+
+### Analysis content expansion + parallel batch (bac5b84..598e8dc)
+
+The serial pattern `for stem in *; do analyze.py "$stem"; done` was
+slow (library imports re-paid per stem, single-core CPU use) and the
+per-stem `analysis.json` lacked time-series and tonal-context data.
+
+- **`tools/batch_analyze.py output/<session> [--workers N]`** —
+  multiprocessing pool wrapper around `analyze`. Default workers
+  `min(cpu_count, 8)`. **5–6× speed-up** on a 64-stem batch
+  (~12.8 min serial → ~2 min 22 s with 8 workers on the terido
+  session). `--skip-existing` to resume; `--files` for an explicit
+  WAV list.
+- **Four new analysis field groups in `analysis.json`** (also surfaced
+  in `spectrogram.txt` STATS SUMMARY for tempo + key):
+  - `onsets_sec[]` — onset times in seconds
+  - `tempo_bpm` — librosa beat-track estimate (None for short / unstable)
+  - `estimated_key` — `{key, mode, confidence}` via Krumhansl-Schmuckler
+    on `chroma_stft` (5–10× faster than chroma_cqt, accurate enough for
+    rock)
+  - `envelopes.rms_db_per_second[]`, `envelopes.lufs_short_term[]`
+    (BS.1770 short-term, 3 s window, 1 s step), `envelopes.spectral_flux_per_second[]`
+- Optimisations to stay within budget: 1 s LUFS-short-term step
+  (was 0.1 s — 10× fewer meter calls), `chroma_stft` instead of
+  `chroma_cqt`, shared `onset_env` between `_transient_density` and
+  `_spectral_flux_per_sec`. Final overhead vs. the no-extra-fields
+  baseline: +37 % wall-clock (acceptable, still ~3.9× faster than
+  pre-batch serial).
+- **`spectrogram_text` field dropped from `analysis.json`** (it
+  duplicated `spectrogram.txt`). The .txt file is the canonical
+  human-readable view; the JSON now holds structured data only.
+
+### Documentation polish (ebfdfc7)
+
+- Documented why analysis files live in three places (per-stem in
+  `tracks/<name>/`, session-wide in `analysis/`, master-level in
+  `masters/`) — intentional co-location with the asset each report
+  describes, not clutter.
+- BACKLOG cleanup: shipped `style profiles` and `mix_chain.json`
+  entries moved to "Completed since this file was created".
+
 ### Reverb extensions: BPM-synced pre-delay, sidechain ducking, built-in IR pack
 
 Three non-vocal-specific reverb features that don't require the

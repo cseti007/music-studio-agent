@@ -834,6 +834,36 @@ The difference is the inter-sample peak (ISP). For low-frequency signals they ar
 
 **For stems: the difference rarely matters.** For master delivery: target `-2 dBTP` (the true peak, not the sample peak) to survive streaming codec encoding without clipping. `render_mix.py` does a second-pass true peak measurement after its limiter and scales the master down if the oversampled value exceeds the ceiling.
 
+### onsets_sec, tempo_bpm, estimated_key (rhythm & tonal context)
+
+Three top-level fields in `analysis.json` that give time-domain and tonal context, useful when an EQ / comp / FX choice depends on rhythmic or harmonic content beyond the basic loudness numbers.
+
+| Field | Type | What it is | When to use |
+|---|---|---|---|
+| `onsets_sec` | list of float seconds | Onset times from librosa onset detection. Same detector as `transient_density_per_sec`, exposed as a raw list. | Identify rhythmic structure; pair-wise stem alignment; precise "uneven playing" detection per onset; visual debugging. |
+| `tempo_bpm` | float (or `null`) | librosa `beat_track` estimate. Returns `null` for clips shorter than ~4 s or when the estimate is unstable / out of range (30–300 BPM). | Pick BPM-synced division for `apply_reverb --pre-delay-division` or `apply_delay --bpm`. Sanity-check against the human-known tempo (drummer's clicktrack). |
+| `estimated_key` | `{key, mode, confidence}` | Krumhansl-Schmuckler key estimation on `chroma_stft`. Confidence is 0..1 (cosine sim against the reference profile). | Decide whether a tonal mid-EQ move should track the song's key (e.g. boosting 220 Hz on an A-minor track lines up with the root). Drums / overheads / noise will give a low-confidence answer — `< 0.5` means "no reliable key", ignore. |
+
+The cost of computing these is modest (~+10% on `analyze.py`). They are computed unconditionally on every analyze pass — no opt-in flag needed.
+
+### envelopes (RMS / LUFS short-term / spectral flux per second)
+
+Three time-series at 1-second resolution stored under `analysis.envelopes`:
+
+| Subfield | Unit | What it is |
+|---|---|---|
+| `rms_db_per_second` | dBFS | RMS level of each 1-second slice. Quick "section loudness map" — quiet intro vs. loud chorus is visible at a glance. |
+| `lufs_short_term` | LUFS | BS.1770 short-term loudness (3 s window, 1 s step). Standardised perceptual loudness curve. Slightly different shape than RMS because the K-weighting attenuates sub-bass and emphasises 2–4 kHz. |
+| `spectral_flux_per_second` | arbitrary (librosa onset strength units, per-frame mean) | Energy change in the spectrum per second. Peaks at section boundaries (intro → verse → chorus) where the instrumentation changes substantially. |
+
+**Use cases:**
+
+- **Section detection**: scan `rms_db_per_second` or `lufs_short_term` for sustained shifts ≥ 3 dB. Each shift marks a verse / chorus / bridge boundary.
+- **Spectral flux peaks** flag the same boundaries from a different angle — useful to confirm a section change vs. a level change inside the same section.
+- **Mix consistency check**: if `lufs_short_term` ranges 8+ LU on a master that's supposed to be modern-rock-loud (LRA target 4–9), something is too dynamic.
+
+The arrays are JSON-array-valued, which makes them safe to pretty-print but **noisy** in `analysis.json` — they account for ~10–20 KB per stem on a 400-second take. Worth it for the analytical value.
+
 ### mix_health verdicts (green / yellow / red)
 
 `mix_health.py` scores the final mix on 7 dimensions: LUFS-vs-target, true peak, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (if supplied), masking pair counts (if detect_masking was run), and stem pumping.
@@ -982,6 +1012,59 @@ Read all metrics together and give a verdict — one of:
 3. **Multiple issues — prioritize.** Address the most audible or most likely root cause first; one change at a time.
 
 Never recommend a change just because a value is "not ideal". The ear is the final arbiter. Always note when a value could have multiple explanations (e.g. low LRA could be over-limiting OR could be correct for a dense rock arrangement).
+
+---
+
+## Style Profiles — Reference-Free Genre Grading
+
+`tools/style_check.py mix.wav --style NAME` grades a finished mix against one of five built-in profiles in `tools/style_profiles/`: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference track is supplied, the profile **is** the reference.
+
+### What's in a profile
+
+Every profile JSON has the same shape:
+
+| Section | Fields | Meaning |
+|---|---|---|
+| `lufs` | `integrated_target`, `tolerance_lu` | Genre-typical streaming loudness. Symmetric tolerance — outside `target ± tolerance` is yellow, beyond 1.5× is red. |
+| `lra` | `target_lu`, `range_lu` | Loudness Range. Range-based grading: inside [min, max] = green. |
+| `crest_factor` | `target_db`, `range_db` | Sample peak vs RMS, range-graded. |
+| `tonal_balance_dbfs` | `{sub_60hz, low_60_250hz, mid_250_2khz, high_2_8khz, air_8khz_plus}` each with `target` + `tolerance` | **Wideband band-RMS measured at the profile's LUFS target**, not iZotope-TBC PSD-curve numbers. Calibrated against real-world streaming masters. |
+
+### How the grading works
+
+1. Measure integrated LUFS, LRA, crest factor on the input mix.
+2. Apply a single linear gain so the mix sits at the profile's `integrated_target` LUFS.
+3. Measure 5-band wideband RMS on the LUFS-normalised mix.
+4. Grade each check: GREEN if within tolerance / range, YELLOW just outside, RED significantly outside.
+5. Overall score: GREEN-check = 100, YELLOW = 50, RED = 0. Average → 0..100. Verdict thresholds: ≥85 green, ≥60 yellow, below 60 red.
+6. **Hard-fail rule**: a RED on `integrated_lufs` or `lra_lu` caps the overall verdict at RED (max 55 score) regardless of the band results. Wrong loudness or wrong dynamics aren't fixable with EQ alone.
+
+### When to use which profile
+
+| Profile | Match for | LUFS target | LRA target | Sub presence |
+|---|---|---|---|---|
+| `modern_rock` | Alt-rock, indie rock, post-rock streaming masters | -10 | 4–9 LU | Moderate (-26 dB) |
+| `classic_rock` | Vintage / 60s–80s analogue aesthetic, dynamic | -13 | 8–14 LU | Less sub (-28 dB), more mid |
+| `pop` | Top-40 streaming pop, vocal-forward, bright | -9 | 3.5–7 LU | Tight low end, more air |
+| `hip_hop` | Trap / modern hip-hop with 808s | -8 | 2.5–5.5 LU | Massive sub (-22 dB), scooped mids |
+| `jazz_acoustic` | Jazz, folk, singer-songwriter | -18 | 10–18 LU | Gentle low (-30 dB) |
+
+### Calibration note (important)
+
+The tonal-balance targets are **wideband band-RMS on a LUFS-normalised mix**, NOT the iZotope Tonal Balance Control PSD-curve values. The two measurement systems give different numbers for the same audio — TBC integrates over 1/3-octave PSD with proprietary smoothing; here we filter the mono mix into 5 wide bands and take a plain RMS. The two are not interchangeable.
+
+Implication: do not paste these numbers into TBC and expect them to line up with TBC's curve display. They line up with `analyze.py` / `mix_health.py` measurements (same band edges and same RMS metric).
+
+### Tuning a profile to a specific user's taste
+
+The shipped profiles are calibrated against published streaming-mastering references and one real-world rock session (terido). To bias them toward a user's preference:
+
+1. Measure 3–5 reference mixes the user considers "right" using `analyze.py` (LUFS-normalise each to the profile's target first).
+2. Average the per-band RMS values.
+3. Replace the profile's `tonal_balance_dbfs.<band>.target` with the averages. Increase the `tolerance` if the spread across the references is wider than the default ±2.5 dB.
+4. Bump the `version` (e.g. 1.1 → 1.2) and add a one-line note under `calibration_note`.
+
+The profiles are versioned and well-commented intentionally so that user-specific overrides remain readable.
 
 ---
 

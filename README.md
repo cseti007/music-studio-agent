@@ -62,9 +62,15 @@ stems (WAV files)
     |
     v
 parse_session        -- parse DAW session (.ptx / .als) into session.json
+audit_session        -- detect tracks sharing identical source files
+                        (phase-coherent duplicates) at session start
 apply_gain --per-clip -- normalize clips + assemble full-length stems
-analyze              -- LUFS, transients, spectrum, stereo, hum, pumping,
-                        per-band crest, true peak (4x oversampled)
+analyze              -- LUFS, LRA, crest, transients, spectrum, stereo,
+                        hum, pumping, per-band crest, true peak (4x
+                        oversampled), onsets[], tempo_bpm, estimated_key,
+                        envelopes (RMS / LUFS short-term / spectral flux)
+batch_analyze        -- parallel multiprocessing wrapper around analyze
+                        (5-6x faster than the serial loop on 8 cores)
 detect_masking       -- find frequency conflicts between stems (time-gated)
 align_phase          -- phase-align drum mics to kick reference (sub-sample)
 apply_eq             -- notch hum, carve frequencies, instrument presets
@@ -106,6 +112,20 @@ master_health        -- master scorecard: format conformance (LUFS, true
                         coherence (sub mono check, top wide), M/S width
                         profile, punch index, compression-history detect,
                         reference-deck comparison. REQUIRED per format.
+
+  ── reference-free style grading (optional, no ref track needed) ──
+
+style_check          -- grade a mix against one of 5 built-in genre
+                        profiles (modern_rock, classic_rock, pop,
+                        hip_hop, jazz_acoustic). 0-100 score, traffic-
+                        light verdict, EQ recommendations.
+
+  ── reproducibility (run after the session is done) ──
+
+build_chain          -- aggregate every per-stem *_report.json into
+                        a single mix_chain.json recall sheet
+replay_chain         -- re-run every step from a mix_chain.json,
+                        rebuilds the entire mix from scratch
 ```
 
 All tools are standalone CLI scripts — run them in any order, re-run individual steps,
@@ -119,6 +139,9 @@ to write audio when the input data doesn't justify the processing.
 
 ```
 tools/               CLI processing tools (one file per processor)
+tools/presets/       Instrument-specific EQ / comp / amp / etc. preset JSONs
+tools/style_profiles/ Genre profiles consumed by style_check.py
+tools/irs/           Synthetic impulse-response pack for convolution reverb
 docs/knowledge.md    Domain knowledge base (LUFS targets, instrument guidelines,
                      make-it-hit philosophy, pumping disambiguation)
 tests/               Smoke tests (pytest) for DSP + relevance-check logic
