@@ -328,6 +328,34 @@ class TestRelevanceChecks:
         f.touch()
         assert _looks_like_stereo_pair_half(f) is None
 
+    def test_batch_analyze_collects_jobs_from_session_dir(self, tmp_path):
+        """_collect_jobs scans <session>/tracks/*/assembled.wav and skips
+        directories without one. Honours --skip-existing if analysis.json
+        is already present."""
+        import soundfile as sf
+        from batch_analyze import _collect_jobs
+
+        # Build a fake session layout: 3 stems, the third already has analysis.json
+        session = tmp_path / "fake_session"
+        (session / "tracks").mkdir(parents=True)
+        for name in ("A", "B", "C"):
+            d = session / "tracks" / name
+            d.mkdir()
+            sig = np.zeros(48000, dtype=np.float32)
+            sf.write(str(d / "assembled.wav"), sig, 48000)
+        # C already analysed
+        (session / "tracks" / "C" / "analysis.json").write_text("{}", encoding="utf-8")
+
+        # Without --skip-existing, all 3 should be queued
+        all_jobs = _collect_jobs(session, None, None, skip_existing=False)
+        assert len(all_jobs) == 3
+
+        # With --skip-existing, only A and B
+        skip_jobs = _collect_jobs(session, None, None, skip_existing=True)
+        assert len(skip_jobs) == 2
+        stem_names = {Path(j[1]).name for j in skip_jobs}
+        assert stem_names == {"A", "B"}
+
     def test_bpm_to_pre_delay_known_values(self):
         """120 BPM eighth = 250 ms, sixteenth = 125 ms; 184 BPM sixteenth ≈ 81.5 ms."""
         from apply_reverb import _bpm_to_pre_delay_ms
