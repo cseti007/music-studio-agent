@@ -55,6 +55,140 @@ and ground rules. The agent should take it from there.
 
 ---
 
+## Preparing your recording session
+
+The pipeline reads a DAW session file directly — no stem-bouncing required.
+But a few things need to be set right *before* you hand the session to the
+agent so it can do its job.
+
+### DO before handoff
+
+**1. Name your tracks clearly.** The agent infers each track's bus
+assignment from its name. Use instrument + microphone position:
+
+```
+KICK IN, KICK OUT, KICK SUB
+SN TOP, SN BOTTOM
+HIHAT, RIDE, CRASH
+RACK TOM 1, RACK TOM 2, FLOOR TOM
+OH AEA L, OH AEA R, OH U87 L, OH U87 R
+ROOM CLOSE L, ROOM CLOSE R, ROOM FAR L, ROOM FAR R
+BASS DI, BASS DI PEDAL
+GTR <player> FENDER, GTR <player> ORANGE, GTR <player> DI, GTR <player> 57
+```
+
+Unrecognised track names get flagged and the agent will ask which bus they
+belong to before continuing.
+
+**2. Do your editorial cuts.** Trim out false starts, talkback, miscued
+takes, and anything else you don't want in the final mix. Clip boundaries
+become part of the session metadata and get assembled in order.
+
+**3. Comp (best-take assembly) inside the DAW.** If you want to stitch
+the strongest sections from several takes into one ideal take, do that
+in your DAW. The pipeline reads clip positions as they are — it does
+not perform clip-level comping.
+
+**4. For A/B alternate takes**, put them on *separate* tracks (e.g.
+`BASS DI` and `BASS DI Take2`). Same-track stacked clips get assembled
+sequentially. Separate-track lets you switch via `mix_config.json` →
+`"active": false` later.
+
+**5. Stereo pairs**: a stereo mic (OH AEA, ROOM CLOSE, etc.) can live on
+one stereo track *or* as two mono tracks with `.L` / `.R` suffixes —
+both work. Don't mix the two conventions for the same mic.
+
+**6. Set the session tempo and time signature.** The agent estimates BPM
+with librosa, but a session-tempo-correct project converges faster (and
+unlocks BPM-synced delays / reverbs).
+
+**7. Pro Tools**: just save the `.ptx`. **Ableton**: `File → Collect All
+and Save` after final save. This collects every used sample into
+`<name> Project/Samples/` next to the `.als`. Without this, the parser
+sees absolute paths that won't resolve on the target machine.
+
+### DON'T do before handoff
+
+| Don't | Why |
+|---|---|
+| **Pre-apply EQ on tracks** | The agent runs `apply_eq` with instrument-specific presets (`kick_in`, `snare_top`, `bass_di`, etc.). Pre-EQ stacks invisibly and can't be undone. |
+| **Pre-apply compression / limiting / gating** | The agent runs `apply_compression`, `apply_gate` with reasoning. Pre-comped tracks have damaged crest factor and trigger false pumping alarms. |
+| **Pre-apply reverb / delay / saturation** | The agent runs `apply_reverb`, `apply_delay`, `apply_saturation`. Wet signal isn't reversible. |
+| **Normalize tracks or apply gain rides** | The agent's `apply_gain --per-clip` normalises each clip to a consistent LUFS target. Pre-normalised material defeats this. |
+| **Apply master-bus EQ / limiting** | The agent's `master_mix.py` handles format-specific mastering (Spotify, Apple, CD, etc.). |
+| **Apply pitch correction / Melodyne / Auto-Tune** | Vocal toolkit is on the backlog — when shipped, the agent will handle this. Manual edits constrain its choices. |
+| **Enable Ableton's auto-warp on a fixed-tempo recording** | Turn warp off on tracks that were recorded to click. Warp markers can misalign multi-mic drum takes by milliseconds. |
+
+### Special cases
+
+**Click / scratch track**: keep it in the session (it helps the agent
+understand tempo), but name it clearly (`CLICK`, `MANKÓ`, `GUIDE`, etc.).
+The agent will set `active: false` on it during the render — otherwise
+a click track that extends past the song's end will lengthen the mix
+with silence.
+
+**Drum mics with bleed**: leave the bleed in. The agent's `apply_gate`
+handles drum bleed control with instrument-specific presets, and the
+`align_phase` step phase-aligns multi-mic captures sub-sample. Manual
+fade-outs between hits defeat both.
+
+**Vocal recordings**: out of scope for now (no vocal toolkit yet —
+backlog item #4). You can still hand the session to the agent; it will
+detect vocal tracks, deactivate them in `mix_config`, and ship the
+instrumental.
+
+### Folder layout to hand off
+
+After `Collect All and Save` (Ableton) or saving the `.ptx` (Pro Tools),
+the folder you hand the agent should look like:
+
+```
+sessions/<songname>/
+├── <songname>.als            ← Ableton session file (or .ptx for Pro Tools)
+├── Samples/
+│   ├── Recorded/             ← Ableton-recorded audio
+│   ├── Imported/             ← External samples used in the session
+│   └── ...
+└── (optional) reference.wav  ← A "make it sound like this" reference track
+```
+
+Copy this directory to the machine running music-mix-agent (USB, scp,
+rsync — whatever's convenient). Then tell the agent:
+
+> "Új session: `~/sessions/songname/songname.als`. Modern rock. Cél: Spotify-ready master."
+
+(Substitute genre and goal as appropriate.) The agent takes it from there.
+
+### What the agent will ask before starting
+
+Before the pipeline runs, the agent will ask 2-3 things you should be
+ready for:
+
+1. **Genre / style** — for `--style modern_rock` (or `classic_rock`,
+   `pop`, `hip_hop`, `jazz_acoustic`). Sets genre-appropriate bus
+   volume defaults.
+2. **Which takes/mics to keep** if there are duplicate-source-file
+   groups (the `audit_session.py` flag) or alternate takes on separate
+   tracks.
+3. **Goal** — streaming delivery, demo, mix-health gate against the
+   reference track, etc. Determines target LUFS and which masters get
+   rendered.
+
+You don't have to know these answers in advance — the agent shows what
+it sees and explains the trade-offs.
+
+### "Less is more" — the cardinal rule
+
+The less you process pre-handoff, the better the pipeline can do its
+job and the more reproducible the result is. The `mix_chain.json` recall
+sheet captures every step the pipeline takes — but only steps that are
+*part of the pipeline*. Pre-processing inside your DAW isn't in the
+chain. If you want to rebuild the mix in three months on a different
+machine using only the raw DAW session + `mix_chain.json`, that only
+works if the DAW session is genuinely raw.
+
+---
+
 ## Workflow overview
 
 ```
