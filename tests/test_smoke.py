@@ -11,7 +11,7 @@ field-test rounds revealed as easy to regress:
 - Each make-it-hit tool's relevance_check returns the expected skip/apply
   decision on simple synthetic inputs
 
-Run with:  conda run -n music-mix-agent pytest tests/ -v
+Run with:  conda run -n music-studio-agent pytest tests/ -v
 """
 
 from __future__ import annotations

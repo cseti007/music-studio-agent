@@ -1,4 +1,4 @@
-# music-mix-agent pipeline configuration
+# music-studio-agent pipeline configuration
 # All tools read this file from the project root directory.
 
 [gain]

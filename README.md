@@ -1,4 +1,4 @@
-# music-mix-agent
+# music-studio-agent
 
 AI-assisted multi-track mixing pipeline. An LLM agent analyzes your recorded stems,
 interprets the data, and applies processing — EQ, compression, gating, reverb, saturation,
@@ -17,8 +17,8 @@ Works with any LLM: Claude, ChatGPT, Gemini, local models via Ollama, etc.
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/music-mix-agent.git
-cd music-mix-agent
+git clone https://github.com/your-username/music-studio-agent.git
+cd music-studio-agent
 
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
@@ -152,7 +152,7 @@ sessions/<songname>/
 └── (optional) reference.wav  ← A "make it sound like this" reference track
 ```
 
-Copy this directory to the machine running music-mix-agent (USB, scp,
+Copy this directory to the machine running music-studio-agent (USB, scp,
 rsync — whatever's convenient). Then tell the agent:
 
 > "Új session: `~/sessions/songname/songname.als`. Modern rock. Cél: Spotify-ready master."
@@ -298,7 +298,7 @@ A minimal pytest suite covers the load-bearing DSP and relevance-check logic.
 Run before committing changes that touch tools/:
 
 ```bash
-conda run -n music-mix-agent pytest tests/ -v
+conda run -n music-studio-agent pytest tests/ -v
 # or with venv:
 pytest tests/ -v
 ```

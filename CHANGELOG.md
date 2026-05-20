@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to music-mix-agent. Versions are by-commit; the project is not
+Notable changes to music-studio-agent. Versions are by-commit; the project is not
 yet semver-tagged.
 
 The format groups changes by intent rather than by file, so a reader can see

@@ -1,4 +1,4 @@
-# music-mix-agent — Claude session instructions
+# music-studio-agent — Claude session instructions
 
 ## What this project is
 
