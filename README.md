@@ -122,7 +122,7 @@ sees absolute paths that won't resolve on the target machine.
 ### Special cases
 
 **Click / scratch track**: keep it in the session (it helps the agent
-understand tempo), but name it clearly (`CLICK`, `MANKÓ`, `GUIDE`, etc.).
+understand tempo), but name it clearly (`CLICK`, `GUIDE`, `METRONOME`, etc.).
 The agent will set `active: false` on it during the render — otherwise
 a click track that extends past the song's end will lengthen the mix
 with silence.
@@ -155,7 +155,7 @@ sessions/<songname>/
 Copy this directory to the machine running music-studio-agent (USB, scp,
 rsync — whatever's convenient). Then tell the agent:
 
-> "Új session: `~/sessions/songname/songname.als`. Modern rock. Cél: Spotify-ready master."
+> "New session at `~/sessions/songname/songname.als`. Modern rock. Goal: Spotify-ready master."
 
 (Substitute genre and goal as appropriate.) The agent takes it from there.
 

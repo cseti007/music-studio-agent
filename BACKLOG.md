@@ -165,9 +165,9 @@ master) plus mix_config schema extension.
   proper vocal-toolkit support)
 - A specific vocal sibilance problem comes up
 
-**Status.** User explicitly deferred this in the current scope —
-"vokállal még nem foglalkoztunk, nem is kell egyelőre". Pick up when
-vocal sessions become regular.
+**Status.** User explicitly deferred this in the current scope — vocal
+work is out of scope until vocal-bearing sessions become regular. Pick
+up when that happens.
 
 ---
 
