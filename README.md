@@ -17,7 +17,7 @@ Works with any LLM: Claude, ChatGPT, Gemini, local models via Ollama, etc.
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/music-studio-agent.git
+git clone https://github.com/cseti007/music-studio-agent.git
 cd music-studio-agent
 
 python3 -m venv .venv
