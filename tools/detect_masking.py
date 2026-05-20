@@ -17,16 +17,16 @@ Output:
 
 Usage:
   # Auto-discover stems from session output directory
-  python detect_masking.py output/terido --output-dir output/terido
+  python detect_masking.py output/<session> --output-dir output/<session>
 
   # Specify stage (raw, eq, comp, fx)
-  python detect_masking.py output/terido --stage comp --output-dir output/terido
+  python detect_masking.py output/<session> --stage comp --output-dir output/<session>
 
   # Specific files only
-  python detect_masking.py kick.wav snare.wav bass.wav --output-dir output/terido
+  python detect_masking.py kick.wav snare.wav bass.wav --output-dir output/<session>
 
   # Lower threshold to see more masking pairs
-  python detect_masking.py output/terido --threshold 6 --output-dir output/terido
+  python detect_masking.py output/<session> --threshold 6 --output-dir output/<session>
 """
 
 import argparse

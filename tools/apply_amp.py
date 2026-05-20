@@ -19,8 +19,8 @@ Presets:
   di_clean         — cabinet EQ only, no saturation
 
 Usage:
-  python apply_amp.py output/terido/BASS\\ DI\\ CLEAN/assembled_eq_comp.wav \\
-      --preset ampeg_svt --output-dir output/terido/BASS\\ DI\\ CLEAN
+  python apply_amp.py output/<session>/BASS\\ DI\\ CLEAN/assembled_eq_comp.wav \\
+      --preset ampeg_svt --output-dir output/<session>/BASS\\ DI\\ CLEAN
 
   python apply_amp.py input.wav --drive 0.5 --asymmetry 0.3 \\
       --hp 40 --lp 5000 --low-shelf-hz 120 --low-shelf-db 3 \\

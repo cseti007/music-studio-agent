@@ -19,7 +19,7 @@ Outputs:
   - mix_health.txt (the scorecard you actually read)
 
 Usage:
-  python mix_health.py output/terido [--reference ref.wav] [--lufs-target -14]
+  python mix_health.py output/<session> [--reference ref.wav] [--lufs-target -14]
 """
 
 import argparse
@@ -506,7 +506,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Session-level mix health scorecard. Run after render_mix --render.",
     )
-    parser.add_argument("session_dir", type=Path, help="Session output directory (e.g. output/terido)")
+    parser.add_argument("session_dir", type=Path, help="Session output directory (e.g. output/<session>)")
     parser.add_argument(
         "--output-dir", type=Path, default=None,
         help="Where to write mix_health.json/.txt (default: <session_dir>/analysis)",

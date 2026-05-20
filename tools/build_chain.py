@@ -338,7 +338,7 @@ def main() -> None:
         description="Aggregate per-stem *_report.json files into mix_chain.json",
     )
     parser.add_argument("session_dir", type=Path,
-                        help="Session output directory (e.g. output/terido)")
+                        help="Session output directory (e.g. output/<session>)")
     parser.add_argument("--output", type=Path, default=None,
                         help="Where to write mix_chain.json (default: <session_dir>/mix_chain.json)")
     args = parser.parse_args()

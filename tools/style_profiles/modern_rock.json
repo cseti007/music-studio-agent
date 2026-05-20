@@ -5,7 +5,7 @@
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Alt Rock / Indie Rock / Post Rock)",
     "Streaming mastering guides 2025: rock target -10 to -13 LUFS integrated",
-    "Calibrated against terido session masters (-10 LUFS-normalized wideband band-RMS)"
+    "Calibrated against real-world rock streaming masters at -10 LUFS-normalized wideband band-RMS"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS measured at the integrated_target LUFS, NOT iZotope-TBC PSD-curve values. Numbers come from professional rock streaming masters.",
   "lufs": {

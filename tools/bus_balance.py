@@ -12,9 +12,7 @@ into master. Sub-buses are shown for reference but their LUFS goes
 through their parent's processing.
 
 Usage:
-    python tools/bus_balance.py [path/to/mix_config.json]
-
-Defaults to `output/terido/mix_config.json` for backward compat.
+    python tools/bus_balance.py path/to/mix_config.json
 """
 
 import json
@@ -39,7 +37,10 @@ def _effective_volume_db(bus_name: str, buses_cfg: dict) -> tuple[float, bool]:
 
 
 def main() -> None:
-    config_path = Path(sys.argv[1] if len(sys.argv) > 1 else "output/terido/mix_config.json")
+    if len(sys.argv) < 2:
+        print("Usage: bus_balance.py <mix_config.json>", file=sys.stderr)
+        sys.exit(1)
+    config_path = Path(sys.argv[1])
     if not config_path.exists():
         print(f"ERROR: config not found: {config_path}", file=sys.stderr)
         sys.exit(1)

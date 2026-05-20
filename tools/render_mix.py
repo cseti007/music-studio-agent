@@ -3,7 +3,7 @@
 render_mix.py -- sum processed stems into a stereo mix
 
 Usage:
-  render_mix.py output/terido --generate-config [--config mix_config.json]
+  render_mix.py output/<session> --generate-config [--config mix_config.json]
   render_mix.py mix_config.json --render [--output mix.wav]
 """
 
@@ -1003,9 +1003,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  render_mix.py output/terido --generate-config
-  render_mix.py output/terido/mix_config.json --render
-  render_mix.py output/terido/mix_config.json --render --output my_mix.wav
+  render_mix.py output/<session> --generate-config
+  render_mix.py output/<session>/mix_config.json --render
+  render_mix.py output/<session>/mix_config.json --render --output my_mix.wav
         """,
     )
     parser.add_argument("input", help="Session output dir (--generate-config) or mix_config.json (--render)")

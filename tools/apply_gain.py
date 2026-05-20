@@ -23,16 +23,16 @@ Reads [gain] section from config.toml in the current working directory.
 
 Usage:
   # list available tracks
-  python apply_gain.py --per-clip output/terido/session.json
+  python apply_gain.py --per-clip output/<session>/session.json
 
   # clip gain + assemble one track
-  python apply_gain.py --per-clip output/terido/session.json --track "BASS DI CLEAN"
+  python apply_gain.py --per-clip output/<session>/session.json --track "BASS DI CLEAN"
 
   # clip gain + assemble all tracks
-  python apply_gain.py --per-clip output/terido/session.json --all
+  python apply_gain.py --per-clip output/<session>/session.json --all
 
   # per-channel gain staging on assembled stem
-  python apply_gain.py --per-channel output/terido/BASS\\ DI\\ CLEAN/assembled.wav --preset stem
+  python apply_gain.py --per-channel output/<session>/BASS\\ DI\\ CLEAN/assembled.wav --preset stem
 """
 
 import argparse

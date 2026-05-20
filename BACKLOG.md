@@ -295,7 +295,42 @@ fires the MVP is genuinely 1 day of work.
 
 ---
 
-## 8. Spatial / Dolby Atmos output
+## 8. Config-driven guitarist-prefix detection
+
+**What.** `tools/render_mix.py` currently has a hardcoded
+`_GUITARIST_PREFIXES = ["GTR 1", "GTR LACI", "GTR TERKA", "GTR"]` list
+used by `_detect_bus()` and `_guitarist_prefix()` to assign multi-guitarist
+tracks to per-player sub-buses (gtr_1, gtr_laci, gtr_terka).
+
+The first three entries are names from the project's reference test
+session. Any other session with different guitarist labels (e.g.
+"GTR JOHN", "GTR PAUL") falls through to the generic "GTR" bucket,
+which loses the per-player sub-bus structure.
+
+**Why.** For the project to work cleanly on arbitrary sessions, the
+guitarist-prefix list should be either:
+- Auto-detected from track names at `--generate-config` time (scan
+  for unique `GTR <NAME>` patterns).
+- Specified via the `mix_config.json` or an environment-level config file.
+
+**Scope.** ~30 lines of changes in `render_mix.py`:
+- New auto-detection function `_discover_guitarist_prefixes(tracks)`
+- The existing `_GUITARIST_PREFIXES` becomes a fallback default
+- `generate_config()` calls the discovery function once, stores the
+  result either in `mix_config.json` or passes it through as a parameter.
+
+**Triggers.** Worth doing when:
+- A second session arrives with different guitarist names.
+- Someone forks the repo and runs into a "my GTR JOHN track went to
+  the generic guitar bus" issue.
+
+**Status.** Identified during the public-readiness review on 2026-05-19.
+Functional for the original session, gracefully degrades for others
+(generic guitar bus still works, just loses sub-bus granularity).
+
+---
+
+## 9. Spatial / Dolby Atmos output
 
 **What.** Object-based render path. `render_mix --atmos` produces an ADM BWF
 file with bed channels + objects (per-track positional metadata). Optionally

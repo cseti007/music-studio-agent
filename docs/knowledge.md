@@ -757,7 +757,7 @@ When `recommend_skip: true`, the tool exits without writing the output WAV. The 
 
 ### Required-evidence thresholds (per tool)
 
-These are the empirical thresholds derived from the field test on the terido session:
+These are the empirical thresholds derived from a real-session field test (a 56-stem rock recording referred to as "terido" in the project history). They are intended as **starting reference values** — your own session may need different thresholds depending on instrumentation density and recording quality:
 
 | Tool | Required evidence |
 |---|---|
@@ -784,7 +784,7 @@ If the metric didn't move, **revert**. The tool either didn't help or just shift
 
 ### Field-test lesson: rock-band tracking and the subharm tool
 
-On the terido test session (a real 56-stem rock recording) every stem failed the subharm relevance check — the target band 80-200 Hz was always 3+ dB louder than the 40-80 Hz fundamental. This is **not a bug**: rock recording captures harmonics naturally, so the target band is always full. Subharm is genuinely a synth-bass / 808 / sample-based-low-end tool. Honour the skip.
+On a 56-stem rock-band test session every stem failed the subharm relevance check — the target band 80-200 Hz was always 3+ dB louder than the 40-80 Hz fundamental. This is **not a bug**: rock recording captures harmonics naturally, so the target band is always full. Subharm is genuinely a synth-bass / 808 / sample-based-low-end tool. Honour the skip.
 
 ### Field-test lesson: pumping is often a musical pulse, not artifact
 

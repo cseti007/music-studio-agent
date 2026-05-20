@@ -16,9 +16,9 @@ Typical use cases in a drum session:
 
 Usage:
   python align_phase.py \\
-      --reference "output/terido/KICK IN.05/assembled.wav" \\
-      --target    "output/terido/KICK OUT.05/assembled.wav" \\
-      --output-dir output/terido
+      --reference "output/<session>/KICK IN.05/assembled.wav" \\
+      --target    "output/<session>/KICK OUT.05/assembled.wav" \\
+      --output-dir output/<session>
 
 Reads [align] section from config.toml in the current working directory.
 """

@@ -22,8 +22,8 @@ for punch on snare and drums.
 
 Usage:
   # snare plate (algorithmic)
-  python apply_reverb.py output/terido/SN\\ TOP/assembled_eq_comp.wav \\
-      --preset snare_plate --output-dir output/terido/SN\\ TOP
+  python apply_reverb.py output/<session>/SN\\ TOP/assembled_eq_comp.wav \\
+      --preset snare_plate --output-dir output/<session>/SN\\ TOP
 
   # large hall via impulse response (convolution)
   python apply_reverb.py input.wav --ir irs/concert_hall.wav \\
