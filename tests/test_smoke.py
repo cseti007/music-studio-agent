@@ -522,7 +522,11 @@ class TestStyleCheck:
         from style_check import list_profiles, load_profile
 
         names = list_profiles()
-        assert set(names) == {"modern_rock", "classic_rock", "pop", "hip_hop", "jazz_acoustic"}
+        # The 5 baseline profiles must all be present; extra profiles (e.g.
+        # tool_inspired, punchy_modern_rock) are allowed and not asserted-out
+        # so adding a new profile JSON doesn't break this test.
+        baseline = {"modern_rock", "classic_rock", "pop", "hip_hop", "jazz_acoustic"}
+        assert baseline <= set(names), f"missing baseline profile(s): {baseline - set(names)}"
         for name in names:
             p = load_profile(name)
             for key in ("lufs", "lra", "crest_factor", "tonal_balance_dbfs"):
