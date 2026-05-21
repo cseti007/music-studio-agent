@@ -108,66 +108,170 @@ run pytest. Optionally a lint step (ruff or flake8).
 
 ---
 
-## 4. Vocal toolkit (de-esser, pitch correction, vocal presets, vocal reverb)
+## 4. Vocal toolkit — full pipeline plan
 
-**What.** A vocal-stem-aware set of tools, presets, and reverb integration.
+**What.** A complete vocal-stem-aware pipeline: stem detection, vocal-
+specific analysis fields, a chain of processing tools applied in the
+modern-best-practice order, shared reverb buses, and per-genre vocal
+presets across all 7 style profiles. Designed in 5 phases so an MVP can
+ship after Phase 1+2 (~5 days) and the heavier pitch-correction work
+can wait until a session actually needs it.
 
-- `apply_deesser.py` — frequency-specific sidechain compressor on the 5-8 kHz
-  sibilance region
-- `apply_pitch_correct.py` — Melodyne/Auto-Tune style; librosa or world
-  vocoder under the hood
-- Vocal EQ / comp presets — `vocal_lead_pop`, `vocal_lead_rock`,
-  `vocal_lead_ballad`, etc. (the horgonyt_fel session needed a manual
-  `HP@80 + cut@250 + boost@4k` chain because none of the existing
-  presets fit)
-- **Vocal reverb presets** — `vocal_plate` (1.5s decay, HP@300, LP@8k),
-  `vocal_chamber` (8 ms pre-delay, 0.6s decay), `vocal_hall_wide`
-  (60 ms pre-delay, 2-3s decay)
-- **Reverb-bus architecture in render_mix** — currently every bus has
-  its own optional `reverb_send`, but the studio standard is dedicated
-  reverb buses (plate, room, hall) that multiple tracks/buses send
-  into at different levels. This becomes load-bearing once vocal mixing
-  is in scope (vocal typically sends to two reverb buses simultaneously).
-  Spec sketch:
+### Best-practice vocal chain order (per-stem)
 
-  ```json
-  "reverb_buses": {
-    "plate": {"preset": "vocal_plate", "wet": 1.0},
-    "hall":  {"preset": "hall_ambient", "wet": 1.0}
-  },
-  "tracks": [
-    {"name": "Vocal", "reverb_sends": [
-      {"bus": "plate", "level": 0.2},
-      {"bus": "hall",  "level": 0.15}
-    ]}
-  ]
-  ```
+Researched against 2026 sources (Music Guy Mixing, iZotope, Sonarworks,
+UAD, Patrik Skoog). The non-obvious bits:
 
-**Why.** The current repo has zero vocal-specific tooling. The 2026
-streaming target for vocal momentary LUFS (-10 to -8 with full mix at
--14) cannot be hit reliably without vocal-aware processing. The
-horgonyt_fel session was the first vocal-bearing session and exposed
-the gap: the vocal stem was processed with a hand-rolled custom EQ +
-comp chain because no presets exist; it went into the mix dry because
-the reverb-bus architecture isn't there.
+```
+volume → pan
+  → subtractive EQ        (HP @ 80 Hz, mud cut @ 200-400 Hz, harshness notches)
+  → compression           (3-4:1 leveling)
+  → de-esser              (catches comp-amplified sibilance — placed AFTER comp on purpose)
+  → additive EQ           (presence @ 3-4 kHz, air @ 12 kHz — placed AFTER comp so boosts aren't squashed)
+  → [pitch correction]    (optional, comes before reverb sends)
+  → saturation            (character processor, optional)
+  → reverb sends          (to shared vocal_plate / vocal_hall buses — never insert reverb on the vocal channel itself)
+```
 
-**Scope.** Each tool ~150-250 lines + relevance check. De-esser is the
-quickest win (~100 lines, just a sidechained band-comp); pitch correction
-is the heavy item (formant preservation, phase coherence on shifted blocks
-is real DSP work). Vocal reverb presets are trivial (3 new JSON files).
-The reverb-bus architecture in render_mix is the largest piece — about
-100 lines of routing code (independent reverb-bus rendering, return to
-master) plus mix_config schema extension.
+Two key reversals vs. a naïve chain:
+1. **De-esser AFTER compression**, not before. The comp amplifies
+   sibilance peaks; the de-esser catches them at the comp's output where
+   they're worst.
+2. **EQ split into subtractive (pre-comp) and additive (post-comp).**
+   Cuts before comp keep its detection clean; boosts after comp prevent
+   the boost from being squashed by gain reduction.
 
-**Triggers.** Worth doing when:
-- User starts mixing sessions that contain vocals (the horgonyt_fel
-  vocal stem was processed manually; revisiting it would benefit from
-  proper vocal-toolkit support)
-- A specific vocal sibilance problem comes up
+### Phase 1 — MVP (~3 days)
 
-**Status.** User explicitly deferred this in the current scope — vocal
-work is out of scope until vocal-bearing sessions become regular. Pick
-up when that happens.
+| Component | Detail |
+|---|---|
+| `_detect_bus` vocal-keywords | New `_VOCAL_KEYWORDS = ["LEAD VOX", "LEAD VOC", "VOX", "VOC", "BG VOX", "BACKING", "HARMONY", "DOUBLE", "AD-LIB", "ADLIB", "WHISPER", "TALK"]`. Returns `vocal_lead` or `vocal_bg` sub-bus, parent `vocal`. |
+| `tools/apply_deesser.py` (~250 lines) | Frequency-band-specific sidechain comp. Detection band 5-8 kHz, gain reduction full-band. Presets: `deesser_smooth`, `deesser_aggressive`, `deesser_male_lead`, `deesser_female_lead`. `relevance_check`: skip if sibilance band peak < -25 dBFS. |
+| 5 new vocal EQ presets | `eq_vocal_lead_rock_cut/_boost`, `eq_vocal_lead_pop_cut/_boost`, `eq_vocal_lead_ballad_cut/_boost`, `eq_vocal_bg_cut/_boost`, `eq_vocal_double_cut/_boost`. Each split into a "subtractive" preset (pre-comp) and an "additive" preset (post-comp). |
+| 4 new vocal comp presets | `comp_vocal_lead_rock` (4:1, -18 dB, 5/100 ms, +6 makeup), `comp_vocal_lead_pop` (6:1, -16, 3/80, +6 — heavier), `comp_vocal_lead_ballad` (3:1, -20, 8/120, +4 — gentler), `comp_vocal_bg` (3:1, -20, 10/150). |
+| 3 algorithmic + 3 IR vocal reverb presets | Algorithmic: `vocal_plate` (1.5s decay, HP @ 300, LP @ 8k), `vocal_chamber` (8 ms pre-delay, 0.6s), `vocal_hall_wide` (60 ms pre-delay, 2-3s). IR pack additions: `vocal_plate_emt140`, `vocal_chamber_small`, `vocal_room_close` (added to `tools/generate_irs.py`). |
+| Style profile vocal bus defaults | All 7 profiles gain `vocal_lead` and `vocal_bg` in `default_bus_volume_db`. Pop = +4/-1 (vocal-dominated); rock = +2/-2; ballad = +2.5/-2; hip-hop = +3/-3; jazz = +2/-2. |
+
+### Phase 2 — Reverb-bus architecture (~1 day)
+
+The studio-standard "send to shared reverb bus" pattern. Today every bus
+has its own `reverb_send` (insert-style); for vocal mixing we need
+multiple sources sending to one shared plate / hall / chamber bus at
+different levels. Schema extension:
+
+```json
+"reverb_buses": {
+  "vocal_plate": {"preset": "vocal_plate", "wet": 1.0, "return_volume_db": -6, "return_pan": 0.0},
+  "vocal_hall":  {"preset": "vocal_hall_wide", "wet": 1.0, "return_volume_db": -12, "return_pan": 0.0}
+},
+"tracks": [
+  {
+    "name": "LEAD VOX",
+    "bus": "vocal_lead",
+    "reverb_sends": [
+      {"bus": "vocal_plate", "level_db": -6},
+      {"bus": "vocal_hall",  "level_db": -18}
+    ]
+  }
+]
+```
+
+`render_mix.py` change: ~100 lines. New rendering pass for each
+`reverb_bus` (one convolution / Freeverb instance, fed by summed pre-
+fader sends from contributing tracks), then return-bus mix into master.
+
+### Phase 3 — Vocal-specific analyse fields (~1 day)
+
+New top-level keys in `analysis.json` for vocal stems. Inferred from the
+existing analyse-decision-tree pattern:
+
+| Field | What | Decides |
+|---|---|---|
+| `sibilance.peak_db` | 5-8 kHz transient peak | de-esser threshold |
+| `sibilance.density_per_sec` | sibilance events per second | de-esser preset (smooth vs aggressive) |
+| `plosive.events_count` | sub-100 Hz transient bursts | high-pass / plosive removal |
+| `pitch.mean_hz` | librosa.pyin avg fundamental | vocal range detection (male / female / other) |
+| `pitch.cents_std` | intonation stability | auto-tune intensity |
+| `vibrato.rate_hz` | 4-7 Hz amplitude modulation | vocal style classification |
+| `breath.silence_ratio` | silent-frame ratio | gate threshold |
+
+### Phase 4 — Pitch correction (~1-2 days)
+
+`tools/apply_pitch_correct.py`. After web research the implementation
+is more accessible than first thought — there is a pip-installable
+`psola` package that handles the PSOLA pitch-shifting (used in the
+JanWilczek/python-auto-tune reference repo).
+
+```python
+import librosa, psola
+y, sr = librosa.load("vocal.wav", sr=None)
+f0, _, _ = librosa.pyin(y, fmin=80, fmax=600, sr=sr)
+f0_quantized = quantize_to_scale(f0, root_note='A', mode='minor')   # ~30 lines of scale logic
+y_corrected = psola.vocode(y, sample_rate=sr, target_pitch=f0_quantized,
+                           fmin=80, fmax=600)
+```
+
+CLI: `--scale-root A --scale-mode minor --strength 0.7` (0=no
+correction, 1=full quantize). Skip when `pitch.cents_std < 25` (already
+in tune). Defer the "Deep Autotuner" NN approach (arxiv 1902.00956,
+2002.05511) — overkill for MVP.
+
+### Phase 5 — Polish (~1 day)
+
+- `apply_vocal_align.py` — lead + double-tracks alignment. Unlike
+  `align_phase.py` (which uses cross-correlation), vocal double-tracks
+  benefit from **onset-based** alignment because the phrasing isn't
+  perfectly coherent — phonetic onsets are the reliable anchor points.
+- Tests for everything (`TestVocalDeesser`, `TestVocalPitchCorrect`,
+  `TestReverbBus`, `TestVocalDetectBus`).
+- Docs: CLAUDE.md gains a "Vocal pipeline" workflow section + tools-
+  table rows + new decision-tree triggers (e.g. "vocal stem
+  `sibilance.peak_db > -20` → run apply_deesser"). knowledge.md gains a
+  "Vocal Mixing" top-level section with genre-specific aesthetics
+  (pop = bright + heavy comp + plate + slap; rock = present + moderate
+  comp + room; ballad = natural + soft comp + lush hall; hip-hop = pitched
+  + hard-comp + chamber + ad-libs panned).
+
+### Why this matters
+
+The current repo has zero vocal-specific tooling. The 2026 streaming
+target for vocal momentary LUFS (-10 to -8 with full mix at -14) can't
+be hit reliably without vocal-aware processing. The horgonyt_fel session
+was the first vocal-bearing session and exposed the gap: the vocal stem
+was processed with a hand-rolled custom EQ + comp chain because no
+presets exist; it went into the mix dry because the reverb-bus
+architecture isn't there.
+
+### Scope summary
+
+| Phase | Days | Notes |
+|---|---|---|
+| 1 (MVP — deesser + presets + bus detection) | 3 | Functional vocal mixing |
+| 2 (Reverb-bus architecture) | 1 | Shared-bus reverb routing |
+| 3 (Vocal-specific analyze fields) | 1 | Decision-tree completeness |
+| 4 (Pitch correction) | 1-2 | `psola` package shortens this vs. building PSOLA from scratch |
+| 5 (Polish + alignment + docs) | 1 | Tests, docs, vocal-align |
+| **Total** | **~7-8 days** | **MVP after 1+2 = 4 days** |
+
+### Triggers
+
+Worth doing when:
+- A vocal-bearing session arrives that needs delivery-ready vocal mixing
+- The horgonyt_fel session is being revisited
+- A specific vocal sibilance / pitch problem comes up
+
+### Web-research sources (2026 best practices)
+
+- [Music Guy Mixing — Vocal Chain Order](https://www.musicguymixing.com/vocal-chain/)
+- [iZotope — Crafting a basic vocal chain](https://www.izotope.com/en/learn/crafting-a-basic-vocal-chain)
+- [Sonarworks — Chaining vocal effects plugins](https://www.sonarworks.com/blog/learn/how-to-chain-multiple-vocal-effects-plugins-effectively)
+- [Universal Audio — Top vocal chains](https://www.uaudio.com/blogs/ua/top-uad-vocal-chains)
+- [Patrik Skoog — How to Mix Vocals](https://www.patrikskoogmusic.com/guides/how-to-mix-vocals-eq-compression-saturation)
+- [PSOLA algorithm explanation](https://engprojects.tcnj.edu/autotuner16/2016/04/11/the-psola-algorithm/)
+- [JanWilczek/python-auto-tune (PYIN + PSOLA reference impl)](https://github.com/JanWilczek/python-auto-tune)
+
+**Status.** Plan researched and detailed 2026-05-21 (this update). Ready
+to implement Phase 1 when a vocal-bearing session is on deck.
 
 ---
 
