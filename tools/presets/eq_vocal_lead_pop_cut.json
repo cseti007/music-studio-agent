@@ -1,0 +1,9 @@
+{
+  "name": "eq_vocal_lead_pop_cut",
+  "description": "Vocal lead pop — subtractive EQ (pre-comp). Steeper HP (100 Hz), tighter mud cut @ 250 Hz, slight tame @ 1.5 kHz nasal.",
+  "filters": [
+    {"type": "highpass", "hz": 100, "order": 2},
+    {"type": "peak", "hz": 250, "q": 1.0, "db": -2.0},
+    {"type": "peak", "hz": 1500, "q": 1.5, "db": -1.0}
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "name": "eq_vocal_double_cut",
+  "description": "Vocal double-track — subtractive EQ. Notch the lead's frequency anchors (1.5 kHz and 3 kHz region) so the double sits beside the lead instead of phasing with it. Similar HP as lead.",
+  "filters": [
+    {"type": "highpass", "hz": 80, "order": 2},
+    {"type": "peak", "hz": 1500, "q": 1.5, "db": -1.5},
+    {"type": "peak", "hz": 3000, "q": 1.5, "db": -1.0}
+  ]
+}

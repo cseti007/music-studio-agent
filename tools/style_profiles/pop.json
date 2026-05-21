@@ -14,22 +14,45 @@
   },
   "lra": {
     "target_lu": 5.0,
-    "range_lu": [3.5, 7.0]
+    "range_lu": [
+      3.5,
+      7.0
+    ]
   },
   "crest_factor": {
     "target_db": 11.0,
-    "range_db": [9.0, 13.0]
+    "range_db": [
+      9.0,
+      13.0
+    ]
   },
   "default_bus_volume_db": {
-    "drums":  -1.0,
-    "bass":   -1.0,
-    "guitar": -3.0
+    "drums": -1.0,
+    "bass": -1.0,
+    "guitar": -3.0,
+    "vocal_lead": 4.0,
+    "vocal_bg": -1.0
   },
   "tonal_balance_dbfs": {
-    "sub_60hz":       {"target": -27.0, "tolerance": 3.0},
-    "low_60_250hz":   {"target": -17.0, "tolerance": 2.5},
-    "mid_250_2khz":   {"target": -20.0, "tolerance": 2.0},
-    "high_2_8khz":    {"target": -23.0, "tolerance": 2.0},
-    "air_8khz_plus":  {"target": -29.0, "tolerance": 2.5}
+    "sub_60hz": {
+      "target": -27.0,
+      "tolerance": 3.0
+    },
+    "low_60_250hz": {
+      "target": -17.0,
+      "tolerance": 2.5
+    },
+    "mid_250_2khz": {
+      "target": -20.0,
+      "tolerance": 2.0
+    },
+    "high_2_8khz": {
+      "target": -23.0,
+      "tolerance": 2.0
+    },
+    "air_8khz_plus": {
+      "target": -29.0,
+      "tolerance": 2.5
+    }
   }
 }

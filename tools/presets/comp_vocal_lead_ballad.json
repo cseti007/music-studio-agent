@@ -1,0 +1,12 @@
+{
+  "name": "comp_vocal_lead_ballad",
+  "description": "Vocal lead ballad — gentle 3:1 leveling that preserves dynamic phrasing and breath",
+  "notes": "Slow 8 ms attack lets breath/onset transients through fully — essential for the intimate ballad vibe. 120 ms release follows natural phrasing without pumping. Lower makeup (+4 dB) because we're catching less peaks.",
+  "settings": {
+    "threshold_db": -20,
+    "ratio": 3,
+    "attack_ms": 8,
+    "release_ms": 120,
+    "makeup_db": 4
+  }
+}

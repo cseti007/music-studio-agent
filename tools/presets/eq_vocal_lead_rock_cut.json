@@ -1,0 +1,9 @@
+{
+  "name": "eq_vocal_lead_rock_cut",
+  "description": "Vocal lead rock — subtractive EQ (pre-comp). HP @ 80 Hz to clean sub rumble, peak cut @ 250 Hz to clear mud, peak cut @ 800 Hz for nasal honk.",
+  "filters": [
+    {"type": "highpass", "hz": 80, "order": 2},
+    {"type": "peak", "hz": 250, "q": 1.0, "db": -2.0},
+    {"type": "peak", "hz": 800, "q": 1.2, "db": -1.5}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "comp_vocal_bg",
+  "description": "Backing vocal — 3:1 gentle leveling, slower than lead so the BG sits naturally behind without competing for the listener's focus",
+  "notes": "10 ms attack — slow enough to let onsets through gently. 150 ms release — long enough to feel passive in the mix. +4 dB makeup. Use heavier comp (5:1) if the BG layer is too inconsistent in level.",
+  "settings": {
+    "threshold_db": -20,
+    "ratio": 3,
+    "attack_ms": 10,
+    "release_ms": 150,
+    "makeup_db": 4
+  }
+}

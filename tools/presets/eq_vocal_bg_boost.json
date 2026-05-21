@@ -1,0 +1,7 @@
+{
+  "name": "eq_vocal_bg_boost",
+  "description": "Backing vocal — additive EQ (post-comp). Gentle 2.5 kHz presence (lower than lead so the lead's 3 kHz wins).",
+  "filters": [
+    {"type": "peak", "hz": 2500, "q": 1.5, "db": 1.5}
+  ]
+}

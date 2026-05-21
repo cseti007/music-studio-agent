@@ -1,0 +1,8 @@
+{
+  "name": "eq_vocal_lead_ballad_boost",
+  "description": "Vocal lead ballad — additive EQ (post-comp). Subtle presence @ 3 kHz, soft air shelf @ 12 kHz — preserves intimacy.",
+  "filters": [
+    {"type": "peak", "hz": 3000, "q": 1.2, "db": 2.0},
+    {"type": "highshelf", "hz": 12000, "db": 1.0}
+  ]
+}

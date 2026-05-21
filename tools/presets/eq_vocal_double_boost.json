@@ -1,0 +1,7 @@
+{
+  "name": "eq_vocal_double_boost",
+  "description": "Vocal double-track — additive EQ. Gentle 8 kHz lift to add the sense of width without competing with the lead's 3 kHz presence.",
+  "filters": [
+    {"type": "highshelf", "hz": 8000, "db": 1.5}
+  ]
+}

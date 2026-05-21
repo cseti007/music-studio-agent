@@ -46,6 +46,11 @@ _GUITARIST_PREFIXES = ["GTR 1", "GTR LACI", "GTR TERKA", "GTR"]
 _DRUM_KEYWORDS = ["KICK", "SN ", " SN", "OH ", " OH", "TOM", "HIHAT", "HI-HAT",
                   "CRASH", "RIDE", "ROOM", "CYMBAL"]
 
+# Backing vocal keywords first (more specific) so "BG VOX" doesn't fall into the
+# generic VOX/VOC bucket.
+_VOCAL_BG_KEYWORDS = ["BG VOX", "BG VOC", "BACKING", "HARMONY", "AD-LIB", "ADLIB", "DOUBLE"]
+_VOCAL_LEAD_KEYWORDS = ["LEAD VOX", "LEAD VOC", "VOX", "VOC", "WHISPER", "TALK"]
+
 
 def _detect_bus(name: str) -> str:
     u = name.upper()
@@ -56,6 +61,10 @@ def _detect_bus(name: str) -> str:
     for prefix in _GUITARIST_PREFIXES:
         if u.startswith(prefix):
             return prefix.lower().replace(" ", "_")
+    if any(k in u for k in _VOCAL_BG_KEYWORDS):
+        return "vocal_bg"
+    if any(k in u for k in _VOCAL_LEAD_KEYWORDS):
+        return "vocal_lead"
     return "master"
 
 
@@ -209,6 +218,18 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         **gtr_sub_buses,
         "guitar": {"volume_db": _bus_default("guitar"), "comp_preset": None,            "parent_bus": None},
     }
+
+    # Vocal sub-buses if vocal tracks were detected. Both feed into a shared
+    # `vocal` parent so a single bus-level processing pass (master glue, gentle
+    # comp, etc.) can sit downstream of both lead and BG.
+    has_vocal_lead = any(t["bus"] == "vocal_lead" for t in tracks)
+    has_vocal_bg = any(t["bus"] == "vocal_bg" for t in tracks)
+    if has_vocal_lead or has_vocal_bg:
+        if has_vocal_lead:
+            buses["vocal_lead"] = {"volume_db": _bus_default("vocal_lead"), "comp_preset": None, "parent_bus": "vocal"}
+        if has_vocal_bg:
+            buses["vocal_bg"] = {"volume_db": _bus_default("vocal_bg"), "comp_preset": None, "parent_bus": "vocal"}
+        buses["vocal"] = {"volume_db": _bus_default("vocal"), "comp_preset": None, "parent_bus": None}
 
     mixes_dir = session_dir / "mixes"
     config = {
@@ -714,6 +735,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     print()
 
     # Load tracks and sum into bus buffers
+    # Shared reverb buses — top-level `reverb_buses` block of mix_config.json.
+    # Each named bus accumulates pre-fader sends from any track listing it in
+    # its `reverb_sends`. After the track loop, each reverb bus is rendered
+    # once and the wet return is summed into master.
+    reverb_buses_cfg: dict = config.get("reverb_buses", {})
+    reverb_send_buffers: dict[str, np.ndarray] = {
+        rb_name: np.zeros((2, max_length)) for rb_name in reverb_buses_cfg
+    }
+
     bus_buffers: dict[str, np.ndarray] = {}
     for t in active:
         name = t["name"]
@@ -733,6 +763,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         if bus not in bus_buffers:
             bus_buffers[bus] = np.zeros((2, max_length))
         bus_buffers[bus] += stereo
+
+        # Track-level sends to shared reverb buses (post-fader, post-pan).
+        for send in t.get("reverb_sends", []):
+            rb_name = send.get("bus")
+            if rb_name not in reverb_send_buffers:
+                print(f"    WARNING: reverb_send target '{rb_name}' not in reverb_buses — skipped")
+                continue
+            level_db = float(send.get("level_db", -6.0))
+            reverb_send_buffers[rb_name] += stereo * (10.0 ** (level_db / 20.0))
 
     print()
 
@@ -813,11 +852,38 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
 
         processed[bus_name] = buf
 
+    # Render each shared reverb bus and collect the wet returns
+    reverb_returns: dict[str, np.ndarray] = {}
+    for rb_name, rb_cfg in reverb_buses_cfg.items():
+        if not _HAS_REVERB:
+            print(f"  WARNING: apply_reverb.py not importable — skipping reverb_bus '{rb_name}'")
+            continue
+        send_buf = reverb_send_buffers[rb_name]
+        if not np.any(send_buf):
+            continue
+        rv_preset = rb_cfg["preset"]
+        rv_wet = float(rb_cfg.get("wet", 1.0))
+        return_db = float(rb_cfg.get("return_volume_db", -6.0))
+        rv_return = _apply_bus_reverb(send_buf, sr, rv_preset, rv_wet)
+        rv_return *= (10.0 ** (return_db / 20.0))
+        # Optional return pan
+        return_pan = float(rb_cfg.get("return_pan", 0.0))
+        if return_pan != 0.0:
+            rv_return = _pan(rv_return, return_pan)
+        reverb_returns[rb_name] = rv_return
+        peak_rv = 20.0 * np.log10(np.max(np.abs(rv_return)) + 1e-12)
+        print(f"  Reverb bus '{rb_name}': preset='{rv_preset}' return_db={return_db:+.1f} "
+              f"(return peak {peak_rv:.1f} dBFS)")
+
     # Sum top-level buses (parent_bus: null) into master
     master = np.zeros((2, max_length))
     for bus_name, cfg in buses_cfg.items():
         if not cfg.get("parent_bus") and bus_name in processed:
             master += processed[bus_name]
+
+    # Sum shared reverb returns into master
+    for rb_name, rv_ret in reverb_returns.items():
+        master += rv_ret
 
     peak_pre = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
     print(f"\n  Master pre-processing: {peak_pre:.1f} dBFS")

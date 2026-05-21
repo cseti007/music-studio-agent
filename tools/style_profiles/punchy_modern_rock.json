@@ -13,23 +13,46 @@
   },
   "lra": {
     "target_lu": 5.0,
-    "range_lu": [3.0, 8.0]
+    "range_lu": [
+      3.0,
+      8.0
+    ]
   },
   "crest_factor": {
     "target_db": 12.0,
-    "range_db": [10.0, 14.0]
+    "range_db": [
+      10.0,
+      14.0
+    ]
   },
   "default_bus_volume_db": {
-    "drums":   0.0,
-    "bass":    0.0,
-    "guitar": -3.0
+    "drums": 0.0,
+    "bass": 0.0,
+    "guitar": -3.0,
+    "vocal_lead": 2.5,
+    "vocal_bg": -2.0
   },
   "tonal_balance_dbfs": {
-    "sub_60hz":       {"target": -27.5, "tolerance": 3.0},
-    "low_60_250hz":   {"target": -18.5, "tolerance": 2.5},
-    "mid_250_2khz":   {"target": -25.0, "tolerance": 2.5},
-    "high_2_8khz":    {"target": -27.0, "tolerance": 2.5},
-    "air_8khz_plus":  {"target": -36.0, "tolerance": 3.5}
+    "sub_60hz": {
+      "target": -27.5,
+      "tolerance": 3.0
+    },
+    "low_60_250hz": {
+      "target": -18.5,
+      "tolerance": 2.5
+    },
+    "mid_250_2khz": {
+      "target": -25.0,
+      "tolerance": 2.5
+    },
+    "high_2_8khz": {
+      "target": -27.0,
+      "tolerance": 2.5
+    },
+    "air_8khz_plus": {
+      "target": -36.0,
+      "tolerance": 3.5
+    }
   },
   "master_chain_template": {
     "note": "Paste this `master` block into mix_config.json for the v11-style punchy master chain. Bus saturation drive on drums = 0.4 (slightly heavier than the default 0.3).",
@@ -37,12 +60,39 @@
       "lufs_target": -14.0,
       "true_peak_dbfs": -1.0,
       "eq": [
-        {"type": "highpass", "hz": 30},
-        {"type": "peak", "hz": 350, "q": 1.4, "db": -2.0},
-        {"type": "peak", "hz": 80, "q": 1.0, "db": 1.5},
-        {"type": "peak", "hz": 3000, "q": 1.2, "db": 1.5},
-        {"type": "peak", "hz": 5000, "q": 1.2, "db": -1.5},
-        {"type": "highshelf", "hz": 12000, "db": 1.0}
+        {
+          "type": "highpass",
+          "hz": 30
+        },
+        {
+          "type": "peak",
+          "hz": 350,
+          "q": 1.4,
+          "db": -2.0
+        },
+        {
+          "type": "peak",
+          "hz": 80,
+          "q": 1.0,
+          "db": 1.5
+        },
+        {
+          "type": "peak",
+          "hz": 3000,
+          "q": 1.2,
+          "db": 1.5
+        },
+        {
+          "type": "peak",
+          "hz": 5000,
+          "q": 1.2,
+          "db": -1.5
+        },
+        {
+          "type": "highshelf",
+          "hz": 12000,
+          "db": 1.0
+        }
       ],
       "comp": {
         "threshold_db": -8.0,

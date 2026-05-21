@@ -1,0 +1,8 @@
+{
+  "name": "eq_vocal_lead_rock_boost",
+  "description": "Vocal lead rock — additive EQ (post-comp). Presence boost @ 3 kHz for projection, air shelf @ 12 kHz for sparkle.",
+  "filters": [
+    {"type": "peak", "hz": 3000, "q": 1.2, "db": 2.0},
+    {"type": "highshelf", "hz": 12000, "db": 1.5}
+  ]
+}

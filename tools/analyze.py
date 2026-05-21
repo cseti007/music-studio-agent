@@ -672,6 +672,107 @@ def _estimated_key(signal: np.ndarray, sr: int) -> dict:
     }
 
 
+def _vocal_metrics(signal: np.ndarray, sr: int) -> dict:
+    """Vocal-specific metrics: sibilance, plosive, pitch stats, vibrato, breath.
+
+    None of these are vocal-only — they're meaningful for any monophonic
+    tonal source — but they're primarily useful for deciding vocal-chain
+    parameters (de-esser threshold, pitch-correct strength, etc.).
+    """
+    out: dict = {
+        "sibilance": {},
+        "plosive": {},
+        "pitch": {},
+        "vibrato": {},
+        "breath": {},
+    }
+
+    # Sibilance: 5-8 kHz band peak + per-second event density
+    sib_low, sib_high = 5500.0, min(8500.0, sr / 2 - 1)
+    if sib_high > sib_low:
+        sib_sos = butter(4, [sib_low, sib_high], btype="band", fs=sr, output="sos")
+        sib_band = sosfilt(sib_sos, signal)
+        sib_peak = float(np.max(np.abs(sib_band)))
+        out["sibilance"]["peak_db"] = round(20.0 * np.log10(max(sib_peak, 1e-10)), 1)
+        # event density: count peaks > -25 dBFS per second
+        threshold_lin = 10 ** (-25 / 20)
+        win = max(1, int(0.005 * sr))  # 5 ms window
+        env = np.sqrt(np.convolve(sib_band ** 2, np.ones(win) / win, mode="same"))
+        crossings = np.diff((env > threshold_lin).astype(int))
+        n_events = int(np.sum(crossings > 0))
+        duration = len(signal) / sr
+        out["sibilance"]["density_per_sec"] = round(n_events / max(duration, 0.01), 2)
+
+    # Plosives: sub-100 Hz transient bursts (lopassed signal + envelope onsets)
+    plo_sos = butter(4, 100.0, btype="low", fs=sr, output="sos")
+    plo_band = sosfilt(plo_sos, signal)
+    plo_env = np.abs(plo_band)
+    plo_threshold = float(np.max(plo_env)) * 0.7  # 70% of peak — only real bursts
+    if plo_threshold > 1e-6:
+        crossings = np.diff((plo_env > plo_threshold).astype(int))
+        out["plosive"]["events_count"] = int(np.sum(crossings > 0))
+        out["plosive"]["peak_db"] = round(20.0 * np.log10(max(float(np.max(plo_env)), 1e-10)), 1)
+    else:
+        out["plosive"]["events_count"] = 0
+        out["plosive"]["peak_db"] = None
+
+    # Pitch tracking — librosa.pyin (probabilistic YIN)
+    duration_sec = len(signal) / sr
+    if duration_sec >= 2.0:
+        try:
+            f0, voiced_flag, _ = librosa.pyin(
+                signal.astype(np.float32), fmin=80, fmax=600, sr=sr,
+            )
+            voiced_f0 = f0[~np.isnan(f0)]
+            if len(voiced_f0) > 0:
+                out["pitch"]["mean_hz"] = round(float(np.mean(voiced_f0)), 1)
+                out["pitch"]["median_hz"] = round(float(np.median(voiced_f0)), 1)
+                # Intonation stability: std of cents-deviation from nearest semitone
+                cents = 1200 * np.log2(voiced_f0 / 440.0)
+                nearest_semi = np.round(cents / 100) * 100
+                cents_dev = cents - nearest_semi
+                out["pitch"]["cents_std"] = round(float(np.std(cents_dev)), 1)
+                # Voiced fraction
+                out["pitch"]["voiced_ratio"] = round(float(len(voiced_f0)) / len(f0), 2)
+            else:
+                out["pitch"]["mean_hz"] = None
+        except Exception:
+            out["pitch"]["mean_hz"] = None
+
+    # Vibrato: 4-7 Hz periodic modulation in the pitch curve
+    if out["pitch"].get("mean_hz") and len(voiced_f0) > sr // 4:
+        try:
+            voiced_f0_norm = voiced_f0 - np.mean(voiced_f0)
+            # frame rate of pyin is approx sr / hop_length (default hop = 512)
+            frame_rate = sr / 512.0
+            n_pad = 1024
+            spec = np.abs(np.fft.rfft(voiced_f0_norm, n=n_pad))
+            freqs = np.fft.rfftfreq(n_pad, d=1.0 / frame_rate)
+            # Look in 4-7 Hz band
+            mask = (freqs >= 4.0) & (freqs <= 7.0)
+            if np.any(mask):
+                peak_idx = np.argmax(spec[mask])
+                vibrato_rate = float(freqs[mask][peak_idx])
+                out["vibrato"]["rate_hz"] = round(vibrato_rate, 2)
+                # Extent: peak amplitude of the vibrato in cents
+                out["vibrato"]["extent_cents"] = round(float(spec[mask][peak_idx]) * 100 / n_pad, 1)
+        except Exception:
+            pass
+
+    # Breath / silence ratio (frames below -45 dBFS)
+    frame_n = max(1, int(0.05 * sr))  # 50 ms frames
+    n_frames = len(signal) // frame_n
+    silent = 0
+    for i in range(n_frames):
+        chunk = signal[i * frame_n:(i + 1) * frame_n]
+        rms = np.sqrt(np.mean(chunk ** 2) + 1e-12)
+        if 20 * np.log10(max(rms, 1e-10)) < -45:
+            silent += 1
+    out["breath"]["silence_ratio"] = round(silent / max(n_frames, 1), 2)
+
+    return out
+
+
 def _stats_summary_text(stats: dict) -> str:
     lines = ["", "STATS SUMMARY", "-" * 54]
     loud = stats.get("loudness", {})
@@ -755,7 +856,7 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
 
     print(f"Analyzing: {file_path.name}  ({duration:.1f}s, {channels}ch, {sr}Hz)", flush=True)
 
-    print("  [1/8] Loudness metrics (LUFS, LRA, crest factor)...", flush=True)
+    print("  [1/9] Loudness metrics (LUFS, LRA, crest factor)...", flush=True)
     meter = pyln.Meter(sr)
     lufs_input = data if channels > 1 else mono
     try:
@@ -787,16 +888,16 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
         for name, (lo, hi) in freq_bands.items()
     }
 
-    print("  [2/8] Spectral analysis (mel spectrogram)...", flush=True)
+    print("  [2/9] Spectral analysis (mel spectrogram)...", flush=True)
     text_spec = _text_spectrogram(mono, sr)
 
-    print("  [3/8] Frequency response (1/3-octave Welch PSD)...", flush=True)
+    print("  [3/9] Frequency response (1/3-octave Welch PSD)...", flush=True)
     freq_response = _frequency_response(mono, sr)
 
-    print("  [4/8] Hum detection...", flush=True)
+    print("  [4/9] Hum detection...", flush=True)
     hum = _detect_hum(mono, sr)
 
-    print("  [5/8] Onset detection + transient profile...", flush=True)
+    print("  [5/9] Onset detection + transient profile...", flush=True)
     # Compute onset_env once and share it across transient_density + spectral_flux
     onset_env_shared = librosa.onset.onset_strength(y=mono.astype(np.float32), sr=sr)
     transient_density = _transient_density(mono, sr, onset_env=onset_env_shared)
@@ -804,17 +905,20 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
     transient_prof = _transient_profile(mono, sr)
     onsets = _onsets_sec(mono, sr)
 
-    print("  [6/8] Pumping / over-compression detection...", flush=True)
+    print("  [6/9] Pumping / over-compression detection...", flush=True)
     pumping = _detect_pumping(mono, sr)
 
-    print("  [7/8] Tempo + key estimation...", flush=True)
+    print("  [7/9] Tempo + key estimation...", flush=True)
     tempo_bpm = _tempo_bpm(mono, sr)
     estimated_key = _estimated_key(mono, sr)
 
-    print("  [8/8] Envelopes (RMS dB, LUFS short-term, spectral flux)...", flush=True)
+    print("  [8/9] Envelopes (RMS dB, LUFS short-term, spectral flux)...", flush=True)
     rms_env = _rms_envelope_db_per_sec(mono, sr)
     lufs_st = _lufs_short_term(lufs_input, sr)
     spec_flux = _spectral_flux_per_sec(mono, sr, onset_env=onset_env_shared)
+
+    print("  [9/9] Vocal metrics (sibilance, plosive, pitch, vibrato, breath)...", flush=True)
+    vocal = _vocal_metrics(mono, sr)
 
     stats = {
         "file": str(file_path),
@@ -846,6 +950,7 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
             "lufs_short_term": lufs_st,
             "spectral_flux_per_second": spec_flux,
         },
+        "vocal": vocal,
         "recommended_gain_db": recommended_gain,
     }
 

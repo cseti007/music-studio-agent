@@ -1,0 +1,8 @@
+{
+  "name": "eq_vocal_lead_ballad_cut",
+  "description": "Vocal lead ballad — subtractive EQ (pre-comp). Gentle HP @ 80 Hz preserves chest tone, light mud cut @ 200 Hz.",
+  "filters": [
+    {"type": "highpass", "hz": 80, "order": 2},
+    {"type": "peak", "hz": 200, "q": 1.0, "db": -1.0}
+  ]
+}

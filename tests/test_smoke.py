@@ -665,6 +665,117 @@ class TestRenderMixBusEQ:
         assert ratio_db < -4, f"4-6 kHz attenuation only {ratio_db:.1f} dB, expected < -4 dB"
 
 
+class TestVocalToolkit:
+    """Vocal pipeline: deesser sibilance attenuation + bus detection +
+    pitch-correct scale-quantisation helpers."""
+
+    def test_vocal_bus_detection(self):
+        """_detect_bus routes LEAD VOX, BG VOX, etc. to vocal_lead / vocal_bg."""
+        from render_mix import _detect_bus
+
+        assert _detect_bus("LEAD VOX") == "vocal_lead"
+        assert _detect_bus("LEAD VOCAL") == "vocal_lead"
+        assert _detect_bus("VOX") == "vocal_lead"
+        assert _detect_bus("BG VOX L") == "vocal_bg"
+        assert _detect_bus("BACKING VOCAL") == "vocal_bg"
+        assert _detect_bus("HARMONY HIGH") == "vocal_bg"
+        # Non-vocal stays put
+        assert _detect_bus("KICK IN.05") == "drums"
+        assert _detect_bus("BASS DI CLEAN") == "bass"
+
+    def test_deesser_attenuates_sibilance_band(self, tmp_path):
+        """Apply de-esser to a synthetic 7 kHz tone — output should be
+        attenuated in that band by at least 4 dB at default settings."""
+        import soundfile as sf
+        from apply_deesser import apply_deesser
+
+        sr = 48000
+        t = np.arange(2 * sr) / sr
+        # Loud 7 kHz tone — should trigger the de-esser hard
+        signal = 0.5 * np.sin(2 * np.pi * 7000 * t)
+        signal_stereo = np.stack([signal, signal], axis=1)
+
+        in_path = tmp_path / "sibilant.wav"
+        sf.write(str(in_path), signal_stereo, sr, subtype="PCM_24")
+
+        report = apply_deesser(
+            in_path, tmp_path,
+            threshold_db=-22.0, ratio=4.0,
+            attack_ms=1.0, release_ms=60.0,
+            detect_low_hz=5500.0, detect_high_hz=8500.0,
+            preset_name="test",
+        )
+
+        assert not report.get("skipped", False), "should not skip a 7 kHz -6 dBFS tone"
+        # Mean gain reduction should be at least -3 dB on a constant tone
+        assert report["mean_gain_reduction_db"] < -3.0, (
+            f"mean GR only {report['mean_gain_reduction_db']} dB, expected < -3"
+        )
+
+    def test_deesser_skips_clean_signal(self, tmp_path):
+        """A signal with no sibilance content should trigger the relevance
+        check and skip."""
+        import soundfile as sf
+        from apply_deesser import apply_deesser
+
+        sr = 48000
+        # Pure 200 Hz tone — nothing in the 5-8 kHz band
+        t = np.arange(2 * sr) / sr
+        signal = 0.5 * np.sin(2 * np.pi * 200 * t)
+        signal_stereo = np.stack([signal, signal], axis=1)
+
+        in_path = tmp_path / "clean.wav"
+        sf.write(str(in_path), signal_stereo, sr, subtype="PCM_24")
+
+        report = apply_deesser(
+            in_path, tmp_path,
+            threshold_db=-22.0, ratio=4.0,
+            attack_ms=1.0, release_ms=60.0,
+            detect_low_hz=5500.0, detect_high_hz=8500.0,
+            preset_name="test", force=False,
+        )
+
+        assert report["skipped"] is True
+        assert report["relevance_check"]["recommend_skip"] is True
+
+    def test_pitch_correct_scale_quantise(self):
+        """_quantise_to_scale snaps detected pitches to the A-minor scale grid."""
+        from apply_pitch_correct import _quantise_to_scale, _build_scale
+
+        a_minor = _build_scale("A", "minor")  # A=9, B=11, C=0, D=2, E=4, F=5, G=7
+        # Three test pitches: A4 (440 Hz, in-scale), C#5 (~554 Hz, NOT in scale),
+        # E5 (~659 Hz, in-scale)
+        import numpy as np
+        f0_in = np.array([440.0, 554.0, 659.0])
+
+        f0_out = _quantise_to_scale(f0_in, a_minor)
+        # A4 should be unchanged (already in scale)
+        assert abs(f0_out[0] - 440.0) < 0.5
+        # C#5 should snap to nearest scale note (either C5 = 523 or D5 = 587)
+        assert abs(f0_out[1] - 523.25) < 1 or abs(f0_out[1] - 587.33) < 1
+        # E5 should be unchanged
+        assert abs(f0_out[2] - 659.26) < 0.5
+
+    def test_pitch_correct_strength_blend(self):
+        """_blend_pitch with strength=0 passes through original, strength=1
+        gives fully quantised."""
+        from apply_pitch_correct import _blend_pitch
+        import numpy as np
+
+        orig = np.array([440.0, 554.0, 659.0])
+        quant = np.array([440.0, 523.25, 659.26])
+
+        no_correction = _blend_pitch(orig, quant, 0.0)
+        assert np.allclose(no_correction, orig)
+
+        full_correction = _blend_pitch(orig, quant, 1.0)
+        assert np.allclose(full_correction, quant)
+
+        midway = _blend_pitch(orig, quant, 0.5)
+        expected = (orig + quant) / 2
+        assert np.allclose(midway, expected)
+
+
 class TestChainRecall:
     """build_chain → mix_chain.json → replay_chain --dry-run round-trip.
 

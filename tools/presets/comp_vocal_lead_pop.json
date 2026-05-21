@@ -1,0 +1,12 @@
+{
+  "name": "comp_vocal_lead_pop",
+  "description": "Vocal lead pop — heavier 6:1 ratio for the consistent forward presence modern pop demands",
+  "notes": "Faster 3 ms attack, tighter 80 ms release — modern pop vocals sit MUCH more compressed than rock. Use a second serial comp (4:1 with -8 dB threshold, 10/200 ms ballistics) if even heavier leveling is needed. De-esser always after.",
+  "settings": {
+    "threshold_db": -16,
+    "ratio": 6,
+    "attack_ms": 3,
+    "release_ms": 80,
+    "makeup_db": 6
+  }
+}

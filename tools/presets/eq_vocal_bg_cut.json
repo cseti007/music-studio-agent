@@ -1,0 +1,9 @@
+{
+  "name": "eq_vocal_bg_cut",
+  "description": "Backing vocal — subtractive EQ (pre-comp). Aggressive HP @ 150 Hz to keep low-end clear for lead, heavier mud cut @ 400 Hz, low-pass @ 12 kHz to keep BG out of the lead's air space.",
+  "filters": [
+    {"type": "highpass", "hz": 150, "order": 2},
+    {"type": "peak", "hz": 400, "q": 1.2, "db": -3.0},
+    {"type": "lowpass", "hz": 12000, "order": 2}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "comp_vocal_lead_rock",
+  "description": "Vocal lead rock — 4:1 leveling for consistent presence without crushing dynamic phrasing",
+  "notes": "5 ms attack catches transients but lets initial breath through. 100 ms release follows the natural phrasing. +6 dB makeup compensates the typical -8 dB average reduction. Always followed by a de-esser (the comp amplifies sibilance peaks).",
+  "settings": {
+    "threshold_db": -18,
+    "ratio": 4,
+    "attack_ms": 5,
+    "release_ms": 100,
+    "makeup_db": 6
+  }
+}
