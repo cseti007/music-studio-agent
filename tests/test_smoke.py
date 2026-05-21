@@ -874,3 +874,159 @@ class TestChainRecall:
             assert argv[1].endswith(".py")
             # Critical: every step's argv must include --output-dir
             assert "--output-dir" in argv, f"{step['step']}: argv missing --output-dir"
+
+
+# ---------------------------------------------------------------------------
+# Headroom / peak verdict — DAW-style channel meter warnings
+# ---------------------------------------------------------------------------
+class TestPeakVerdict:
+    """Both render_mix and analyze.py classify peak headroom into
+    [OK] / [WARN] / [CLIP] using the same -6 / -1 dBFS thresholds.
+    The two implementations must agree on identical inputs.
+    """
+
+    def test_render_mix_peak_verdict_thresholds(self):
+        from render_mix import _peak_verdict
+
+        # Well below ceiling — OK
+        assert _peak_verdict(-12.0) == "[OK]"
+        assert _peak_verdict(-6.01) == "[OK]"
+        # In warning band
+        assert _peak_verdict(-6.0) == "[WARN]"
+        assert _peak_verdict(-3.0) == "[WARN]"
+        assert _peak_verdict(-1.01) == "[WARN]"
+        # At / above clip threshold
+        assert _peak_verdict(-1.0) == "[CLIP]"
+        assert _peak_verdict(0.0) == "[CLIP]"
+
+    def test_render_mix_peak_verdict_uses_worst_of_sample_and_true(self):
+        from render_mix import _peak_verdict
+
+        # Sample peak OK but true peak in warning band -> WARN
+        assert _peak_verdict(-12.0, -3.0) == "[WARN]"
+        # Sample peak in warning band but true peak at clip -> CLIP
+        assert _peak_verdict(-3.0, -0.5) == "[CLIP]"
+        # Both fine
+        assert _peak_verdict(-9.0, -8.0) == "[OK]"
+
+    def test_analyze_headroom_verdict_matches_render_mix(self):
+        from analyze import _headroom_verdict as analyze_verdict
+        from render_mix import _peak_verdict as render_verdict
+
+        for sample, tp in [(-12, -10), (-6, -5), (-3, -2.5),
+                           (-1, -0.5), (-0.5, 0.0), (-20, -3)]:
+            assert analyze_verdict(sample, tp) == render_verdict(sample, tp), (
+                f"mismatch at sample={sample}, tp={tp}")
+
+
+# ---------------------------------------------------------------------------
+# Render-mix bus_peaks / master_peaks structure
+# ---------------------------------------------------------------------------
+class TestBusMasterPeaks:
+    """Verify the render report carries the new peak-monitoring fields."""
+
+    def test_render_emits_bus_and_master_peaks(self, tmp_path):
+        import json
+        import numpy as np
+        import soundfile as sf
+        from render_mix import render_mix
+
+        # Build a tiny session: one drum track, one bass track, one vocal.
+        # Each is a 2-sec stereo signal at distinct levels so the peaks
+        # are distinguishable across buses.
+        sr = 48000
+        dur = 2.0
+        t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+
+        tracks_dir = tmp_path / "tracks"
+        tracks_dir.mkdir()
+
+        # Drum: loud transient train (peak around -3 dBFS — WARN territory)
+        kick = np.zeros_like(t)
+        for i in range(8):
+            idx = int(i * sr * 0.25)
+            kick[idx:idx + 100] = 0.7 * np.hanning(100)
+        drum_path = tracks_dir / "KICK.wav"
+        sf.write(str(drum_path), np.stack([kick, kick], axis=1), sr, subtype="PCM_24")
+
+        # Bass: low sine, peak around -12 dBFS (OK)
+        bass = 0.25 * np.sin(2 * np.pi * 80 * t)
+        bass_path = tracks_dir / "BASS DI.wav"
+        sf.write(str(bass_path), np.stack([bass, bass], axis=1), sr, subtype="PCM_24")
+
+        # Vocal: mid sine, peak around -6 dBFS (right on edge)
+        vocal = 0.5 * np.sin(2 * np.pi * 440 * t)
+        vocal_path = tracks_dir / "LEAD VOX.wav"
+        sf.write(str(vocal_path), np.stack([vocal, vocal], axis=1), sr, subtype="PCM_24")
+
+        config = {
+            "session_dir": str(tmp_path),
+            "output_dir": str(tmp_path),
+            "sample_rate": sr,
+            "tracks": [
+                {"name": "KICK",     "file": str(drum_path),  "bus": "drums", "active": True, "volume_db": 0.0},
+                {"name": "BASS DI",  "file": str(bass_path),  "bus": "bass",  "active": True, "volume_db": 0.0},
+                {"name": "LEAD VOX", "file": str(vocal_path), "bus": "vocal_lead", "active": True, "volume_db": 0.0},
+            ],
+            "buses": {
+                "drums":      {"volume_db": 0.0, "comp_preset": None, "parent_bus": None},
+                "bass":       {"volume_db": 0.0, "comp_preset": None, "parent_bus": None},
+                "vocal_lead": {"volume_db": 0.0, "comp_preset": None, "parent_bus": "vocal"},
+                "vocal":      {"volume_db": 0.0, "comp_preset": None, "parent_bus": None},
+            },
+            "master": {"lufs_target": -18.0, "true_peak_dbfs": -1.0},
+        }
+
+        config_path = tmp_path / "mix_config.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+
+        out_wav = tmp_path / "mix.wav"
+        render_mix(config_path, output_wav=out_wav, render_stems=False)
+        report = json.loads(out_wav.with_name("mix_report.json").read_text())
+
+        # bus_peaks contains an entry per active bus with stage fields + verdict
+        assert "bus_peaks" in report
+        assert "drums" in report["bus_peaks"]
+        assert "bass" in report["bus_peaks"]
+        for bn in ("drums", "bass"):
+            bp = report["bus_peaks"][bn]
+            assert "sum_in" in bp
+            assert "final" in bp
+            assert "true_peak_final" in bp
+            assert bp["verdict"] in ("[OK]", "[WARN]", "[CLIP]")
+
+        # master_peaks present with the expected stage keys + final verdict
+        assert "master_peaks" in report
+        mp = report["master_peaks"]
+        assert "sum_in" in mp
+        assert "after_limiter" in mp
+        assert "final_sample_peak" in mp
+        assert "final_true_peak" in mp
+        assert mp["verdict"] in ("[OK]", "[WARN]", "[CLIP]")
+
+
+# ---------------------------------------------------------------------------
+# analyze.py headroom_verdict field
+# ---------------------------------------------------------------------------
+class TestAnalyzeHeadroom:
+    def test_loudness_block_contains_headroom_verdict(self, tmp_path):
+        import json
+        import numpy as np
+        import soundfile as sf
+        from analyze import analyze
+
+        sr = 48000
+        t = np.linspace(0, 2.0, sr * 2, endpoint=False)
+        # Loud signal — sample peak around -1 dBFS, should land at [CLIP] or [WARN]
+        sig = 0.85 * np.sin(2 * np.pi * 440 * t)
+        wav = tmp_path / "loud.wav"
+        sf.write(str(wav), sig, sr, subtype="PCM_24")
+
+        analyze(wav, output_dir=tmp_path / "out")
+        result = json.loads((tmp_path / "out" / "analysis.json").read_text())
+        assert "headroom_verdict" in result["loudness"]
+        assert result["loudness"]["headroom_verdict"] in ("[CLIP]", "[WARN]")
+
+        # Spectrogram text contains a Headroom line
+        spec_txt = (tmp_path / "out" / "spectrogram.txt").read_text()
+        assert "Headroom:" in spec_txt

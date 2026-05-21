@@ -48,6 +48,21 @@ def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
     return float(20 * np.log10(max(peak, 1e-10)))
 
 
+def _headroom_verdict(sample_peak_db: float, true_peak_db: float) -> str:
+    """DAW-style channel warning level based on worst of sample/true peak.
+
+    [OK]   peak  < -6 dBFS         — comfortable headroom
+    [WARN] -6 ≤ peak < -1 dBFS    — close to ceiling
+    [CLIP] peak ≥ -1 dBFS or TP   — risk of inter-sample clipping
+    """
+    worst = max(sample_peak_db, true_peak_db)
+    if worst >= -1.0:
+        return "[CLIP]"
+    if worst >= -6.0:
+        return "[WARN]"
+    return "[OK]"
+
+
 def _band_filter(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> np.ndarray:
     nyq = sr / 2.0
     high_norm = min(high_hz / nyq, 0.999)
@@ -780,6 +795,11 @@ def _stats_summary_text(stats: dict) -> str:
     lra = loud.get("loudness_range_lu", "n/a")
     crest = loud.get("crest_factor_db", "n/a")
     lines.append(f"  LUFS: {lufs} LUFS  |  LRA: {lra} LU  |  Crest factor: {crest} dB")
+    sample_peak = loud.get("sample_peak_dbfs")
+    true_peak = loud.get("true_peak_dbfs")
+    verdict = loud.get("headroom_verdict")
+    if sample_peak is not None and true_peak is not None and verdict is not None:
+        lines.append(f"  Headroom: {verdict} sample {sample_peak} dBFS / true {true_peak} dBTP  (target < -6 dBFS)")
     td = stats.get("transient_density_per_sec", "n/a")
     sc = stats.get("spectral_centroid_hz", "n/a")
     lines.append(f"  Transient density: {td} /s  |  Spectral centroid: {sc} Hz")
@@ -932,6 +952,7 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
             "sample_peak_dbfs": round(sample_peak, 1),
             "dynamic_range_db": dynamic_range,
             "crest_factor_db": crest_factor,
+            "headroom_verdict": _headroom_verdict(sample_peak, true_peak),
         },
         "frequency_bands": frequency_bands,
         "frequency_bands_crest_db": frequency_bands_crest_db,

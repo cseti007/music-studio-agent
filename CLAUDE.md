@@ -127,7 +127,7 @@ output/
     │   └── stem_guitar.wav
     ├── mixes/
     │   ├── mix.wav                   <- render_mix --render output (LUFS normalized + true peak limited)
-    │   ├── mix_report.json           <- render stats: LUFS, true_peak_dbtp, sample_peak_dbfs, clipper/ms/parallel-sat status, ISP correction
+    │   ├── mix_report.json           <- render stats: LUFS, true_peak_dbtp, sample_peak_dbfs, clipper/ms/parallel-sat status, ISP correction, **bus_peaks**, **master_peaks**, **phase_warnings**
     │   └── stages/                   <- render_mix --stage renders for A/B comparison
     │       ├── mix_stage_raw.wav     <- stems unprocessed, bus+master chain applied
     │       ├── mix_stage_eq.wav
@@ -216,6 +216,67 @@ Bus processing order: volume → pan → **eq (per-bus, zero-phase)** → comp_p
 Vocal chain order (per-stem, 2026 best practice): subtractive EQ (cuts) → compression → **de-esser (after comp on purpose — comp amplifies sibilance)** → additive EQ (boosts) → [pitch correction] → saturation → reverb sends to shared `reverb_buses`
 Master processing order: sum buses → glue comp → clipper (guarded) → M/S (guarded) → EQ → LUFS norm → ISP-aware true-peak limiter
 
+## mix_report.json — what render_mix writes back
+
+Every `render_mix --render` writes `mix_report.json` next to `mix.wav`. The
+fields are the agent's primary feedback on whether the mix is healthy:
+
+```json
+{
+  "integrated_lufs": -14.0,
+  "true_peak_dbtp": -3.44,
+  "sample_peak_dbfs": -3.68,
+  "bus_peaks": {
+    "drums": {
+      "sum_in": 4.5,           // peak after summing all drum tracks into the bus
+      "after_vol_pan": -3.5,   // after bus volume_db + pan
+      "after_eq": null,        // null = stage skipped (no per-bus EQ on this bus)
+      "after_comp": -3.5,      // after comp_preset
+      "after_sat": null,
+      "after_parallel_sat": null,
+      "after_reverb": null,
+      "final": -3.5,           // bus output sample peak
+      "true_peak_final": -3.5, // 4x-oversampled true peak on bus output
+      "verdict": "[WARN]"      // worst of sample+TP against -6/-1 dBFS thresholds
+    }
+  },
+  "master_peaks": {
+    "sum_in": 0.5,              // master sum of all top-level buses (pre-process)
+    "after_comp": -0.1, "after_clipper": null, "after_ms": null,
+    "after_eq": 0.1, "after_lufs_norm": 2.5, "after_limiter": -3.5,
+    "final_sample_peak": -3.5, "final_true_peak": -3.4,
+    "verdict": "[WARN]"
+  },
+  "phase_warnings": [
+    {
+      "bus": "bass",
+      "track_a": "BASS DI CLEAN",
+      "track_b": "BASS DI PEDAL",
+      "correlation": -0.72,    // negative = anti-correlated (cancellation / polarity)
+      "overlap_sec": 312,      // seconds both tracks are simultaneously active
+      "kind": "anti-correlated (cancellation / polarity)"
+    }
+  ]
+}
+```
+
+Verdict thresholds (DAW-style, applied identically by `_peak_verdict`
+in `render_mix.py` and `_headroom_verdict` in `analyze.py`):
+
+- `[OK]` — peak < -6 dBFS AND true peak < -6 dBTP
+- `[WARN]` — -6 ≤ peak < -1 dBFS OR -6 ≤ true peak < -1 dBTP
+- `[CLIP]` — peak ≥ -1 dBFS OR true peak ≥ -1 dBTP
+
+`phase_warnings` fires for any pair of active tracks on the same bus with
+`|corr| ≥ 0.4` over their mutual activity window. Most warnings are
+expected multi-mic patterns (overhead L/R, kick-in + kick-sub, guitar
+amp + cab on the same DI). The interesting case is two tracks of the
+same instrument signal split between paths (e.g. DI clean + pedal chain
+DI of a bass) — `audit_session.py` cannot see those because the source
+files differ. Run `align_phase.py target --reference clean.wav` to
+time-align (and auto-flip polarity if needed), then update the track's
+`file` to the new `assembled_*_aligned.wav` and re-render.
+
 ## Workflow
 
 The full pipeline is two phases — MIX, then MASTER. Each phase ends with a
@@ -302,6 +363,7 @@ Read all of these fields from analysis.json and comment on each that is outside 
 | Field | Location in JSON | Normal range (rock mix stem) | Action if outside range |
 |---|---|---|---|
 | integrated_lufs | loudness.integrated_lufs | -22 to -14 LUFS (stem) | Too hot: reduce pre-clip gain. Too quiet: check assembly or delivery stage. |
+| headroom_verdict | loudness.headroom_verdict | `[OK]` (peak < -6 dBFS) | `[WARN]` (-6 to -1 dBFS) is acceptable on processed stems; `[CLIP]` (≥ -1 dBFS or TP ≥ -1 dBTP) means inter-sample peaks will exceed delivery ceiling — lower the per-stem gain or shave with a clipper. |
 | loudness_range_lu | loudness.loudness_range_lu | 5–16 LU (stem), 3–12 LU (mix) | < 3 LU: over-compressed; > 20 LU: may need compression before mix |
 | crest_factor_db | loudness.crest_factor_db | 10–18 dB (healthy) | < 8 dB: brick-walled. > 20 dB: very dynamic — may need compression |
 | stereo.balance_db | stereo.balance_db | ±1.5 dB | > ±3 dB: strong imbalance — check panning or channel assignment |
@@ -391,6 +453,7 @@ anything else; "optional" means run it if there's a specific question to answer.
 | After `render_mix --render --stems`, want objective per-bus loudness data (e.g. "is the bass actually too loud relative to drums?") | Optional | `bus_balance.py <mix_config.json>` | Effective LUFS contribution per bus (volume_db applied + parent-chain summed). Top-level buses (`[T]`) are the ones summed into master; sub-buses shown for reference. Use to settle perception arguments with measurement. |
 | Source stem has uneven per-note dynamics (slap/finger bass take with wildly varying note levels — per-clip gain can't help because each clip has many notes) | Optional | `level_notes.py <input.wav> --output <out.wav> --end SEC [--start SEC]` | Detects onsets, lifts only the quiet notes via a short ~95 ms boost envelope (no overlap between notes, no reduction of loud notes). Safety-scaled to the modified segment only. Run on the assembled stem before EQ/comp. |
 | Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
+| `render_mix --render` finished — `mix_report.json` carries `bus_peaks` / `master_peaks` / `phase_warnings` | **Required** (zero extra cost — already in the report) | Read `mix_report.json` and surface any non-`[OK]` verdict | (a) Per-bus chain stages flagged `[WARN]` ≥ -6 dBFS or `[CLIP]` ≥ -1 dBFS — usually means bus volume_db is too high or per-stem files are hot. Lower the offender and re-render. (b) `master_peaks.verdict` = `[CLIP]` — limiter is doing too much work, dynamics collapse. Same fix: lower contributing buses. (c) `phase_warnings` non-empty — pairs of tracks on the same bus with `\|corr\| ≥ 0.4`. Two flavours: **expected** (overhead L/R stereo pair, kick-in + kick-sub on the same drum, guitar amp + cab on the same DI) — leave alone; **anomaly** (DI clean + pedal-output of the same instrument, polarity-flipped duplicate not caught by `audit_session.py` because the source files differ) — use `align_phase.py` to time-align and let it auto-detect polarity flip, then point the track at `assembled_*_aligned.wav`. |
 
 **Operational rules that follow from the table:**
 

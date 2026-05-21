@@ -579,7 +579,16 @@ def master_health(master_path: Path, output_dir: Path,
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / f"master_health_{format_name or 'generic'}.json"
     txt_path = output_dir / f"master_health_{format_name or 'generic'}.txt"
-    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    # numpy bools / scalars sneak in from the scipy/np-based checks; coerce them
+    def _json_default(o):
+        if isinstance(o, np.bool_):
+            return bool(o)
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+    json_path.write_text(json.dumps(report, indent=2, default=_json_default), encoding="utf-8")
     text = _render_text(report)
     txt_path.write_text(text, encoding="utf-8")
     print()

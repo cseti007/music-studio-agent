@@ -574,6 +574,25 @@ def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
     return 20.0 * np.log10(max(tp, 1e-12))
 
 
+def _peak_db(buf: np.ndarray) -> float:
+    return float(20.0 * np.log10(np.max(np.abs(buf)) + 1e-12))
+
+
+def _peak_verdict(peak_db: float, true_peak_db: float | None = None) -> str:
+    """DAW-style channel warning level based on worst of sample/true peak.
+
+    [OK]   peak  < -6 dBFS         — comfortable headroom
+    [WARN] -6 ≤ peak < -1 dBFS    — close to ceiling
+    [CLIP] peak ≥ -1 dBFS or TP   — risk of inter-sample clipping
+    """
+    worst = peak_db if true_peak_db is None else max(peak_db, true_peak_db)
+    if worst >= -1.0:
+        return "[CLIP]"
+    if worst >= -6.0:
+        return "[WARN]"
+    return "[OK]"
+
+
 def _ms_encode(master: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """L/R stereo → (mid, side). Energy-preserving (no 1/sqrt(2) factor)."""
     mid = (master[0] + master[1]) * 0.5
@@ -745,6 +764,12 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     }
 
     bus_buffers: dict[str, np.ndarray] = {}
+    # Per-bus per-track downsampled mono buffers for phase-correlation checks.
+    # Only buses with >=2 active tracks get pairwise-correlated afterward —
+    # this catches polarity-flipped duplicates and delayed-copy phase issues
+    # that no per-clip / source-hash audit can see (different files, same source).
+    bus_track_mono: dict[str, list[tuple[str, np.ndarray]]] = {}
+    _PHASE_DECIM = 48  # 48 kHz -> 1 kHz; plenty for low-freq correlation
     for t in active:
         name = t["name"]
         bus = t.get("bus", "master")
@@ -764,6 +789,13 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             bus_buffers[bus] = np.zeros((2, max_length))
         bus_buffers[bus] += stereo
 
+        # Capture pre-mix mono (before pan/vol scaling) for phase-correlation
+        # check between tracks on the same bus. Decimated to 1 kHz to keep
+        # memory bounded (41 tracks × 7-min @ 48 kHz = 13.5 GB otherwise).
+        bus_track_mono.setdefault(bus, []).append(
+            (name, stereo.mean(axis=0)[::_PHASE_DECIM].copy())
+        )
+
         # Track-level sends to shared reverb buses (post-fader, post-pan).
         for send in t.get("reverb_sends", []):
             rb_name = send.get("bus")
@@ -775,8 +807,70 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
 
     print()
 
-    # Process buses in topological order (leaves first, parents after)
+    # Per-bus pairwise phase-correlation scan. Flags pairs where two active
+    # tracks on the same bus are correlated (potential phase-coherent +6 dB
+    # doubling) or anti-correlated (polarity-flipped duplicate or comb
+    # filtering from delayed copy). Threshold tuned to surface the obvious
+    # cases without false-positive noise from incidentally-similar mics.
+    PHASE_WARN_THRESHOLD = 0.4   # |corr| > 0.4 flags a warning
+    phase_warnings: list[dict] = []
+    for bus, items in bus_track_mono.items():
+        if len(items) < 2:
+            continue
+        sr_decim = sr // _PHASE_DECIM
+        # Build activity mask (per ~1 s window on the decimated signal)
+        win = sr_decim  # 1 second of decimated samples
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                ai, bi = items[i][1], items[j][1]
+                n = min(len(ai), len(bi))
+                if n < win:
+                    continue
+                # Active overlap = both above -45 dBFS RMS in same window
+                def rms_db(x):
+                    rms = np.sqrt(np.mean(x ** 2) + 1e-12)
+                    return 20.0 * np.log10(max(rms, 1e-10))
+                n_win = n // win
+                mask = np.zeros(n_win, dtype=bool)
+                for w in range(n_win):
+                    chunk_a = ai[w * win:(w + 1) * win]
+                    chunk_b = bi[w * win:(w + 1) * win]
+                    mask[w] = rms_db(chunk_a) > -45 and rms_db(chunk_b) > -45
+                if mask.sum() < 5:  # need >= 5 sec of mutual activity
+                    continue
+                sample_mask = np.zeros(n, dtype=bool)
+                for w in range(n_win):
+                    if mask[w]:
+                        sample_mask[w * win:(w + 1) * win] = True
+                a_olap, b_olap = ai[sample_mask], bi[sample_mask]
+                an = (a_olap - a_olap.mean()) / (a_olap.std() + 1e-12)
+                bn = (b_olap - b_olap.mean()) / (b_olap.std() + 1e-12)
+                corr = float(np.mean(an * bn))
+                if abs(corr) >= PHASE_WARN_THRESHOLD:
+                    kind = "anti-correlated (cancellation / polarity)" if corr < 0 else "correlated (constructive sum / phase-coherent doubling)"
+                    overlap_sec = float(mask.sum())
+                    phase_warnings.append({
+                        "bus": bus,
+                        "track_a": items[i][0],
+                        "track_b": items[j][0],
+                        "correlation": round(corr, 3),
+                        "overlap_sec": overlap_sec,
+                        "kind": kind,
+                    })
+
+    if phase_warnings:
+        print("  [!] Per-bus phase-correlation warnings (|corr| ≥ 0.4):")
+        for w in phase_warnings:
+            print(f"    {w['bus']}: '{w['track_a']}' vs '{w['track_b']}'  "
+                  f"corr={w['correlation']:+.2f}  overlap={w['overlap_sec']:.0f}s  — {w['kind']}")
+        print()
+
+    # Process buses in topological order (leaves first, parents after).
+    # bus_peaks captures the sample peak after each chain stage and the true
+    # peak on the final bus output — the per-channel "meter bridge" for the
+    # mix_report.
     processed: dict[str, np.ndarray] = {}
+    bus_peaks: dict[str, dict] = {}
     for bus_name in _topo_order(buses_cfg):
         cfg = buses_cfg[bus_name]
 
@@ -790,11 +884,19 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         if not np.any(buf):
             continue
 
+        stage_peaks: dict[str, float | None] = {
+            "sum_in": None, "after_vol_pan": None, "after_eq": None,
+            "after_comp": None, "after_sat": None, "after_parallel_sat": None,
+            "after_reverb": None,
+        }
+        stage_peaks["sum_in"] = round(_peak_db(buf), 2)
+
         buf *= 10.0 ** (cfg.get("volume_db", 0.0) / 20.0)
 
         bus_pan = cfg.get("pan", 0.0)
         if bus_pan != 0.0:
             buf = _pan(buf, bus_pan)
+        stage_peaks["after_vol_pan"] = round(_peak_db(buf), 2)
 
         bus_eq = cfg.get("eq")
         if bus_eq:
@@ -804,25 +906,30 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                 + (f" {f.get('db', 0):+.1f}dB" if f.get("db") is not None else "")
                 for f in bus_eq
             )
-            print(f"  Bus '{bus_name}': + EQ ({filter_summary})")
+            peak_eq = _peak_db(buf)
+            stage_peaks["after_eq"] = round(peak_eq, 2)
+            print(f"  Bus '{bus_name}': + EQ ({filter_summary})  -> {peak_eq:.1f} dBFS {_peak_verdict(peak_eq)}")
 
         preset = cfg.get("comp_preset")
         if preset:
-            peak_in = 20.0 * np.log10(np.max(np.abs(buf)) + 1e-12)
+            peak_in = _peak_db(buf)
             print(f"  Bus '{bus_name}': compressing with preset '{preset}' (peak in: {peak_in:.1f} dBFS)...",
                   end=" ", flush=True)
             buf = _apply_comp_preset(buf, preset, sr)
-            peak_out = 20.0 * np.log10(np.max(np.abs(buf)) + 1e-12)
-            print(f"-> {peak_out:.1f} dBFS")
+            peak_out = _peak_db(buf)
+            stage_peaks["after_comp"] = round(peak_out, 2)
+            print(f"-> {peak_out:.1f} dBFS {_peak_verdict(peak_out)}")
         else:
-            peak = 20.0 * np.log10(np.max(np.abs(buf)) + 1e-12)
-            print(f"  Bus '{bus_name}': peak {peak:.1f} dBFS")
+            peak = _peak_db(buf)
+            print(f"  Bus '{bus_name}': peak {peak:.1f} dBFS {_peak_verdict(peak)}")
 
         sat_cfg = cfg.get("saturation")
         if sat_cfg:
             sat_drive = float(sat_cfg.get("drive", 0.3))
             buf = _tape_saturate(buf, sat_drive)
-            print(f"  Bus '{bus_name}': + tape saturation drive={sat_drive}")
+            peak_sat = _peak_db(buf)
+            stage_peaks["after_sat"] = round(peak_sat, 2)
+            print(f"  Bus '{bus_name}': + tape saturation drive={sat_drive}  -> {peak_sat:.1f} dBFS {_peak_verdict(peak_sat)}")
 
         # Parallel saturation: blend a saturated copy back in. Make-it-hit
         # tool — guarded by relevance_check (drum bus only, must have crest).
@@ -836,7 +943,9 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                 drive = float(psat_cfg.get("drive", 0.5))
                 mix = float(psat_cfg.get("mix", 0.2))
                 buf = _parallel_saturate(buf, mode, drive, mix)
-                print(f"  Bus '{bus_name}': + parallel sat ({mode}, drive={drive}, mix={mix})")
+                peak_psat = _peak_db(buf)
+                stage_peaks["after_parallel_sat"] = round(peak_psat, 2)
+                print(f"  Bus '{bus_name}': + parallel sat ({mode}, drive={drive}, mix={mix})  -> {peak_psat:.1f} dBFS {_peak_verdict(peak_psat)}")
 
         reverb_cfg = cfg.get("reverb_send")
         if reverb_cfg:
@@ -847,9 +956,19 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                 rv_wet = float(reverb_cfg.get("wet", 0.15))
                 reverb_return = _apply_bus_reverb(buf, sr, rv_preset, rv_wet)
                 buf = buf + reverb_return
-                peak_rv = 20.0 * np.log10(np.max(np.abs(reverb_return)) + 1e-12)
-                print(f"  Bus '{bus_name}': + reverb send '{rv_preset}' wet={rv_wet} (return peak {peak_rv:.1f} dBFS)")
+                peak_rv = _peak_db(reverb_return)
+                peak_after = _peak_db(buf)
+                stage_peaks["after_reverb"] = round(peak_after, 2)
+                print(f"  Bus '{bus_name}': + reverb send '{rv_preset}' wet={rv_wet} (return peak {peak_rv:.1f} dBFS, bus {peak_after:.1f} dBFS {_peak_verdict(peak_after)})")
 
+        final_peak = _peak_db(buf)
+        final_tp = _measure_true_peak_dbfs(buf)
+        bus_peaks[bus_name] = {
+            **stage_peaks,
+            "final": round(final_peak, 2),
+            "true_peak_final": round(final_tp, 2),
+            "verdict": _peak_verdict(final_peak, final_tp),
+        }
         processed[bus_name] = buf
 
     # Render each shared reverb bus and collect the wet returns
@@ -875,6 +994,20 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         print(f"  Reverb bus '{rb_name}': preset='{rv_preset}' return_db={return_db:+.1f} "
               f"(return peak {peak_rv:.1f} dBFS)")
 
+    # Per-bus peak summary table — DAW-style channel meter snapshot.
+    if bus_peaks:
+        print()
+        print("  Per-bus peak summary (dBFS):")
+        print(f"    {'bus':<14}{'sum':>7}{'vol/pan':>9}{'eq':>7}{'comp':>7}{'sat':>7}{'p-sat':>7}{'reverb':>8}{'final':>8}{'TP':>7}  verdict")
+        for bn, bp in bus_peaks.items():
+            def _fmt(v): return f"{v:>7.1f}" if v is not None else f"{'----':>7}"
+            print(f"    {bn:<14}"
+                  f"{_fmt(bp['sum_in'])}{_fmt(bp['after_vol_pan']).rjust(9)}"
+                  f"{_fmt(bp['after_eq'])}{_fmt(bp['after_comp'])}"
+                  f"{_fmt(bp['after_sat'])}{_fmt(bp['after_parallel_sat'])}"
+                  f"{_fmt(bp['after_reverb']).rjust(8)}"
+                  f"{bp['final']:>8.1f}{bp['true_peak_final']:>7.1f}  {bp['verdict']}")
+
     # Sum top-level buses (parent_bus: null) into master
     master = np.zeros((2, max_length))
     for bus_name, cfg in buses_cfg.items():
@@ -885,8 +1018,16 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     for rb_name, rv_ret in reverb_returns.items():
         master += rv_ret
 
-    peak_pre = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
-    print(f"\n  Master pre-processing: {peak_pre:.1f} dBFS")
+    # master_peaks captures sample peak at each master-chain stage. Final
+    # row also carries true peak — the "master strip" of the meter bridge.
+    master_peaks: dict[str, float | None] = {
+        "sum_in": None, "after_comp": None, "after_clipper": None,
+        "after_ms": None, "after_eq": None, "after_lufs_norm": None,
+        "after_limiter": None,
+    }
+    peak_pre = _peak_db(master)
+    master_peaks["sum_in"] = round(peak_pre, 2)
+    print(f"\n  Master pre-processing: {peak_pre:.1f} dBFS {_peak_verdict(peak_pre)}")
 
     meter = pyln.Meter(sr)
 
@@ -906,11 +1047,12 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         master = comp_board(master.astype(np.float32), sr).astype(np.float64)
 
         lufs_post_comp = meter.integrated_loudness(master.T)
-        peak_post_comp = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+        peak_post_comp = _peak_db(master)
+        master_peaks["after_comp"] = round(peak_post_comp, 2)
         gr_lufs = lufs_post_comp - lufs_pre_comp
         print(f"  Master comp: {master_comp['threshold_db']}dB threshold  {master_comp.get('ratio', 2.0)}:1  "
               f"att={master_comp.get('attack_ms', 10.0)}ms  rel={master_comp.get('release_ms', 300.0)}ms  "
-              f"-> GR {gr_lufs:+.1f} LUFS  peak {peak_post_comp:.1f} dBFS")
+              f"-> GR {gr_lufs:+.1f} LUFS  peak {peak_post_comp:.1f} dBFS {_peak_verdict(peak_post_comp)}")
 
     # Master clipper (optional). Place between glue comp and EQ — clipper
     # shapes peaks musically; the brick-wall limiter at the end only catches
@@ -926,14 +1068,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             mode = str(clipper_cfg.get("mode", "soft")).lower()
             threshold = float(clipper_cfg.get("threshold_db", -1.0))
             knee = float(clipper_cfg.get("knee_db", 1.5))
-            peak_pre = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+            peak_pre = _peak_db(master)
             if mode == "hard":
                 master = _hard_clip(master, threshold)
             else:
                 master = _soft_clip(master, threshold, knee)
-            peak_post = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+            peak_post = _peak_db(master)
+            master_peaks["after_clipper"] = round(peak_post, 2)
             print(f"  Master clipper ({mode}): threshold {threshold:.1f} dBFS  "
-                  f"knee {knee:.1f} dB  -> peak {peak_pre:.1f} → {peak_post:.1f} dBFS")
+                  f"knee {knee:.1f} dB  -> peak {peak_pre:.1f} → {peak_post:.1f} dBFS {_peak_verdict(peak_post)}")
             clipper_report["applied"] = True
 
     # M/S processing (optional). Place AFTER glue comp + clipper, BEFORE
@@ -946,8 +1089,10 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         if ms_report.get("applied"):
             mid_g = ms_cfg.get("mid_gain_db", 0.0)
             side_g = ms_cfg.get("side_gain_db", 0.0)
+            peak_ms = _peak_db(master)
+            master_peaks["after_ms"] = round(peak_ms, 2)
             print(f"  M/S: mid {mid_g:+.1f} dB, side {side_g:+.1f} dB  "
-                  f"(width ratio {ms_report['relevance_check']['ms_width_ratio']:.3f})")
+                  f"(width ratio {ms_report['relevance_check']['ms_width_ratio']:.3f})  -> peak {peak_ms:.1f} dBFS {_peak_verdict(peak_ms)}")
         else:
             issues = ms_report["relevance_check"]["issues"]
             print(f"  M/S: SKIPPED — {'; '.join(issues)}")
@@ -955,15 +1100,16 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # Master bus EQ (optional, zero-phase)
     master_eq = master_cfg.get("eq")
     if master_eq:
-        peak_pre_eq = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+        peak_pre_eq = _peak_db(master)
         master = _apply_master_eq(master, sr, master_eq)
-        peak_post_eq = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+        peak_post_eq = _peak_db(master)
+        master_peaks["after_eq"] = round(peak_post_eq, 2)
         filter_desc = ", ".join(
             f"{f.get('type','?')} {f.get('hz', '')}Hz"
             + (f" {f['db']:+.1f}dB" if "db" in f else "")
             for f in master_eq
         )
-        print(f"  Master EQ: {filter_desc}  -> peak {peak_post_eq:.1f} dBFS")
+        print(f"  Master EQ: {filter_desc}  -> peak {peak_post_eq:.1f} dBFS {_peak_verdict(peak_post_eq)}")
 
     # LUFS normalization
     target_lufs = master_cfg.get("lufs_target", -14.0)
@@ -972,7 +1118,9 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     if np.isfinite(loudness):
         gain_db = target_lufs - loudness
         master *= 10.0 ** (gain_db / 20.0)
-        print(f"  Applied gain: {gain_db:+.1f} dB")
+        peak_post_norm = _peak_db(master)
+        master_peaks["after_lufs_norm"] = round(peak_post_norm, 2)
+        print(f"  Applied gain: {gain_db:+.1f} dB  -> peak {peak_post_norm:.1f} dBFS {_peak_verdict(peak_post_norm)}")
 
     # True peak limiting: pedalboard.Limiter handles sample peak; we then
     # measure ISP at 4x oversampling and scale down if the codec-relevant
@@ -981,12 +1129,13 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
     master = board(master.astype(np.float32), sr).astype(np.float64)
 
-    sample_peak_after = 20.0 * np.log10(np.max(np.abs(master)) + 1e-12)
+    sample_peak_after = _peak_db(master)
     tp_measured = _measure_true_peak_dbfs(master)
     if tp_measured > tp_limit:
         isp_scale_db = tp_limit - tp_measured
         master *= 10.0 ** (isp_scale_db / 20.0)
         tp_final = tp_limit
+        sample_peak_after = _peak_db(master)
         print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
               f"true {tp_measured:.2f} dBTP -> {tp_final:.2f} dBTP "
               f"(ISP correction {isp_scale_db:+.2f} dB)")
@@ -994,6 +1143,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         tp_final = tp_measured
         print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
               f"true {tp_final:.2f} dBTP")
+    master_peaks["after_limiter"] = round(sample_peak_after, 2)
     peak_final = tp_final
 
     # Post-limiter LUFS correction. pedalboard.Limiter applies automatic
@@ -1013,7 +1163,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                   f"(target {target_lufs}, headroom {headroom_db:+.2f} dB)")
             loudness_post = meter.integrated_loudness(master.T)
             peak_final = _measure_true_peak_dbfs(master)
+            sample_peak_after = _peak_db(master)
+            master_peaks["after_limiter"] = round(sample_peak_after, 2)
     loudness = loudness_post
+
+    # Final master verdict uses true peak (codec-relevant) + sample peak.
+    master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
+    master_peaks["final_true_peak"] = round(peak_final, 2)
+    master_peaks["verdict"] = _peak_verdict(sample_peak_after, peak_final)
+    print(f"  Master verdict: {master_peaks['verdict']}  (sample {sample_peak_after:.1f} dBFS, true {peak_final:.1f} dBTP)")
 
     # Write output
     if output_wav is None:
@@ -1040,6 +1198,9 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         "duration_s": round(max_length / sr, 3),
         "clipper": clipper_report,
         "ms": ms_report,
+        "bus_peaks": bus_peaks,
+        "master_peaks": master_peaks,
+        "phase_warnings": phase_warnings,
     }
     report_path = output_wav.with_name(output_wav.stem + "_report.json")
     with open(report_path, "w") as f:

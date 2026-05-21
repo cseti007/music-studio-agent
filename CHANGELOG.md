@@ -12,6 +12,93 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### DAW-style channel meter — per-bus / per-master peak monitoring
+
+`render_mix.py` and `analyze.py` now flag every chain stage with a
+[OK] / [WARN] / [CLIP] verdict so the agent can spot headroom problems
+and phase-coherent summing without listening through the entire mix.
+
+The thresholds are DAW-conventional: peak < -6 dBFS is [OK], -6 ≤ peak
+< -1 dBFS is [WARN], peak ≥ -1 dBFS or true peak ≥ -1 dBTP is [CLIP].
+The verdict combines sample peak AND true peak (worst of the two) so
+inter-sample peaks that survive sample-domain limiting are caught.
+
+In `render_mix.py`:
+
+- `bus_peaks` field in `mix_report.json` — per-bus dict carrying the
+  sample peak after each chain stage (`sum_in` → `after_vol_pan` →
+  `after_eq` → `after_comp` → `after_sat` → `after_parallel_sat` →
+  `after_reverb` → `final`), the true peak of the final bus output,
+  and the bus verdict.
+- `master_peaks` field — same idea for the master chain
+  (`sum_in` → `after_comp` → `after_clipper` → `after_ms` →
+  `after_eq` → `after_lufs_norm` → `after_limiter` → final sample
+  peak, final true peak, verdict).
+- "Per-bus peak summary" table printed before the master chain — quick
+  visual scan of where headroom is being lost.
+- Verdict prefix appended to every existing chain-stage print so the
+  warning is visible without reading the JSON.
+
+In `analyze.py`:
+
+- `loudness.headroom_verdict` field in `analysis.json` using the same
+  thresholds; auto-recomputed by every analyze.py run.
+- Headroom line added to the STATS SUMMARY block of `spectrogram.txt`.
+
+### Per-bus phase-correlation check
+
+`render_mix.py` now scans every bus with 2+ active tracks for
+pairwise time-aligned correlation and flags pairs with `|corr| ≥ 0.4`.
+This catches the case `audit_session.py` cannot see: two tracks of the
+same instrument recorded through different signal paths (e.g. DI clean
++ pedal-chain DI), which sum constructively (+6 dB doubling) or
+destructively (low-end cancellation when polarity is flipped or a long
+processing delay shifts the pedal version).
+
+Output:
+
+- `phase_warnings` list in `mix_report.json`, one entry per flagged
+  pair: `{bus, track_a, track_b, correlation, overlap_sec, kind}`.
+- Per-warning stdout line during render — agent sees it immediately.
+- Memory cost is bounded: each track is downsampled 48× (48 kHz → 1
+  kHz mono) before pairwise correlation, so 41 active tracks fit in
+  ~140 MB of temporary buffers.
+
+The check ran on the terido session at v13 and surfaced 19 pairs.
+Most were expected multi-mic patterns (overhead L/R stereo pair,
+kick-in vs kick-sub on the same drum, guitar amp + cab on the same
+DI signal). The genuine anomaly was BASS DI CLEAN vs BASS DI PEDAL
+at `corr = -0.72` — same instrument signal split before the pedal
+chain, with the pedal output delayed ~4.83 ms and polarity-flipped
+relative to the clean DI. `align_phase` was used to time-align and
+flip polarity on the pedal track; post-fix correlation went to
+`+0.71` and 1.1 dB of low-end energy was recovered.
+
+### Test coverage (TestPeakVerdict, TestBusMasterPeaks, TestAnalyzeHeadroom)
+
+Five new tests in `test_smoke.py`:
+
+- Verdict thresholds are exact: `-6.01` → OK, `-6.0` → WARN, `-1.0` → CLIP.
+- Verdict uses worst of sample peak / true peak.
+- `analyze.py._headroom_verdict` and `render_mix.py._peak_verdict` agree
+  on identical inputs (single source of truth for the rule).
+- End-to-end render emits `bus_peaks` + `master_peaks` with all expected
+  fields and the verdict in `[OK]` / `[WARN]` / `[CLIP]`.
+- `analyze.py` writes `loudness.headroom_verdict` and the STATS SUMMARY
+  block contains the Headroom line.
+
+All 46 existing tests still pass.
+
+### Bug fix — `master_health.py` JSON dump
+
+`json.dump(report)` crashed with
+`TypeError: Object of type bool is not JSON serializable` when the
+phase-coherence / compression-history checks produced numpy booleans
+(numpy's bool_ is not the same as Python's bool and the standard json
+module refuses to serialize it). Added a `default=` callable that
+coerces `np.bool_`, `np.integer`, and `np.floating` to native Python
+types. The fix is local to the dumps call so no API change.
+
 ### Vocal pipeline — Phases 1-4 of BACKLOG #4
 
 A complete vocal-stem-aware processing chain landed: bus detection,
