@@ -12,6 +12,92 @@ why each batch happened. Newer entries on top.
 
 These items live on master but have not been tagged yet.
 
+### Vocal pipeline — Phases 1-4 of BACKLOG #4
+
+A complete vocal-stem-aware processing chain landed: bus detection,
+13 new vocal preset JSONs, 3 new vocal reverb presets, two new tools
+(`apply_deesser.py`, `apply_pitch_correct.py`), shared reverb-bus
+architecture in `render_mix`, vocal-specific metrics in `analyze.py`,
+and vocal_lead / vocal_bg default_bus_volume_db across all 7 style
+profiles. Researched against 2026 vocal-mixing best practices.
+
+The non-obvious chain-order choices documented in code and docs:
+
+1. **De-esser runs AFTER the compressor.** The comp amplifies sibilance
+   peaks; the de-esser catches them at the comp's output where they are
+   at their worst. The naïve "de-ess first" order lets the comp
+   re-amplify the sibilance the de-esser just tamed.
+2. **EQ split into subtractive (pre-comp) and additive (post-comp).**
+   Cuts ahead of the comp keep its detection clean; boosts after the
+   comp prevent the boost from being squashed by gain reduction.
+
+New tools:
+
+- `tools/apply_deesser.py` — frequency-band-specific sidechain compressor
+  (5-8 kHz detection, full-band gain reduction). 4 presets:
+  `deesser_smooth`, `deesser_aggressive`, `deesser_male_lead`,
+  `deesser_female_lead`. `relevance_check` skips when sibilance band
+  peak is below -25 dBFS (nothing to de-ess).
+- `tools/apply_pitch_correct.py` — librosa.pyin pitch detection + psola
+  PSOLA shifting + scale quantisation. 7 modes (major, minor,
+  harmonic_minor, dorian, mixolydian, chromatic, natural_minor) and
+  3 presets (subtle / pop / hard_tune) blending original→quantised by
+  a strength factor 0..1. Requires the `psola` package (now in
+  requirements.txt).
+
+Reverb-bus architecture (mix_config.json schema extension):
+
+- New top-level `reverb_buses` block declares shared reverb instances
+  (e.g. one `vocal_plate`, one `vocal_hall`) that multiple tracks can
+  send to at different levels.
+- Per-track `reverb_sends` list routes pre-fader audio to one or more
+  reverb buses at individual levels.
+- `render_mix.py` accumulates the sends during the per-track loop,
+  renders each reverb bus once after, sums the wet returns into master.
+- Backward-compatible — existing per-bus `reverb_send` (insert-style)
+  still works.
+
+analyze.py vocal metrics (writes a new `vocal` block per stem):
+
+- `sibilance.peak_db`, `sibilance.density_per_sec`
+- `plosive.events_count`, `plosive.peak_db`
+- `pitch.mean_hz`, `pitch.median_hz`, `pitch.cents_std`,
+  `pitch.voiced_ratio`
+- `vibrato.rate_hz`, `vibrato.extent_cents`
+- `breath.silence_ratio`
+
+Step counter advanced to 9.
+
+Bus detection: `_detect_bus` recognises `LEAD VOX`, `LEAD VOC`, `VOX`,
+`VOC`, `WHISPER`, `TALK` (→ `vocal_lead`), and `BG VOX`, `BG VOC`,
+`BACKING`, `HARMONY`, `AD-LIB`, `ADLIB`, `DOUBLE` (→ `vocal_bg`).
+`generate_config` builds the vocal sub-buses + a shared `vocal` parent
+bus when vocal tracks are detected.
+
+Style profile updates: all 7 profiles gain `vocal_lead` and `vocal_bg`
+in `default_bus_volume_db`. Genre-specific starting points: pop
+(+4/-1, vocal-dominated), modern_rock (+2/-2), classic_rock (+1.5/-3),
+hip_hop (+3/-3), jazz_acoustic (+2/-2), tool_inspired (+1.5/-3),
+punchy_modern_rock (+2.5/-2).
+
+Tests: 5 new pytest cases in `TestVocalToolkit` (bus detection,
+deesser sibilance attenuation + skip-on-clean, pitch correct scale
+quantise + strength blend). 63 passed.
+
+Docs: CLAUDE.md gains tools-table rows + a vocal chain-order line + a
+schema example for `reverb_buses`/`reverb_sends` + decision-tree
+triggers + analyze-interpretation rows for sibilance/pitch/plosive.
+docs/knowledge.md gains a top-level "Vocal Mixing" section explaining
+the two non-obvious chain-order choices, genre-specific aesthetics,
+vocal analyse-field reading, reverb-bus architecture rationale, and
+pitch-correction philosophy. README.md workflow overview lists the
+vocal tools; the DAW-preparation track-naming section gains vocal
+keywords (LEAD VOX, BG VOX, HARMONY, etc.).
+
+Phase 5 (`apply_vocal_align.py` for lead + double-track alignment,
+plus heavier integration tests) is deferred — captured as the
+remainder of BACKLOG #4.
+
 ### Style-aware mix evaluation (2ab42d9)
 
 Reference-free, genre-aware mix grading.

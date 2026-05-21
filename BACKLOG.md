@@ -10,6 +10,17 @@ worth doing. Ordered by how readily it fits the existing architecture.
 
 These items used to live here and have been shipped:
 
+- ~~Vocal toolkit Phases 1-4~~ — done. `_detect_bus` routes vocal-lead/vocal-bg
+  keywords to dedicated buses; `apply_deesser.py` runs the sidechain band-comp
+  AFTER the main compressor (per the 2026 best-practice ordering);
+  `apply_pitch_correct.py` uses librosa.pyin + psola for scale-aware
+  correction; 13 new vocal preset JSONs (5 EQ pairs cut/boost + 4 comp + 3
+  reverb); reverb-bus architecture in render_mix supports shared `reverb_buses`
+  with per-track `reverb_sends`; analyze.py writes a `vocal` block with
+  sibilance / plosive / pitch / vibrato / breath metrics; all 7 style profiles
+  gained vocal_lead and vocal_bg default_bus_volume_db values. **Phase 5
+  (apply_vocal_align + further test coverage) is still open below.**
+
 - ~~Style-aware mix evaluation (style profiles + style_check.py)~~ — done.
   Five built-in profiles (`modern_rock`, `classic_rock`, `pop`, `hip_hop`,
   `jazz_acoustic`) with LUFS / LRA / crest / 5-band tonal balance targets.
@@ -108,7 +119,31 @@ run pytest. Optionally a lint step (ruff or flake8).
 
 ---
 
-## 4. Vocal toolkit — full pipeline plan
+## 4. Vocal toolkit — Phase 5 (alignment + heavier test coverage)
+
+**Status.** Phases 1-4 of the vocal-toolkit plan **shipped** (see the
+Completed section above). What remains:
+
+**What's left in this entry.**
+
+- `tools/apply_vocal_align.py` — onset-based alignment for lead vocal +
+  double-tracks. Different from `align_phase.py` (cross-correlation):
+  for vocal doubles the phrasing isn't perfectly coherent, so phonetic
+  onsets are the reliable anchor. ~200 lines.
+- Heavier integration test coverage: render a tiny synthetic vocal
+  session end-to-end through the full chain (subtractive EQ → comp →
+  deesser → additive EQ → optional pitch correct → reverb-bus send) and
+  assert the spectrum lands where the chain should put it.
+- `apply_vocal_align.py` integration into the chain ordering in CLAUDE.md
+  decision tree.
+
+The original plan (full 5-phase description, 2026 best-practice research,
+sources, etc.) is still useful as background — kept below for reference.
+
+### Background — full pipeline plan (researched 2026)
+
+(Phases 1-4 of this plan have shipped; the rest below is historical
+context for Phase 5 and any future refinements.)
 
 **What.** A complete vocal-stem-aware pipeline: stem detection, vocal-
 specific analysis fields, a chain of processing tools applied in the

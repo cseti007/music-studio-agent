@@ -75,6 +75,9 @@ OH AEA L, OH AEA R, OH U87 L, OH U87 R
 ROOM CLOSE L, ROOM CLOSE R, ROOM FAR L, ROOM FAR R
 BASS DI, BASS DI PEDAL
 GTR <player> FENDER, GTR <player> ORANGE, GTR <player> DI, GTR <player> 57
+LEAD VOX, LEAD VOCAL, VOX, VOC
+BG VOX L, BG VOX R, BACKING VOCAL, HARMONY HIGH, HARMONY LOW
+DOUBLE LEAD, AD-LIB, WHISPER, TALK
 ```
 
 Unrecognised track names get flagged and the agent will ask which bus they
@@ -218,6 +221,18 @@ apply_amp            -- tube amp + cabinet sim for bass DI
 apply_saturation     -- tape/tube/clipper harmonic saturation
 apply_reverb         -- algorithmic (Freeverb) OR convolution (--ir <IR.wav>)
 apply_delay          -- slapback, echo, ping-pong
+
+vocal pipeline       -- vocal-stem-aware chain (best-practice order):
+                        subtractive EQ → comp → DE-ESSER → additive EQ
+                        → [pitch correction] → reverb sends:
+  apply_deesser      -- frequency-specific sidechain (5-8 kHz detect,
+                        full-band gain reduction). Runs AFTER the comp on
+                        purpose — the comp amplifies sibilance, the de-esser
+                        catches it. Presets per voice type.
+  apply_pitch_correct-- librosa.pyin pitch detect + PSOLA shift + scale
+                        quantisation. 7 modes (major, minor, dorian, etc.),
+                        strength blends original→quantised.
+  (vocal EQ / comp / reverb presets are part of the standard preset library)
 
 make-it-hit tools    -- guarded by data-driven relevance_check (won't fire
                         if the input doesn't justify the trade-off):

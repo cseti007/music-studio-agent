@@ -52,6 +52,8 @@ python3 tools/<script>.py
 | `tools/apply_amp.py` | Tube amp simulation + cabinet EQ for bass DI. Asymmetric soft clipping (even harmonics) + cabinet frequency response. Presets: ampeg_svt, ampeg_svt_driven, ampeg_slap, slap_bass, di_clean. | `<file> --preset NAME [--drive 0-1] [--asymmetry 0-1] [--hp HZ] [--lp HZ] [--low-shelf-hz HZ] [--low-shelf-db DB] [--mid-hz HZ] [--mid-db DB] [--mid-q Q] --output-dir DIR` |
 | `tools/apply_saturation.py` | Harmonic saturation: tape (symmetric tanh, even+odd), tube (asymmetric tanh, even harmonics → warmth), clipper (cubic soft clip, odd harmonics → presence). RMS-normalized output. Parallel mode via --mix. Presets: sat_tape_subtle, sat_tape_drums, sat_tube_bass, sat_tube_guitar, sat_clipper_parallel. | `<file> --output-dir DIR [--preset NAME] [--mode tape\|tube\|clipper] [--drive 0-1] [--asymmetry 0-1] [--mix 0-1]` |
 | `tools/apply_delay.py` | Delay/echo: normal (slapback, single echo, multi-tap with feedback) and pingpong (alternating L/R, mono→stereo). BPM-synced via --bpm + --division. HP/LP on wet signal. Send mode (--send) for bus return routing. Presets: delay_slapback_snare, delay_slapback_guitar, delay_pingpong_send, delay_pre_delay. | `<file> --output-dir DIR [--preset NAME] [--mode normal\|pingpong] [--delay-ms MS] [--feedback 0-0.95] [--mix 0-1] [--bpm BPM] [--division eighth\|dotted-eighth\|...] [--hp HZ] [--lp HZ] [--send]` |
+| `tools/apply_deesser.py` | Frequency-specific sidechain compressor for vocal sibilance control. Detection band is 5-8 kHz (5500-8500 default), gain reduction is full-band. Chain placement: AFTER compression (the comp amplifies sibilance peaks, so the de-esser catches them at the comp's output). Presets: deesser_smooth, deesser_aggressive, deesser_male_lead, deesser_female_lead. `relevance_check` skips when the sibilance band peak is below -25 dBFS (nothing to de-ess). | `<file> --output-dir DIR [--preset NAME] [--threshold DB] [--ratio N] [--attack MS] [--release MS] [--detect-low HZ] [--detect-high HZ] [--force]` |
+| `tools/apply_pitch_correct.py` | Vocal pitch correction via librosa.pyin + psola PSOLA shifting + scale quantisation. Detects voice f0 frame-by-frame, snaps to the nearest scale degree of the chosen key/mode, blends original→quantised by `strength` (0=no correction, 1=full Auto-Tune snap). 7 modes: major, minor, harmonic_minor, dorian, mixolydian, chromatic, natural_minor. Presets: pitch_correct_subtle, pitch_correct_pop, pitch_correct_hard_tune. Requires the `psola` package. | `<file> --output-dir DIR --scale-root NOTE --scale-mode MODE [--strength 0-1] [--preset NAME] [--fmin HZ] [--fmax HZ]` |
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 LUFS before comparison; PSD is computed only on active frames (RMS > -45 dBFS) and pairs are time-gated (Jaccard co-activity < 0.15 suppressed). Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
 | `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
@@ -119,6 +121,9 @@ output/
     ├── stems/                        <- render_mix --stems output (per-bus submixes at -18 LUFS)
     │   ├── stem_drums.wav
     │   ├── stem_bass.wav
+    │   ├── stem_vocal_lead.wav      <- only when vocal_lead bus has active tracks
+    │   ├── stem_vocal_bg.wav        <- only when vocal_bg bus has active tracks
+    │   ├── stem_vocal.wav           <- vocal parent (sums vocal_lead + vocal_bg)
     │   └── stem_guitar.wav
     ├── mixes/
     │   ├── mix.wav                   <- render_mix --render output (LUFS normalized + true peak limited)
@@ -185,10 +190,30 @@ Moving any of these into a single flat `analysis/` would either break the audio-
     {"type": "highpass", "hz": 30},
     {"type": "highshelf", "hz": 12000, "db": 1.5}
   ]
+},
+"reverb_buses": {              // optional: shared reverb buses (vocal mixing standard)
+  "vocal_plate": {
+    "preset": "vocal_plate",   // any preset from apply_reverb.PRESETS
+    "wet": 1.0,                // wet level inside the reverb bus (1.0 = pure wet for send/return)
+    "return_volume_db": -8.0,  // how loud the reverb return enters the master sum
+    "return_pan": 0.0
+  },
+  "vocal_hall": {
+    "preset": "vocal_hall_wide",
+    "wet": 1.0,
+    "return_volume_db": -12.0,
+    "return_pan": 0.0
+  }
 }
+// Per-track sends to reverb buses are declared on the track entry:
+//   {"name": "LEAD VOX", "bus": "vocal_lead", "reverb_sends": [
+//      {"bus": "vocal_plate", "level_db": -6},
+//      {"bus": "vocal_hall",  "level_db": -18}
+//   ]}
 ```
 
-Bus processing order: volume → pan → **eq (per-bus, zero-phase)** → comp_preset → saturation → parallel_saturation (guarded) → reverb_send
+Bus processing order: volume → pan → **eq (per-bus, zero-phase)** → comp_preset → saturation → parallel_saturation (guarded) → reverb_send (per-bus insert)
+Vocal chain order (per-stem, 2026 best practice): subtractive EQ (cuts) → compression → **de-esser (after comp on purpose — comp amplifies sibilance)** → additive EQ (boosts) → [pitch correction] → saturation → reverb sends to shared `reverb_buses`
 Master processing order: sum buses → glue comp → clipper (guarded) → M/S (guarded) → EQ → LUFS norm → ISP-aware true-peak limiter
 
 ## Workflow
@@ -214,6 +239,16 @@ parse_session
   -> (make-it-hit, only if data justifies it: subharm / haas / exciter
       / multiband / clipper / parallel_sat / M/S — see decision rules)
      <analyze after each — verify metric + pumping>                         [Required]
+  -> (vocal stems only — 2026 best-practice chain order)
+     apply_eq subtractive (HP, mud cut)       -> assembled_eq.wav           [Required for vocals]
+       <analyze>                                                            [Required]
+     apply_compression (vocal preset)         -> assembled_eq_comp.wav
+       <analyze — confirm crest>                                            [Required]
+     apply_deesser                            -> assembled_eq_comp_deessed.wav
+       <analyze — vocal.sibilance.peak_db should drop 3+ dB>                [Required if not skipped]
+     apply_eq additive (presence, air)        -> ..._deessed_eq.wav
+       <analyze>                                                            [Required]
+     [apply_pitch_correct — optional, only if cents_std > 30]               [Optional, ask user]
   -> render_mix                                              -> mix.wav
      <mix_health.py output/<session> [--reference ref.wav]>                 [Required]
      <if not green: address issues, re-render, re-run mix_health>           [Required loop]
@@ -280,6 +315,9 @@ Read all of these fields from analysis.json and comment on each that is outside 
 | hum_detection.hum_detected | hum_detection.hum_detected | false | true: apply notch filters per hum_detection.harmonics |
 | frequency_bands_crest_db.* | frequency_bands_crest_db (per band) | 8-15 dB healthy | < 6 dB: band is squashed (avoid multiband / parallel sat on that band). > 18 dB: band is loose (multiband can help). |
 | pumping.pumping_detected | pumping.pumping_detected | false | true is a **suspicion, not a verdict** — manually disambiguate: is it (a) comp/multiband/clipper artifact, or (b) musical strumming/groove? See "Interpreting pumping_detected" below. |
+| vocal.sibilance.peak_db | vocal.sibilance.peak_db (vocals only) | -25 to -35 dBFS healthy | > -25 dBFS: sibilance is loud — run `apply_deesser` after the comp step. < -35: sibilance content negligible, de-esser will skip via relevance_check. |
+| vocal.pitch.cents_std | vocal.pitch.cents_std (vocals only) | < 25 cents (in tune) | > 30 cents: noticeable intonation drift — consider `apply_pitch_correct --strength 0.3-0.7`. Above 50 cents the take has more pitch issues than the agent should silently fix; surface the choice to the user. |
+| vocal.plosive.events_count | vocal.plosive.events_count | 0-3 per minute | > 10 per minute: many low-frequency bursts (p, b, hard t consonants pushing the mic). The subtractive vocal EQ HP filter (80-100 Hz) usually handles this; if bursts remain, consider a tighter HP @ 120 Hz. |
 
 **Rule:** if all metrics are within range and the spectrogram looks normal for the instrument type,
 say so explicitly ("analysis looks clean — no action needed before next processing step").
@@ -338,7 +376,9 @@ anything else; "optional" means run it if there's a specific question to answer.
 | A new `assembled.wav` (or `assembled_aligned.wav`) just landed | **Required** | `analyze.py` on that file | LUFS, hum, transient_profile, frequency_bands, frequency_bands_crest_db, stereo, pumping |
 | User provided a reference mix at session start | **Required**, once | `compare_reference.py reference target_or_raw_mix` | LUFS delta (target), spectral balance deltas (EQ goals), LRA delta (compression target) |
 | Session opened, before any EQ work | **Required** | `detect_masking.py output/<session> --stage comp` (or `--stage raw` if no comp yet) | CRITICAL + HIGH pairs → primary EQ cut targets |
-| Output from `apply_eq` / `apply_compression` / `apply_gate` / `apply_amp` / `apply_saturation` / `apply_transient` / `apply_reverb` / `apply_delay` just landed | **Required** | `analyze.py` on that output | Did the targeted metric move the right way? `pumping_detected` flipped? |
+| Output from `apply_eq` / `apply_compression` / `apply_gate` / `apply_amp` / `apply_saturation` / `apply_transient` / `apply_reverb` / `apply_delay` / `apply_deesser` / `apply_pitch_correct` just landed | **Required** | `analyze.py` on that output | Did the targeted metric move the right way? `pumping_detected` flipped? For de-esser: `vocal.sibilance.peak_db` should drop by 3+ dB. For pitch correct: `vocal.pitch.cents_std` should drop. |
+| Vocal stem just had analyze.py run AND `vocal.sibilance.peak_db > -25` | **Required** | `apply_deesser.py` AFTER the comp step | Sibilance is loud enough to be a problem. Default preset `deesser_smooth`. The chain order matters: de-esser AFTER comp, not before. |
+| Vocal stem just had analyze.py run AND `vocal.pitch.cents_std > 30` | Optional, ask user first | `apply_pitch_correct.py --scale-root NOTE --scale-mode MODE` | Intonation drift is over 30 cents standard deviation. Above 50 cents always ask the user — the take may have intentional bending that pitch correction would flatten. |
 | Output from a make-it-hit tool just landed (`apply_subharm`, `apply_haas`, `apply_exciter`, `apply_multiband_comp`, or a render with `master.clipper` / `master.ms` / `buses.*.parallel_saturation`) | **Required, double check** | `analyze.py` on the output **AND** verify the tool's own `relevance_check` result | (a) targeted metric moved in the intended direction, (b) `pumping.pumping_detected` is still false, (c) `relevance_check.recommend_skip` was honoured |
 | `render_mix --render` finished (mix.wav written) | **Required** | `mix_health.py output/<session> [--reference ref.wav if user gave one]` | Green/yellow/red verdict across LUFS, true peak, LRA, M/S width, mono compat, tonal balance, masking, stem pumping |
 | `mix_health` returned yellow or red verdicts | **Required loop** | Address each non-green item, re-render, re-run `mix_health.py` | Same — until green or "1 yellow max" |

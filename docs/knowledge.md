@@ -1072,6 +1072,145 @@ equal" debate.
 
 ---
 
+## Vocal Mixing
+
+Vocal mixing has its own chain order and its own set of tools because vocals
+sit on top of the mix and demand specific treatment that doesn't apply to
+instrument stems. The chain order below is the 2026 industry-best-practice
+ordering — there are two non-obvious choices in it that matter.
+
+### Chain order — and the two non-obvious choices
+
+```
+volume → pan
+  → subtractive EQ      (HP @ 80-100 Hz, mud cut @ 200-400 Hz, harshness notch)
+  → compression         (3-6:1 leveling, genre-dependent)
+  → de-esser            (NOT before the comp — see below)
+  → additive EQ         (presence @ 3-4 kHz, air @ 12 kHz)
+  → [pitch correction]  (optional — only if pitch.cents_std > 30)
+  → saturation          (optional character)
+  → reverb sends        (to shared `reverb_buses`, NOT insert reverb)
+```
+
+**Choice 1: De-esser AFTER the compressor, not before.** A vocal compressor
+amplifies the sibilance peaks (because every gain-reduction stage makes the
+already-loud "s"/"sh"/"ch" peaks even more prominent relative to the rest
+of the signal). Putting the de-esser at the comp's *output* catches those
+peaks where they are at their worst. The classic ordering mistake is
+"de-esser first, then comp, then EQ" — that lets the comp re-amplify the
+sibilance the de-esser just tamed.
+
+**Choice 2: EQ split into subtractive (pre-comp) and additive (post-comp).**
+Cuts go before the comp so the compressor's level detection works on a
+clean signal — feeding 200 Hz mud into the comp's detector means the comp
+reacts to mud peaks rather than vocal peaks. Boosts go after the comp so
+the gain-reduction doesn't undo the boost (a 3 kHz boost ahead of the comp
+gets squashed by the comp the moment it triggers).
+
+### Genre-specific aesthetics
+
+| Genre | Comp ratio | EQ shape | Reverb | Saturation |
+|---|---|---|---|---|
+| **Pop** | 6:1 (heavy) | bright + heavy presence | plate (short) + slap delay | optional, light |
+| **Rock** | 4:1 (moderate) | present, controlled top | room + small plate | tape, subtle |
+| **Ballad** | 3:1 (gentle) | natural, intimate | lush hall, longer | none — preserve intimacy |
+| **Hip-hop** | 6:1 + serial 4:1 (very heavy) | pitched-up + bright | chamber + delay throws | tube, audible |
+| **Jazz** | 3:1 (gentle) | natural, full body | small chamber or room | none |
+
+### Reading the vocal analyse fields
+
+`analyze.py` writes a `vocal` block into `analysis.json` for any stem
+(though the metrics only carry meaning for monophonic tonal material —
+i.e. vocals, solo instruments). The agent uses these to decide chain
+parameters automatically.
+
+| Field | Meaning | Action |
+|---|---|---|
+| `sibilance.peak_db` | 5-8 kHz transient peak in dBFS | > -25 dBFS: run `apply_deesser` after the comp step. -25 to -35: borderline, default `deesser_smooth` is enough. < -35: relevance_check will skip (nothing to de-ess). |
+| `sibilance.density_per_sec` | sibilant events per second | > 4/sec is dense — use `deesser_aggressive`. Sparse takes are fine with `deesser_smooth`. |
+| `plosive.events_count` | sub-100 Hz transient bursts | > 10 in a 3-minute take: tighten the HP filter (subtractive EQ) from 80 to 100-120 Hz, or use a high-pass at 150 Hz on the BG vocal preset. |
+| `pitch.mean_hz` | average fundamental | < 200 Hz typically male (use `deesser_male_lead` detection band 4-7 kHz); > 250 Hz typically female (use `deesser_female_lead` 6-9 kHz). |
+| `pitch.cents_std` | std-dev of cents-deviation from nearest semitone | < 25 cents: in tune. 25-40: minor wobble — `pitch_correct_subtle` (strength 0.3). > 40: noticeable drift — ask the user before applying pitch correction; the take may have intentional bends. |
+| `vibrato.rate_hz` | 4-7 Hz pitch modulation | 5-6 Hz is healthy controlled vibrato. < 4 Hz = wobble (often a sign of a tired voice). > 7 Hz = "warble" (often unwanted from a forced effect). |
+| `breath.silence_ratio` | fraction of frames below -45 dBFS | > 0.4: a lot of breaths/silence between phrases — consider gating between phrases, or accept it as part of the intimate character. |
+
+### Reverb-bus architecture (shared sends vs. insert)
+
+Vocals should **never** get insert reverb. The standard is to declare one
+or two reverb buses at the top of `mix_config.json` and let each vocal
+track send to those buses at appropriate levels:
+
+```json
+"reverb_buses": {
+  "vocal_plate": {"preset": "vocal_plate", "wet": 1.0, "return_volume_db": -8},
+  "vocal_hall":  {"preset": "vocal_hall_wide", "wet": 1.0, "return_volume_db": -12}
+},
+"tracks": [
+  {
+    "name": "LEAD VOX",
+    "bus": "vocal_lead",
+    "reverb_sends": [
+      {"bus": "vocal_plate", "level_db": -6},
+      {"bus": "vocal_hall",  "level_db": -18}
+    ]
+  }
+]
+```
+
+Why this matters:
+- **Multiple sources, one reverb space.** Lead + BG + double-tracks all
+  hit the same plate, which is what makes them sound like they're in the
+  same room. With insert reverb each track gets its own room — they
+  never glue together.
+- **Wet/dry balance separate from level.** The reverb bus' wet level
+  stays at 1.0 (pure wet — the dry is the original track in the master
+  sum). Track-level sends control how much reverb each vocal gets, the
+  bus' `return_volume_db` controls how loud the reverb tail is overall.
+- **One reverb instance per bus, regardless of source count.** A plate
+  bus with 5 vocals sending into it costs the same CPU as one vocal —
+  five inserts would be five separate reverb computations.
+
+### Pitch correction philosophy
+
+The agent should ask the user before applying `apply_pitch_correct.py`
+because pitch correction makes irreversible aesthetic choices:
+
+- **Strength 0.3 (`pitch_correct_subtle`)** is a safe default for "I want
+  the vocal in tune but not robotic." Nudges the worst out-of-tune notes
+  toward the scale grid, leaves intentional bends and vibrato intact.
+- **Strength 0.7 (`pitch_correct_pop`)** is modern pop's standard. Strong
+  enough to hear the snap; not so strong that the vocal sounds artificial.
+- **Strength 1.0 (`pitch_correct_hard_tune`)** is the audible "Cher /
+  T-Pain" effect. Only use when explicitly requested.
+
+If `vocal.pitch.cents_std > 50` the take has substantial intonation
+problems — surface this to the user rather than silently auto-correcting.
+The user may want to re-track that section rather than have the agent
+mask a performance issue with PSOLA.
+
+### Why the de-esser is a `relevance_check`-guarded tool
+
+`apply_deesser.py` skips processing when the sibilance band peak is below
+-25 dBFS. Reason: running a de-esser on a stem that has no sibilance
+content just adds artefacts (the band-pass filter ringing through the
+detector during quiet moments). The skip is the right answer for non-vocal
+sources accidentally routed through the de-esser, or for vocals where the
+sibilance is already controlled at the recording stage.
+
+### Sources
+
+Researched against the 2026 vocal-mixing consensus:
+
+- [Music Guy Mixing — Vocal Chain Order](https://www.musicguymixing.com/vocal-chain/)
+- [iZotope — Crafting a basic vocal chain](https://www.izotope.com/en/learn/crafting-a-basic-vocal-chain)
+- [Sonarworks — Chaining vocal effects plugins](https://www.sonarworks.com/blog/learn/how-to-chain-multiple-vocal-effects-plugins-effectively)
+- [Universal Audio — Top vocal chains](https://www.uaudio.com/blogs/ua/top-uad-vocal-chains)
+- [Patrik Skoog — How to Mix Vocals](https://www.patrikskoogmusic.com/guides/how-to-mix-vocals-eq-compression-saturation)
+- [PSOLA algorithm explanation (TCNJ Autotuner project)](https://engprojects.tcnj.edu/autotuner16/2016/04/11/the-psola-algorithm/)
+- [JanWilczek/python-auto-tune — PYIN + PSOLA reference implementation](https://github.com/JanWilczek/python-auto-tune)
+
+---
+
 ## Style Profiles — Reference-Free Genre Grading
 
 `tools/style_check.py mix.wav --style NAME` grades a finished mix against one of five built-in profiles in `tools/style_profiles/`: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference track is supplied, the profile **is** the reference.
