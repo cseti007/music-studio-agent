@@ -1575,6 +1575,83 @@ class TestApplyGainCrossfade:
             f"no-crossfade should preserve the discontinuity: max step {max_step:.4f}"
         )
 
+    def test_find_clicks_sweeps_a_mix_for_sharp_transients(self, tmp_path):
+        """`find_clicks.find_click_candidates` returns events ranked by step
+        magnitude, clustering nearby clicks into single events.
+        """
+        import soundfile as sf
+        from find_clicks import find_click_candidates
+
+        # Build a mix with two distinct click events: a single sharp step at
+        # t=1s (step 0.5) and a cluster of three steps near t=3s (steps 0.4).
+        sr = 48000
+        n = sr * 5
+        sig = np.zeros(n, dtype=np.float64)
+        # Add some quiet background noise so peak measurements aren't all 0
+        rng = np.random.default_rng(0)
+        sig += rng.standard_normal(n) * 0.01
+        sig[sr * 1] = 0.5            # isolated click
+        sig[sr * 3] = 0.4
+        sig[sr * 3 + 50] = -0.4      # cluster: 3 sharp transitions within 50/48000 = 1ms
+        sig[sr * 3 + 100] = 0.4
+        mix_dir = tmp_path / "mixes"
+        mix_dir.mkdir()
+        sf.write(str(mix_dir / "mix.wav"), sig, sr, subtype="PCM_24")
+
+        events = find_click_candidates(
+            tmp_path / "mixes" / "mix.wav",
+            threshold=0.3, cluster_gap_ms=50.0,
+        )
+        assert len(events) >= 2, f"expected ≥ 2 clusters, got {len(events)}"
+        # Highest-magnitude cluster should be at ~t=1s (the isolated 0.5 step)
+        top = events[0]
+        assert abs(top["time_s"] - 1.0) < 0.01, f"top click time {top['time_s']}"
+        assert top["step_magnitude"] >= 0.49
+
+    def test_find_clicks_trace_at_time_reads_chain_stages(self, tmp_path):
+        """`find_clicks.trace_at_time` walks the per-track chain + stems + mix
+        at a given timestamp and returns max-step measurements per stage.
+        """
+        import soundfile as sf
+        from find_clicks import trace_at_time
+
+        # Build a minimal session: 1 active track with assembled.wav + a
+        # premaster mix.wav + a stem_<bus>.wav.
+        sr = 48000
+        n = sr * 4
+        sig = np.zeros(n, dtype=np.float64)
+        sig[sr * 2] = 0.5  # click at t=2s
+
+        track_dir = tmp_path / "tracks" / "DRUM TEST"
+        track_dir.mkdir(parents=True)
+        sf.write(str(track_dir / "assembled.wav"), sig, sr, subtype="PCM_24")
+
+        mix_dir = tmp_path / "mixes"
+        mix_dir.mkdir()
+        sf.write(str(mix_dir / "mix.wav"), sig * 0.5, sr, subtype="PCM_24")
+
+        stems_dir = tmp_path / "stems"
+        stems_dir.mkdir()
+        sf.write(str(stems_dir / "stem_drums.wav"), sig * 0.5, sr, subtype="PCM_24")
+
+        # Minimal mix_config with one active track
+        import json as _json
+        (tmp_path / "mix_config.json").write_text(_json.dumps({
+            "tracks": [{"name": "DRUM TEST", "active": True}],
+        }))
+
+        rep = trace_at_time(tmp_path, target_time_s=2.0, window_s=0.2)
+        assert rep["target_time_s"] == 2.0
+        # Track chain should have the click
+        assert len(rep["tracks"]) == 1
+        assert rep["tracks"][0]["name"] == "DRUM TEST"
+        track_chain = rep["tracks"][0]["chain"]
+        assembled = next(c for c in track_chain if c["stage"] == "assembled")
+        assert assembled["max_step"] >= 0.4
+        # Mix should also have the (scaled) click
+        assert rep["mix"] is not None
+        assert rep["mix"]["max_step"] >= 0.2
+
     def test_crossfade_does_not_move_clip_position(self, tmp_path):
         """The crossfade smooths the boundary but does NOT shift the clip start —
         the engineer's chosen rhythmic position is preserved."""

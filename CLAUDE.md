@@ -82,6 +82,7 @@ alternative that avoids per-tool cold-start cost entirely — see its `--help`.
 | `tools/master_health.py` | Master-level scorecard, complementary to mix_health. Checks: format conformance (LUFS / TP / codec-ISP estimate), per-band phase coherence (sub-mono / top-wide), per-band M/S width profile, punch index, compression-history detection, reference-deck comparison. `--all-formats` batch mode scans `master_<format>.wav` files in the output dir and produces a cross-format scorecard. Vinyl/no-limiter formats are handled correctly (TP > ceiling is expected and not flagged as red). | `[master.wav] --output-dir DIR [--format spotify\|...] [--all-formats] [--reference ref1.wav ...]` |
 | `tools/bus_balance.py` | Per-bus loudness contribution report. For a `--render --stems` output, loads each `stems/stem_<bus>.wav`, applies bus volume_db (incl. parent chain) and measures effective LUFS in the mix. Marks top-level buses (the ones that actually sum into master). Use to answer "is the bass too loud vs drums?" with data instead of vibes. | `<mix_config.json>` |
 | `tools/level_notes.py` | Per-note volume leveling on a target time range. Detects onsets, measures each note's attack peak, applies a short 95 ms boost envelope (5 ms pre-fade + 30 ms hold + 60 ms fade-out — fits between onsets so boosts don't overlap and overshoot). Only lifts quiet notes (peak below `--quiet-threshold-db`), never reduces loud ones. Safety scale is segment-only. Intended for uneven slap/finger bass takes where the player swings dynamically and per-clip gain can't help (multiple notes per clip). | `<input.wav> --output <out.wav> --end SEC [--start SEC] [--target-peak-db -4] [--quiet-threshold-db -6] [--max-boost-db 15]` |
+| `tools/find_clicks.py` | Click / sharp-transient forensic. **Sweep mode** scans `mixes/mix.wav` for high inter-sample steps (>= 0.10 default) and lists them ranked by magnitude (with clustering to collapse nearby clicks into single events). **Trace mode** (`--time <sec>`) walks every chain stage at the given timestamp (source → assembled → stem → mix) and prints the max inter-sample step at each, so you can attribute an audible click to the exact stage that introduces it — engineer slip-edit at a clip boundary, polarity inversion, comp ceiling clipping, or a real source recording issue. Always trace BEFORE blaming the chain; many "clicks" turn out to be the source itself (pre-limited bounce, recording clip, or a known anti-phase pedal DI). | `output/<session> [--time SEC] [--threshold 0.10] [--top 20]` |
 
 ### Make-it-hit tools — DATA-GATED, NOT DEFAULT
 
@@ -241,6 +242,13 @@ Moving any of these into a single flat `analysis/` would either break the audio-
 //      {"bus": "vocal_plate", "level_db": -6},
 //      {"bus": "vocal_hall",  "level_db": -18}
 //   ]}
+//
+// Per-track polarity flip — invert the signal before summing into the bus.
+// Use when a track is recorded anti-phase relative to its bus mates (most
+// commonly: BASS DI PEDAL relative to BASS DI CLEAN when the pedal chain
+// inverts polarity). Detection: see the "Bass DI PEDAL polarity inversion"
+// rule below.
+//   {"name": "BASS DI PEDAL", "bus": "bass", "polarity_flip": true, ...}
 ```
 
 Bus processing order: volume → pan → **eq (per-bus, zero-phase)** → comp_preset → saturation → parallel_saturation (guarded) → reverb_send (per-bus insert)
@@ -386,6 +394,52 @@ edit boundaries (e.g. stereo collapse at cut points from OH level mismatch).
 Correct drum workflow: use `--per-clip` only to assemble the stem (for region placement),
 then apply `--per-channel` on the assembled result for a single uniform gain pass.
 
+**BASS DI tracks: same rule as drums.**
+A bassist also records a continuous take; the studio splits it into many clips for editorial
+slip-edits (small rhythmic adjustments where chunks of the take get nudged ±10-50 ms relative
+to the click). Per-clip LUFS normalisation amplifies those tiny edits into audible level jumps
+and the comp downstream then clips the boundary peaks. Correct bass workflow:
+`apply_gain --per-clip --no-normalize` (assembles at source levels — apply_gain's default 5 ms
+crossfade smooths the slip-edit boundaries), then `apply_gain --per-channel --target-lufs -22`
+for uniform gain. The -22 LUFS target leaves the comp 4 dB of headroom so the +5 dB auto
+makeup doesn't push the post-comp peak into the ceiling — pass `--makeup 0` on
+`apply_compression` if it still hits 0 dBFS (autotrim compensates the lost level at the bus).
+
+**Bass DI PEDAL polarity inversion is common.**
+Many bass pedal chains (overdrive, fuzz, transformer-output DI boxes) invert the polarity of
+the signal relative to the clean DI. If both are recorded in parallel, they sum
+**destructively** at the bus — fundamentals cancel, only the high-frequency *difference*
+between the two takes survives → sounds bright and clicky. Detection: load both tracks, after
+EQ + comp measure the correlation. Correlation near **-1.0** → polarity inversion. Fix: add
+`"polarity_flip": true` to the PEDAL track in mix_config.json. Tell-tale: bus dry-sum LUFS
+20+ dB below the per-track LUFS in the autotrim recompute output. (Note: `align_phase.py`'s
+polarity detector can MISS this when the two tones differ heavily because the cross-
+correlation peak gets weak — set polarity_flip manually.)
+
+**Click / "reccsenés" forensic workflow.**
+When the user reports an audible click at a specific time:
+
+1. **DO NOT default-blame the chain.** Some recordings have pre-existing issues (pre-limited
+   bounces, slip-edit clicks from the DAW session, recording clipping). Trace forward from
+   the source first.
+2. Run `tools/find_clicks.py output/<session> --time <SEC>` — walks every chain stage at the
+   given timestamp and reports max inter-sample step per stage. The stage where the step
+   first jumps from ~0.07 (normal music) to ≥ 0.10 is the introducer.
+3. If the source recording itself has the click: check whether one of these patterns matches:
+   - Single-sample ceiling-hits at 0 dBFS scattered uniformly across the file (e.g. 1 per
+     5 sec) → engineer's pre-bounce went through a limiter, the ticks are baked in. Either
+     deactivate the track or use de-click restoration.
+   - Real recording clipping (sustained ceiling-hit runs of 5+ samples) → bad take, no
+     restoration tool in the project can hide it cleanly; deactivate and use alternative.
+4. If the click appears at `assembled.wav` but not in the source: it's a clip-boundary edit.
+   `apply_gain` should apply the 5 ms crossfade by default; if it's still there, check the
+   `--crossfade-ms` value and the clip overlap tolerance.
+5. If the click appears at `assembled_eq_comp.wav` but not at `assembled.wav`: the comp's
+   makeup gain is pushing the peak to the ceiling. Re-run with `--makeup 0`.
+6. If the click appears only in the SUM (bus stem or mix) but not in any individual track:
+   suspect destructive polarity interaction between two correlated tracks on the same bus
+   (bass CLEAN + bass PEDAL is the classic case).
+
 - Never apply processing without reading the analysis first.
 - Always read `spectrogram.txt` from output — it is the primary way to understand what is in a stem.
   The STATS SUMMARY block at the bottom of spectrogram.txt contains the new metrics — always read it.
@@ -493,6 +547,8 @@ anything else; "optional" means run it if there's a specific question to answer.
 | Source stem has uneven per-note dynamics (slap/finger bass take with wildly varying note levels — per-clip gain can't help because each clip has many notes) | Optional | `level_notes.py <input.wav> --output <out.wav> --end SEC [--start SEC]` | Detects onsets, lifts only the quiet notes via a short ~95 ms boost envelope (no overlap between notes, no reduction of loud notes). Safety-scaled to the modified segment only. Run on the assembled stem before EQ/comp. |
 | Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
 | `render_mix --render` finished — `mix_report.json` carries `bus_peaks` / `master_peaks` / `phase_warnings` | **Required** (zero extra cost — already in the report) | Read `mix_report.json` and surface any non-`[OK]` verdict | (a) Per-bus chain stages flagged `[WARN]` ≥ -6 dBFS or `[CLIP]` ≥ -1 dBFS — usually means bus volume_db is too high or per-stem files are hot. Lower the offender and re-render. (b) `master_peaks.verdict` = `[CLIP]` — limiter is doing too much work, dynamics collapse. Same fix: lower contributing buses. (c) `phase_warnings` non-empty — pairs of tracks on the same bus with `\|corr\| ≥ 0.4`. Two flavours: **expected** (overhead L/R stereo pair, kick-in + kick-sub on the same drum, guitar amp + cab on the same DI) — leave alone; **anomaly** (DI clean + pedal-output of the same instrument, polarity-flipped duplicate not caught by `audit_session.py` because the source files differ) — use `align_phase.py` to time-align and let it auto-detect polarity flip, then point the track at `assembled_*_aligned.wav`. |
+| **User reports an audible click / "reccsenés" / tick at a specific time in the mix or master** | **Required** | `find_clicks.py output/<session> --time <SEC>` (trace mode) and walk source → assembled → stem → mix at that timestamp | The stage where the max inter-sample step first crosses 0.10 is the introducer. Source-side issue (already-clipped recording, pre-limited bounce with 1-sample ceiling-hits) → can't fix in the chain; deactivate or restore. Assembled-side issue (per-clip boundary discontinuity) → check `apply_gain --crossfade-ms` value. Comp-side issue (comp output peak at 0 dBFS) → re-run with `--makeup 0`. Sum-only issue (only mix has the click, no individual track does) → suspect destructive polarity between two correlated tracks on the same bus (CLEAN + PEDAL bass with -0.9 correlation is the canonical case). See **Click / "reccsenés" forensic workflow** below for the full decision tree. |
+| **User reports balance feels wrong, "túl forró" / "túl halk" on a bus** | Required | `bus_balance.py <mix_config.json>` + read `mix_report.json` `bus_peaks` | Verify with measurement before reaching for `volume_db`. The autotrim already calibrates each bus to -18 LUFS — perception arguments are best settled with the bus_balance numbers. If a bus genuinely needs a relative offset, edit `volume_db` (NOT `auto_trim_db`). |
 
 **Operational rules that follow from the table:**
 
