@@ -1468,3 +1468,134 @@ class TestMixHealthStageDetection:
         wav.write_bytes(b"")
         (tmp_path / "mix_report.json").write_text(_json.dumps({"other_field": 42}))
         assert _detect_mix_stage(wav) == "master"
+
+
+class TestApplyGainCrossfade:
+    """Per-clip assembly applies equal-power crossfades at butt-up clip
+    boundaries — matches DAW (Pro Tools / Logic) default behaviour and
+    smooths the source-discontinuity clicks that engineer slip-edits leave.
+    """
+
+    def _make_session(self, tmp_path, source_a_val=0.5, source_b_val=-0.5,
+                      slip_samples=24, sr=48000):
+        """Create a 2-clip session where clip B is slip-edited relative to clip A.
+
+        Source is a single WAV containing two regions:
+          - [0, 48000)  filled with source_a_val (1 sec of constant +0.5)
+          - [48000, 96000) filled with source_b_val (1 sec of constant -0.5)
+
+        Clip A: timeline [0, 48000), source [0, 48000)   → plays source_a_val
+        Clip B: timeline [48000, 96000), source [48000 + slip, 96000 + slip)
+                → plays source_b_val BUT with a slip-edit (the engineer's edit)
+
+        Without crossfade: assembled audio jumps from +0.5 to -0.5 at sample 48000
+        (1-sample step of 1.0 magnitude — extreme click).
+
+        With crossfade: the step is smoothed into an equal-power transition.
+        """
+        import json as _json
+        import soundfile as sf
+
+        # Build the source: 2 sec of constant +0.5, then 2 sec of constant -0.5
+        n = sr * 4
+        sig = np.zeros(n, dtype=np.float64)
+        sig[:sr * 2] = source_a_val
+        sig[sr * 2:] = source_b_val
+        src_path = tmp_path / "source.wav"
+        sf.write(str(src_path), sig, sr, subtype="PCM_24")
+
+        session = {
+            "sample_rate": sr,
+            "duration_samples": sr * 2,
+            "tracks": [
+                {
+                    "name": "TEST",
+                    "clips": [
+                        {"source_file": str(src_path),
+                         "timeline_start_sample": 0,
+                         "source_offset_sample": 0,
+                         "length_samples": sr},
+                        {"source_file": str(src_path),
+                         "timeline_start_sample": sr,
+                         "source_offset_sample": sr * 2,  # slip to the second region
+                         "length_samples": sr},
+                    ],
+                },
+            ],
+        }
+        session_path = tmp_path / "session.json"
+        session_path.write_text(_json.dumps(session))
+        return session_path, sr
+
+    def test_default_crossfade_smooths_butt_up_boundary(self, tmp_path):
+        from apply_gain import apply_gain_per_clip
+        import soundfile as sf
+
+        session_path, sr = self._make_session(tmp_path)
+        out_dir = tmp_path / "out"
+
+        # No-normalize: don't change the constant values
+        apply_gain_per_clip(
+            session_json=session_path, output_dir=out_dir,
+            track_names=["TEST"], normalize=False, crossfade_ms=5.0,
+        )
+
+        assembled, _ = sf.read(str(out_dir / "TEST" / "assembled.wav"))
+        # The clip boundary is at sample sr (1 sec). Inspect a window around it.
+        boundary = sr
+        # With a 5 ms crossfade (240 samples at 48k), the discontinuity should
+        # be spread over the boundary window — no single-sample 1.0-magnitude
+        # jump. The actual jump magnitude at any single sample should be much
+        # smaller than the no-crossfade case (which would have a step of 1.0).
+        diffs = np.abs(np.diff(assembled))
+        max_step = float(np.max(diffs))
+        assert max_step < 0.10, (
+            f"crossfade did not smooth the boundary: max step {max_step:.4f} "
+            f"(expected < 0.10 with a 5 ms fade)"
+        )
+
+    def test_no_crossfade_keeps_the_click(self, tmp_path):
+        from apply_gain import apply_gain_per_clip
+        import soundfile as sf
+
+        session_path, sr = self._make_session(tmp_path)
+        out_dir = tmp_path / "out"
+
+        apply_gain_per_clip(
+            session_json=session_path, output_dir=out_dir,
+            track_names=["TEST"], normalize=False, crossfade_ms=0.0,
+        )
+
+        assembled, _ = sf.read(str(out_dir / "TEST" / "assembled.wav"))
+        diffs = np.abs(np.diff(assembled))
+        max_step = float(np.max(diffs))
+        # With crossfade disabled, the 1.0-magnitude jump must survive in some
+        # form (>= 0.9 sample-to-sample step).
+        assert max_step > 0.9, (
+            f"no-crossfade should preserve the discontinuity: max step {max_step:.4f}"
+        )
+
+    def test_crossfade_does_not_move_clip_position(self, tmp_path):
+        """The crossfade smooths the boundary but does NOT shift the clip start —
+        the engineer's chosen rhythmic position is preserved."""
+        from apply_gain import apply_gain_per_clip
+        import soundfile as sf
+
+        session_path, sr = self._make_session(tmp_path)
+        out_dir = tmp_path / "out"
+        apply_gain_per_clip(
+            session_json=session_path, output_dir=out_dir,
+            track_names=["TEST"], normalize=False, crossfade_ms=5.0,
+        )
+
+        assembled, _ = sf.read(str(out_dir / "TEST" / "assembled.wav"))
+        # Before the fade window (well before sr), the signal must be +0.5
+        sample_well_before = sr - sr // 100  # 10 ms before boundary
+        assert abs(assembled[sample_well_before] - 0.5) < 0.01, (
+            f"clip A's level changed before the fade region: {assembled[sample_well_before]}"
+        )
+        # After the fade window, the signal must be -0.5
+        sample_well_after = sr + sr // 100  # 10 ms after boundary
+        assert abs(assembled[sample_well_after] - (-0.5)) < 0.01, (
+            f"clip B's level changed after the fade region: {assembled[sample_well_after]}"
+        )

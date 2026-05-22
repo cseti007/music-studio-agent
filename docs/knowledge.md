@@ -55,6 +55,56 @@ and silence), then immediately run `apply_gain --per-channel` on the assembled r
 a single uniform gain. This preserves the natural dynamics of the performance across the whole
 take and avoids artificial level steps at edit boundaries.
 
+**The same rule applies to bass DI tracks** — the bassist plays one continuous take, the studio
+splits it into many clips for editorial slip-edits (small rhythmic adjustments where chunks of
+the take get nudged ±10-50 ms relative to the click), and per-clip LUFS normalisation would
+amplify those tiny edits into audible level jumps. Bass workflow: `apply_gain --per-clip
+--no-normalize` (assemble at source levels with crossfades at boundaries), then `apply_gain
+--per-channel --target-lufs -22` for uniform gain. The -22 LUFS target gives the downstream
+comp 4 dB of headroom so the +5 dB auto makeup doesn't push the post-comp peak into the
+ceiling — pass `--makeup 0` on `apply_compression` if the comp's auto-makeup still pushes to
+0 dBFS (autotrim compensates the lost level at the bus output).
+
+### Clip-boundary crossfades (apply_gain --per-clip)
+
+`apply_gain --per-clip` applies a default **5 ms equal-power crossfade at every butt-up clip
+boundary**. This matches Pro Tools / Logic / Reaper default behaviour and is REQUIRED — without
+it, engineer slip-edits (where the studio shifted a clip by a few ms to lock it to the click)
+leave a sample-level source-discontinuity at the cut point, which the ear hears as a tick or
+"reccsenés". The crossfade smooths the join over 5 ms without moving the clip's rhythmic
+position (the engineer's edit timing is preserved).
+
+Override with `--crossfade-ms 0` to disable, or set a longer time (e.g. `--crossfade-ms 10`)
+if 5 ms is not enough on a particular session. The crossfade tolerance allows up to ±1 ms of
+overlap or gap between adjacent clips to still be treated as a butt-up boundary — many DAWs
+write clip endpoints with sub-millisecond rounding.
+
+### Polarity flip on bass DI PEDAL chains
+
+Many bass pedal chains (overdrive, fuzz, DI-box outputs, especially anything that re-amps
+through a transformer) **invert the polarity** of the signal relative to the clean DI. If
+both the clean DI and the pedal-output DI are recorded in parallel into the interface, they
+end up anti-phase. When mixed together their fundamentals **cancel destructively**: bass body
+disappears, what's left is the high-frequency *difference* between the two takes, which
+sounds bright and clicky.
+
+How to detect: load both bass tracks (clean DI + pedal DI) into the same bus. After per-clip
+gain + EQ + comp, measure the correlation between them. A correlation near **-1.0** indicates
+polarity inversion. (For non-inverted signals expect correlation near +0.5..+0.9 because the
+pedal chain changes the tone but the fundamentals still align.)
+
+Fix: add `"polarity_flip": true` to the PEDAL track in mix_config.json. Render reads this
+field per-track and inverts the signal before summing.
+
+**Known limitation of `align_phase.py`**: its polarity detector compares correlation peak
+SIGN, but does this on a short cross-correlation window (10 s by default). When the two
+signals have heavily different tone (pedal-chain compression / EQ + clean DI), the
+correlation peak is weak (e.g. correlation_score ~0.15) and the polarity check can return
+False even when the underlying signals are anti-phase. Until the detector is upgraded to
+include a separate low-frequency-only polarity test at lag=0, **manually set
+`polarity_flip: true` in mix_config.json** when the bus dry-sum LUFS is mysteriously low
+(20+ dB below the per-track LUFS — the autotrim recompute output will show this).
+
 ### Identifying clips that belong together
 
 #### If the session was recorded in a DAW with a session file (e.g. Pro Tools .ptx):

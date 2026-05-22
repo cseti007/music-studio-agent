@@ -193,6 +193,7 @@ def _assemble_track_with_clip_gain(
     target_lufs: float,
     peak_ceiling_db: float,
     normalize: bool = True,
+    crossfade_ms: float = 5.0,
 ) -> dict:
     sr = session["sample_rate"]
     duration = session["duration_samples"]
@@ -215,8 +216,52 @@ def _assemble_track_with_clip_gain(
     skipped = 0
     clips_limited = 0
 
-    for clip in clips:
-        data = _read_clip(clip["source_file"], clip["source_offset_sample"], clip["length_samples"], sr)
+    # Constant-power crossfade envelopes for butt-up clip boundaries (no overlap
+    # in the source, just adjacent timeline positions). The DAW (Pro Tools/Logic/
+    # etc.) applies these by default — without them, slip-edit boundaries leave
+    # a sample-level discontinuity that the ear hears as a click.
+    xfade_samples = max(0, int(round(crossfade_ms * sr / 1000.0)))
+    if xfade_samples > 0:
+        _xf_t = np.linspace(0.0, 1.0, xfade_samples)
+        _fade_in_env = np.sin(np.pi / 2.0 * _xf_t)
+        _fade_out_env = np.cos(np.pi / 2.0 * _xf_t)
+    else:
+        _fade_in_env = None
+        _fade_out_env = None
+
+    # Sort clips by timeline position so we can detect butt-up boundaries
+    # between adjacent clips (different from overlapping clips, which are
+    # already handled by the additive write below).
+    clips_sorted = sorted(clips, key=lambda c: c["timeline_start_sample"])
+    crossfades_applied = 0
+
+    # Tolerance ~ one crossfade length: clips that "almost" butt up (1-2 ms
+    # of small overlap or gap from engineer slip-edits at the cut point) still
+    # benefit from a crossfade. With a stricter tolerance, the very clicks
+    # we're trying to smooth slip through.
+    butt_up_tolerance = max(1, xfade_samples)
+
+    def _butts_up(prev_clip, this_clip) -> bool:
+        prev_end = prev_clip["timeline_start_sample"] + prev_clip["length_samples"]
+        this_start = this_clip["timeline_start_sample"]
+        return abs(prev_end - this_start) <= butt_up_tolerance
+
+    for i, clip in enumerate(clips_sorted):
+        has_prev_boundary = (xfade_samples > 0 and i > 0
+                             and _butts_up(clips_sorted[i - 1], clip))
+        has_next_boundary = (xfade_samples > 0 and i + 1 < len(clips_sorted)
+                             and _butts_up(clip, clips_sorted[i + 1]))
+
+        # Read extra samples past the clip end if there's a butt-up neighbor —
+        # the extension supplies the fade-out tail. If the source doesn't have
+        # enough samples past the original end, _read_clip returns fewer.
+        extra_request = xfade_samples if has_next_boundary else 0
+        data = _read_clip(
+            clip["source_file"],
+            clip["source_offset_sample"],
+            clip["length_samples"] + extra_request,
+            sr,
+        )
 
         if data.shape[1] != n_channels:
             if data.shape[1] == 1 and n_channels > 1:
@@ -228,6 +273,17 @@ def _assemble_track_with_clip_gain(
             data, _, _, limited = _apply_clip_gain(data, sr, target_lufs, peak_ceiling_db)
             if limited:
                 clips_limited += 1
+
+        # Crossfade: fade-in the first xfade_samples (if previous neighbour
+        # exists) and fade-out the last xfade_samples (if next neighbour exists).
+        # The two faded envelopes from adjacent clips sum to constant power in
+        # the overlap window.
+        if has_prev_boundary and data.shape[0] >= xfade_samples:
+            data[:xfade_samples] = data[:xfade_samples] * _fade_in_env[:, None]
+            crossfades_applied += 1
+        if has_next_boundary and data.shape[0] >= xfade_samples:
+            n_tail = min(xfade_samples, data.shape[0])
+            data[-n_tail:] = data[-n_tail:] * _fade_out_env[-n_tail:][:, None]
 
         tl_start = clip["timeline_start_sample"]
         tl_end = tl_start + len(data)
@@ -296,6 +352,7 @@ def apply_gain_per_clip(
     target_lufs: float | None = None,
     peak_ceiling_db: float = DEFAULT_PEAK_CEILING,
     normalize: bool = True,
+    crossfade_ms: float = 5.0,
 ) -> list[dict]:
     cfg = _load_config().get("gain", {})
     if target_lufs is None:
@@ -321,11 +378,15 @@ def apply_gain_per_clip(
     results = []
     for track in selected:
         mode_label = f"target {target_lufs} LUFS" if normalize else "no normalize (original levels)"
+        xfade_label = f"crossfade {crossfade_ms} ms" if crossfade_ms > 0 else "no crossfade"
         print(
-            f"Assembling: {track['name']} ({len(track['clips'])} clips, {mode_label})...",
+            f"Assembling: {track['name']} ({len(track['clips'])} clips, {mode_label}, {xfade_label})...",
             file=sys.stderr,
         )
-        result = _assemble_track_with_clip_gain(track, data, output_dir, target_lufs, peak_ceiling_db, normalize=normalize)
+        result = _assemble_track_with_clip_gain(
+            track, data, output_dir, target_lufs, peak_ceiling_db,
+            normalize=normalize, crossfade_ms=crossfade_ms,
+        )
         results.append(result)
         print(json.dumps(result, indent=2))
 
@@ -452,6 +513,12 @@ def main() -> None:
         help="Assemble clips at original recording levels without per-clip LUFS normalization. "
              "Use for drums (single continuous take); follow up with --per-channel for uniform gain.",
     )
+    clip_group.add_argument(
+        "--crossfade-ms", type=float, default=5.0, metavar="MS",
+        help="Crossfade length in ms at butt-up clip boundaries (default: 5.0 ms — matches "
+             "Pro Tools / Logic default). Smooths source-discontinuity clicks at engineer "
+             "slip-edits. Set to 0 to disable.",
+    )
 
     # per-channel options
     chan_group = parser.add_argument_group("per-channel options")
@@ -481,6 +548,7 @@ def main() -> None:
             target_lufs=args.clip_target_lufs,
             peak_ceiling_db=args.peak_ceiling,
             normalize=not args.no_normalize,
+            crossfade_ms=args.crossfade_ms,
         )
 
     elif args.per_channel:
