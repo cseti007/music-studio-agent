@@ -695,7 +695,10 @@ class TestStyleCheck:
         # Non-drum, no L/R → center
         assert _detect_pan("GTR 1 FENDER.06") == 0.0
         assert _detect_pan("BASS DI CLEAN") == 0.0
-        assert _detect_pan("20221130 Téridő Ver&Refr tiszta") == 0.0
+        # Track name with no drum keyword, no L/R suffix, has unicode + numbers
+        # → center. (Tests that the unicode + arbitrary characters in a typical
+        # DAW export name don't accidentally trigger a pan rule.)
+        assert _detect_pan("20221130 Verse&Refrain take 1") == 0.0
 
     def test_modern_rock_style_uses_industry_hard_pan(self):
         """modern_rock convention (researched 2025): hard pan ≥ ±0.85 for

@@ -31,3 +31,7 @@ spectrograms/
 
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
+
+# Personal project trackers — kept locally, not published
+CHANGELOG.md
+BACKLOG.md
