@@ -324,6 +324,76 @@ a bus level problem. If the master limiter still works too hard:
 
 ---
 
+### Mix vs master separation — premaster handoff
+
+**Invariant:** `render_mix` produces a clean **premaster**, NOT a finished
+master. The master phase (`master_mix.py`) owns LUFS normalization, brick-
+wall limiting, clipper, ISP correction, M/S processing, and dither.
+
+**Why.** Stacking mastering moves at the mix stage and then running them
+again at the master stage produces a **two-stage limiter cascade**: every
+transient is flattened twice, which is the literal definition of "doubled
+limiting distortion" that mastering forums consistently warn against.
+This was an actual bug in the pipeline before — the user reported "néha
+túlvezérel egy-két hangszert", and the trace was: drum bus peak at +1.8
+dBFS → mix master sum +3.1 dBFS → mix limiter does ~5 dB peak GR → master
+clipper -2 dB → master limiter -1.5 dB ISP correction → master post-LUFS
+-2.9 dB. Cascading peak-shaper at both stages on every chorus transient.
+
+**The premaster handoff numbers** (matches SOS / LANDR / iZotope / Major
+Mixing 2025–2026 best practice):
+
+| Stage | Integrated LUFS | Peak / TP | Limiter? |
+|---|---|---|---|
+| **Premaster** (`mix.wav`) | ~-18 LUFS (emergent from autotrim + glue comp) | **-3 dBFS peak**, no TP ceiling | **NO** |
+| Master (`master_<format>.wav`) | -14 LUFS (Spotify), -16 (Apple), -10 (CD), -12 (vinyl_pre) | -1 dBTP per format | YES |
+
+**Premaster chain** at the master block (post-bus-sum):
+1. Glue comp — **gentle** (1.5:1 to 2:1 ratio, threshold -10 dB, 1-2 dB GR average)
+2. Master EQ — surgical tonal only (HP, gentle shelves). NOT a loudness shaper.
+3. **Peak normalize to `peak_target_dbfs` (-3 dBFS default)** — single scalar
+   gain, no limiter, no clipper. Preserves all dynamics; the master phase
+   does the loudness work.
+
+**What is FORBIDDEN at the mix-render stage**:
+- `Limiter` (brick-wall, ISP) — mastering's job
+- LUFS normalize to a delivery target (-14, -16, etc.) — mastering's job
+- Soft / hard clipper — mastering tool (a "make-it-hit" colorant)
+- M/S processing — mastering / wide-stage tool
+- Multiband comp — mastering tool
+
+**What is OK at the mix-render stage**:
+- Subtle bus glue comp (1-2 dB GR) — mix-phase bus shaping, not loudness
+- Surgical EQ (HP @30, gentle shelves, narrow notches) — tonal, not loudness
+- Per-bus comp / EQ / sat / reverb — bus-level processing is part of mixing
+- Peak normalize at the end — just a gain stage, not a transformation
+
+**Drum bus comp guidance** (Music Guy Mixing 2025): 1-2 dB GR average, 2-3 dB
+max at busiest moments. The default preset is `comp_drum_bus_gentle` (2:1,
+-8 dB threshold). Switch to the harder `comp_drum_bus` (4:1, -10 dB) only if
+the kit *genuinely* needs heavier glue; otherwise let mastering's glue comp
+do the song-level tightening.
+
+**Opt-out** (legacy): set `master.premaster_mode: false` in mix_config.json
+to restore the historical combined mix+master chain (with limiter, LUFS
+norm, clipper). Use ONLY for standalone listening / demo bounces that
+won't be mastered downstream.
+
+**Detection.** `mix_report.json` carries the `mix_stage` field ("premaster"
+or "master"). `mix_health.py` autodetects this and applies the correct gate
+thresholds (premaster: ±2 LU around -18 LUFS, peak ≤ -3 dBFS; master:
+±0.5 LU around -14 LUFS, TP ≤ -1 dBTP).
+
+**Sources** (2025–2026 best practice):
+- Sound on Sound: "Should I use limiters before the mix bus?" — NO
+- Sound on Sound: "Why shouldn't I use mastering limiting during mixing?" — doubled distortion
+- LANDR Pre-Mastering Guide — -16 LUFS, -6 to -3 dBFS peak
+- iZotope: Headroom for mixing and mastering
+- Mat Leffler-Schulman Mastering: "Should I Leave the Limiter on the Mix Buss Before Mastering?" — NO
+- Music Guy Mixing: Drum Bus — 1-2 dB GR average
+
+---
+
 ## Frequency Bands (reference)
 
 Used in analyze.py band RMS measurements:

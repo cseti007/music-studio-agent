@@ -1271,3 +1271,200 @@ class TestTapeSatRelevanceCheck:
             assert all("lra" in s.lower() or "LRA" in s for s in rel["issues"]), (
                 f"unexpected skip reason: {rel['issues']}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Premaster mode — render_mix does NOT bake mastering into the mix output.
+# ---------------------------------------------------------------------------
+
+def _write_synth_stem(path, target_lufs, duration_s=5.0, sr=48000, seed=0):
+    """Helper: write a stereo noise WAV calibrated to target_lufs."""
+    import soundfile as sf
+    import pyloudnorm as pyln
+    rng = np.random.default_rng(seed)
+    n = int(duration_s * sr)
+    sig = rng.standard_normal((n, 2)) * 0.1
+    meter = pyln.Meter(sr)
+    cur = meter.integrated_loudness(sig)
+    sig *= 10.0 ** ((target_lufs - cur) / 20.0)
+    sf.write(str(path), sig, sr, subtype="PCM_24")
+
+
+class TestPremasterMode:
+    """render_mix in premaster mode (default) MUST NOT apply a brick-wall
+    limiter, LUFS normalization to -14, clipper, or M/S processing. The
+    industry handoff to mastering is a clean buffer with peak headroom at
+    `master.peak_target_dbfs` (default -3 dBFS).
+    """
+
+    def _build_config(self, tmp_path, mix_dir, stem_paths, master_overrides=None):
+        cfg = {
+            "session_dir": str(tmp_path),
+            "output_dir": str(mix_dir),
+            "sample_rate": 48000,
+            "master": {"premaster_mode": True, "peak_target_dbfs": -3.0,
+                       **(master_overrides or {})},
+            "buses": {"drums": {"volume_db": 0.0, "auto_trim_db": 0.0,
+                                "parent_bus": None}},
+            "tracks": [
+                {"name": f"t{i}", "file": str(p), "active": True,
+                 "bus": "drums", "volume_db": 0.0, "pan": 0.0}
+                for i, p in enumerate(stem_paths)
+            ],
+        }
+        return cfg
+
+    def test_premaster_default_writes_no_limiter_field(self, tmp_path):
+        """A default --generate-config produces premaster_mode=true (no
+        lufs_target / true_peak_dbfs / clipper / ms keys)."""
+        import json as _json
+        from render_mix import generate_config
+
+        # Make a tracks dir with one fake stem so generate_config has
+        # something to scan.
+        tracks_dir = tmp_path / "tracks" / "KICK IN.05"
+        tracks_dir.mkdir(parents=True)
+        _write_synth_stem(tracks_dir / "assembled.wav", target_lufs=-18.0, seed=1)
+
+        out_cfg = tmp_path / "mix_config.json"
+        generate_config(tmp_path, out_cfg)
+        cfg = _json.loads(out_cfg.read_text())
+        assert cfg["master"].get("premaster_mode") is True
+        assert "peak_target_dbfs" in cfg["master"]
+        # The mastering-phase options must NOT be in the default emitted config
+        assert "lufs_target" not in cfg["master"], \
+            "default config should not bake a mastering LUFS target into the mix"
+        assert "true_peak_dbfs" not in cfg["master"]
+        assert "clipper" not in cfg["master"]
+        assert "ms" not in cfg["master"]
+
+    def test_premaster_mix_output_peak_is_at_target(self, tmp_path):
+        """In premaster mode, the mix.wav peak lands at peak_target_dbfs
+        (within rounding) — no limiter, just a single scalar gain."""
+        import json as _json
+        from render_mix import render_mix
+        import soundfile as sf
+        import pyloudnorm as pyln
+
+        # Make a synthetic drum stem with high crest (transient hits + noise)
+        stem = tmp_path / "stem.wav"
+        rng = np.random.default_rng(7)
+        n = 48000 * 5  # 5 sec
+        # Quiet noise floor + loud impulses every 0.5 sec → high crest
+        sig = rng.standard_normal((n, 2)) * 0.01
+        for i in range(0, n, 24000):
+            sig[i:i + 200] += 0.6 * np.sin(2 * np.pi * 80 * np.arange(200) / 48000)[:, None]
+        sf.write(str(stem), sig, 48000, subtype="PCM_24")
+
+        mix_dir = tmp_path / "mixes"
+        cfg_path = tmp_path / "mix_config.json"
+        cfg_path.write_text(_json.dumps(self._build_config(tmp_path, mix_dir, [stem])))
+
+        render_mix(cfg_path, output_wav=mix_dir / "mix.wav", render_stems=False)
+
+        # Read the rendered mix
+        data, sr = sf.read(str(mix_dir / "mix.wav"))
+        peak_db = 20.0 * np.log10(float(np.max(np.abs(data))) + 1e-12)
+        # Premaster target is -3 dBFS — allow ±0.3 dB for float rounding
+        assert abs(peak_db - (-3.0)) < 0.3, f"peak {peak_db:+.2f} dBFS, expected ~-3"
+
+        # mix_report.json should declare premaster stage
+        report = _json.loads((mix_dir / "mix_report.json").read_text())
+        assert report["mix_stage"] == "premaster"
+        assert report["lufs_target"] is None
+        assert report["true_peak_limit_dbfs"] is None
+        assert report["peak_target_dbfs"] == -3.0
+
+    def test_premaster_warns_and_ignores_mastering_options(self, tmp_path, capsys):
+        """If a legacy config still has clipper/ms/lufs_target keys, premaster
+        mode warns and skips them (does NOT silently apply mastering)."""
+        import json as _json
+        from render_mix import render_mix
+        import soundfile as sf
+
+        stem = tmp_path / "stem.wav"
+        _write_synth_stem(stem, target_lufs=-22.0, seed=2)
+
+        mix_dir = tmp_path / "mixes"
+        cfg_path = tmp_path / "mix_config.json"
+        legacy_master = {
+            "premaster_mode": True,
+            "peak_target_dbfs": -3.0,
+            # These should all be ignored with a warning:
+            "lufs_target": -14.0,
+            "true_peak_dbfs": -1.0,
+            "clipper": {"threshold_db": -1.0, "mode": "soft"},
+            "ms": {"side_gain_db": 1.0},
+        }
+        cfg_path.write_text(_json.dumps(
+            self._build_config(tmp_path, mix_dir, [stem], master_overrides=legacy_master)
+        ))
+
+        render_mix(cfg_path, output_wav=mix_dir / "mix.wav", render_stems=False)
+        captured = capsys.readouterr().out
+        assert "IGNORED" in captured or "premaster" in captured.lower()
+
+        # Verify no limiter was applied: peak still at the premaster target,
+        # not the mastering ceiling
+        data, sr = sf.read(str(mix_dir / "mix.wav"))
+        peak_db = 20.0 * np.log10(float(np.max(np.abs(data))) + 1e-12)
+        assert peak_db < -2.5, f"peak {peak_db:+.2f} should be at the premaster target, not the -1 dBTP mastering ceiling"
+
+    def test_legacy_mode_still_runs_full_master_chain(self, tmp_path):
+        """premaster_mode=false (opt-in) restores the historical mix+master
+        combined chain — limiter applied, LUFS-normalised to -14 etc."""
+        import json as _json
+        from render_mix import render_mix
+        import soundfile as sf
+        import pyloudnorm as pyln
+
+        stem = tmp_path / "stem.wav"
+        _write_synth_stem(stem, target_lufs=-22.0, seed=3, duration_s=6.0)
+
+        mix_dir = tmp_path / "mixes"
+        cfg_path = tmp_path / "mix_config.json"
+        legacy_master = {
+            "premaster_mode": False,
+            "lufs_target": -14.0,
+            "true_peak_dbfs": -1.0,
+            "comp": {"threshold_db": -10.0, "ratio": 1.5,
+                     "attack_ms": 30.0, "release_ms": 300.0},
+        }
+        cfg_path.write_text(_json.dumps(
+            self._build_config(tmp_path, mix_dir, [stem], master_overrides=legacy_master)
+        ))
+        render_mix(cfg_path, output_wav=mix_dir / "mix.wav", render_stems=False)
+
+        report = _json.loads((mix_dir / "mix_report.json").read_text())
+        assert report["mix_stage"] == "master"
+        assert report["lufs_target"] == -14.0
+        # The legacy chain hits the -14 LUFS target (within ~1 LU)
+        data, sr = sf.read(str(mix_dir / "mix.wav"))
+        lufs = float(pyln.Meter(sr).integrated_loudness(data))
+        assert abs(lufs - (-14.0)) < 1.5, f"legacy mode integrated LUFS {lufs:.2f}, expected ~-14"
+
+
+class TestMixHealthStageDetection:
+    """`mix_health._detect_mix_stage` reads mix_report.json next to the wav."""
+
+    def test_detect_premaster_from_report(self, tmp_path):
+        from mix_health import _detect_mix_stage
+        import json as _json
+        wav = tmp_path / "mix.wav"
+        wav.write_bytes(b"")
+        (tmp_path / "mix_report.json").write_text(_json.dumps({"mix_stage": "premaster"}))
+        assert _detect_mix_stage(wav) == "premaster"
+
+    def test_detect_master_default_when_no_report(self, tmp_path):
+        from mix_health import _detect_mix_stage
+        wav = tmp_path / "mix.wav"
+        wav.write_bytes(b"")
+        assert _detect_mix_stage(wav) == "master"  # legacy fallback
+
+    def test_detect_master_when_report_lacks_mix_stage_field(self, tmp_path):
+        from mix_health import _detect_mix_stage
+        import json as _json
+        wav = tmp_path / "mix.wav"
+        wav.write_bytes(b"")
+        (tmp_path / "mix_report.json").write_text(_json.dumps({"other_field": 42}))
+        assert _detect_mix_stage(wav) == "master"

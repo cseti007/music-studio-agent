@@ -214,7 +214,12 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         return float(style_bus_defaults.get(name, 0.0))
 
     buses = {
-        "drums":  {"volume_db": _bus_default("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus", "parent_bus": None},
+        # Default to comp_drum_bus_gentle (2:1, -8 dB, ~2 dB GR) per modern
+        # industry guidance (Music Guy Mixing 2025: "1-2 dB GR average, 2-3 dB
+        # max at busiest moments"). The harder comp_drum_bus (4:1, -10 dB,
+        # ~5 dB GR) is too aggressive for a default — switch manually if a
+        # session genuinely needs heavier glue.
+        "drums":  {"volume_db": _bus_default("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus_gentle", "parent_bus": None},
         "bass":   {"volume_db": _bus_default("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
         **{name: {**cfg, "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
         "guitar": {"volume_db": _bus_default("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
@@ -238,8 +243,12 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         "output_dir": str(mixes_dir),
         "sample_rate": sr,
         "master": {
-            "lufs_target": -14.0,
-            "true_peak_dbfs": -2.0,
+            # Premaster mode: render_mix produces a CLEAN mix.wav with peak
+            # headroom at peak_target_dbfs (no limiter, no LUFS norm). The
+            # master phase (master_mix.py) owns LUFS target + true peak
+            # ceiling per delivery format. Industry standard handoff.
+            "premaster_mode": True,
+            "peak_target_dbfs": -3.0,
         },
         "buses": buses,
         "tracks": tracks,
@@ -1228,12 +1237,32 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
               f"att={master_comp.get('attack_ms', 10.0)}ms  rel={master_comp.get('release_ms', 300.0)}ms  "
               f"-> GR {gr_lufs:+.1f} LUFS  peak {peak_post_comp:.1f} dBFS {_peak_verdict(peak_post_comp)}")
 
-    # Master clipper (optional). Place between glue comp and EQ — clipper
-    # shapes peaks musically; the brick-wall limiter at the end only catches
-    # what's left. Skipped automatically if relevance_check flags issues.
+    # Premaster mode: the mix output is intended as a clean handoff to the
+    # master phase. Industry best practice (SOS, LANDR, iZotope, Mat Leffler-
+    # Schulman) — premaster should NOT have a brick-wall limiter, clipper,
+    # M/S, or LUFS normalization to -14 baked in. Those are mastering's job;
+    # stacking them here creates a two-stage limiter cascade that flattens
+    # transients twice. Premaster target: integrated ~-18 LUFS (emergent
+    # from the autotrim + glue comp), peak at master.peak_target_dbfs
+    # (default -3 dBFS, configurable). Opt out with `"premaster_mode": false`
+    # in master_cfg to get the legacy combined mix+master chain.
+    premaster_mode = bool(master_cfg.get("premaster_mode", True))
     clipper_cfg = master_cfg.get("clipper")
+    ms_cfg = master_cfg.get("ms")
     clipper_report: dict | None = None
-    if clipper_cfg:
+    ms_report: dict | None = None
+
+    if premaster_mode:
+        # Warn if mastering-style options leaked in from a legacy config —
+        # they are silently ignored in premaster mode to keep the handoff clean.
+        if clipper_cfg or ms_cfg or master_cfg.get("lufs_target") is not None \
+                or master_cfg.get("true_peak_dbfs") is not None:
+            print("  [premaster] clipper/ms/lufs_target/true_peak_dbfs in config "
+                  "— IGNORED (these are mastering-phase options). "
+                  "Set master.premaster_mode=false to apply them.")
+
+    # Master clipper (legacy / opt-in only — premaster_mode skips it)
+    if not premaster_mode and clipper_cfg:
         rel = _clipper_relevance_check(master, sr)
         clipper_report = {"settings": clipper_cfg, "relevance_check": rel}
         if rel["recommend_skip"]:
@@ -1253,12 +1282,8 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                   f"knee {knee:.1f} dB  -> peak {peak_pre:.1f} → {peak_post:.1f} dBFS {_peak_verdict(peak_post)}")
             clipper_report["applied"] = True
 
-    # M/S processing (optional). Place AFTER glue comp + clipper, BEFORE
-    # final master EQ — gives M/S the cleanest input to widen, then the
-    # master EQ still has the last spectral say.
-    ms_cfg = master_cfg.get("ms")
-    ms_report: dict | None = None
-    if ms_cfg:
+    # M/S processing (legacy / opt-in only)
+    if not premaster_mode and ms_cfg:
         master, ms_report = _apply_ms_processing(master, sr, ms_cfg)
         if ms_report.get("applied"):
             mid_g = ms_cfg.get("mid_gain_db", 0.0)
@@ -1271,10 +1296,10 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             issues = ms_report["relevance_check"]["issues"]
             print(f"  M/S: SKIPPED — {'; '.join(issues)}")
 
-    # Master bus EQ (optional, zero-phase)
+    # Master bus EQ (optional, zero-phase). Subtle tonal shaping is OK in
+    # premaster — it's not loudness-focused processing.
     master_eq = master_cfg.get("eq")
     if master_eq:
-        peak_pre_eq = _peak_db(master)
         master = _apply_master_eq(master, sr, master_eq)
         peak_post_eq = _peak_db(master)
         master_peaks["after_eq"] = round(peak_post_eq, 2)
@@ -1285,67 +1310,97 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         )
         print(f"  Master EQ: {filter_desc}  -> peak {peak_post_eq:.1f} dBFS {_peak_verdict(peak_post_eq)}")
 
-    # LUFS normalization
-    target_lufs = master_cfg.get("lufs_target", -14.0)
-    loudness = meter.integrated_loudness(master.T)
-    print(f"  Integrated loudness: {loudness:.1f} LUFS -> target {target_lufs} LUFS")
-    if np.isfinite(loudness):
-        gain_db = target_lufs - loudness
-        master *= 10.0 ** (gain_db / 20.0)
-        peak_post_norm = _peak_db(master)
-        master_peaks["after_lufs_norm"] = round(peak_post_norm, 2)
-        print(f"  Applied gain: {gain_db:+.1f} dB  -> peak {peak_post_norm:.1f} dBFS {_peak_verdict(peak_post_norm)}")
-
-    # True peak limiting: pedalboard.Limiter handles sample peak; we then
-    # measure ISP at 4x oversampling and scale down if the codec-relevant
-    # true peak still exceeds the ceiling.
-    tp_limit = master_cfg.get("true_peak_dbfs", -2.0)
-    board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
-    master = board(master.astype(np.float32), sr).astype(np.float32)
-
-    sample_peak_after = _peak_db(master)
-    tp_measured = _measure_true_peak_dbfs(master)
-    if tp_measured > tp_limit:
-        isp_scale_db = tp_limit - tp_measured
-        master *= 10.0 ** (isp_scale_db / 20.0)
-        tp_final = tp_limit
+    # Branch: premaster vs legacy master chain
+    if premaster_mode:
+        # Peak normalize to the configured target (default -3 dBFS) — a single
+        # scalar gain across the buffer, NO limiter / clipper. Preserves
+        # transients perfectly; just lowers the level so the master phase
+        # receives clean headroom.
+        peak_target = float(master_cfg.get("peak_target_dbfs", -3.0))
+        peak_target_lin = 10.0 ** (peak_target / 20.0)
+        current_peak_lin = float(np.max(np.abs(master)))
+        if current_peak_lin > 1e-10:
+            scale = peak_target_lin / current_peak_lin
+            scale_db = 20.0 * np.log10(scale)
+            master = (master * scale).astype(np.float32)
+            peak_final_sample = _peak_db(master)
+            print(f"  Premaster peak normalize: scale {scale_db:+.2f} dB -> "
+                  f"peak {peak_final_sample:.2f} dBFS")
+        loudness_final = float(meter.integrated_loudness(master.T))
+        tp_final = float(_measure_true_peak_dbfs(master))
         sample_peak_after = _peak_db(master)
-        print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
-              f"true {tp_measured:.2f} dBTP -> {tp_final:.2f} dBTP "
-              f"(ISP correction {isp_scale_db:+.2f} dB)")
+        master_peaks["after_lufs_norm"] = None
+        master_peaks["after_limiter"] = None
+        master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
+        master_peaks["final_true_peak"] = round(tp_final, 2)
+        # Verdict for a premaster: peak should be in the -6..-3 dBFS window
+        # (industry standard handoff). Use a relaxed verdict here.
+        if sample_peak_after > -1.0:
+            verdict = "[CLIP]"
+        elif sample_peak_after > -2.0:
+            verdict = "[WARN]"
+        else:
+            verdict = "[OK]"
+        master_peaks["verdict"] = verdict
+        print(f"  Premaster verdict: {verdict}  "
+              f"(sample {sample_peak_after:.2f} dBFS, true {tp_final:.2f} dBTP, "
+              f"integrated {loudness_final:.2f} LUFS)")
+        loudness = loudness_final
+        peak_final = tp_final
     else:
-        tp_final = tp_measured
-        print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
-              f"true {tp_final:.2f} dBTP")
-    master_peaks["after_limiter"] = round(sample_peak_after, 2)
-    peak_final = tp_final
+        # LEGACY MASTER CHAIN — kept for opt-in via premaster_mode=false.
+        # Identical to the pre-premaster-mode behavior.
+        target_lufs = master_cfg.get("lufs_target", -14.0)
+        loudness = meter.integrated_loudness(master.T)
+        print(f"  Integrated loudness: {loudness:.1f} LUFS -> target {target_lufs} LUFS")
+        if np.isfinite(loudness):
+            gain_db = target_lufs - loudness
+            master *= 10.0 ** (gain_db / 20.0)
+            peak_post_norm = _peak_db(master)
+            master_peaks["after_lufs_norm"] = round(peak_post_norm, 2)
+            print(f"  Applied gain: {gain_db:+.1f} dB  -> peak {peak_post_norm:.1f} dBFS {_peak_verdict(peak_post_norm)}")
 
-    # Post-limiter LUFS correction. pedalboard.Limiter applies automatic
-    # makeup gain that pushes sample peak up to the threshold, so the
-    # post-limiter loudness drifts above target. Re-measure and re-apply
-    # gain if the actual LUFS deviates by more than 0.3 LU, while keeping
-    # true peak within the ceiling.
-    loudness_post = meter.integrated_loudness(master.T)
-    if np.isfinite(loudness_post):
-        delta_post = target_lufs - loudness_post
-        if abs(delta_post) > 0.3:
-            current_tp = _measure_true_peak_dbfs(master)
-            headroom_db = tp_limit - current_tp
-            corrected_gain_db = delta_post if delta_post < 0 else min(delta_post, headroom_db)
-            master *= 10.0 ** (corrected_gain_db / 20.0)
-            print(f"  Post-limiter LUFS: {loudness_post:.2f} -> applying {corrected_gain_db:+.2f} dB "
-                  f"(target {target_lufs}, headroom {headroom_db:+.2f} dB)")
-            loudness_post = meter.integrated_loudness(master.T)
-            peak_final = _measure_true_peak_dbfs(master)
+        tp_limit = master_cfg.get("true_peak_dbfs", -2.0)
+        board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
+        master = board(master.astype(np.float32), sr).astype(np.float32)
+
+        sample_peak_after = _peak_db(master)
+        tp_measured = _measure_true_peak_dbfs(master)
+        if tp_measured > tp_limit:
+            isp_scale_db = tp_limit - tp_measured
+            master *= 10.0 ** (isp_scale_db / 20.0)
+            tp_final = tp_limit
             sample_peak_after = _peak_db(master)
-            master_peaks["after_limiter"] = round(sample_peak_after, 2)
-    loudness = loudness_post
+            print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
+                  f"true {tp_measured:.2f} dBTP -> {tp_final:.2f} dBTP "
+                  f"(ISP correction {isp_scale_db:+.2f} dB)")
+        else:
+            tp_final = tp_measured
+            print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
+                  f"true {tp_final:.2f} dBTP")
+        master_peaks["after_limiter"] = round(sample_peak_after, 2)
+        peak_final = tp_final
 
-    # Final master verdict uses true peak (codec-relevant) + sample peak.
-    master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
-    master_peaks["final_true_peak"] = round(peak_final, 2)
-    master_peaks["verdict"] = _peak_verdict(sample_peak_after, peak_final)
-    print(f"  Master verdict: {master_peaks['verdict']}  (sample {sample_peak_after:.1f} dBFS, true {peak_final:.1f} dBTP)")
+        loudness_post = meter.integrated_loudness(master.T)
+        if np.isfinite(loudness_post):
+            delta_post = target_lufs - loudness_post
+            if abs(delta_post) > 0.3:
+                current_tp = _measure_true_peak_dbfs(master)
+                headroom_db = tp_limit - current_tp
+                corrected_gain_db = delta_post if delta_post < 0 else min(delta_post, headroom_db)
+                master *= 10.0 ** (corrected_gain_db / 20.0)
+                print(f"  Post-limiter LUFS: {loudness_post:.2f} -> applying {corrected_gain_db:+.2f} dB "
+                      f"(target {target_lufs}, headroom {headroom_db:+.2f} dB)")
+                loudness_post = meter.integrated_loudness(master.T)
+                peak_final = _measure_true_peak_dbfs(master)
+                sample_peak_after = _peak_db(master)
+                master_peaks["after_limiter"] = round(sample_peak_after, 2)
+        loudness = loudness_post
+
+        master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
+        master_peaks["final_true_peak"] = round(peak_final, 2)
+        master_peaks["verdict"] = _peak_verdict(sample_peak_after, peak_final)
+        print(f"  Master verdict: {master_peaks['verdict']}  (sample {sample_peak_after:.1f} dBFS, true {peak_final:.1f} dBTP)")
 
     # Write output
     if output_wav is None:
@@ -1362,10 +1417,17 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     report = {
         "output": str(output_wav),
         "stage": stage,
+        "mix_stage": "premaster" if premaster_mode else "master",
         "active_tracks": len(active),
         "buses": list(processed.keys()),
-        "lufs_target": target_lufs,
-        "true_peak_limit_dbfs": tp_limit,
+        # In premaster mode lufs_target / true_peak_limit_dbfs are not applied;
+        # mastering owns those numbers. Reported here only for legacy mode.
+        "lufs_target": (None if premaster_mode
+                        else master_cfg.get("lufs_target", -14.0)),
+        "true_peak_limit_dbfs": (None if premaster_mode
+                                 else master_cfg.get("true_peak_dbfs", -2.0)),
+        "peak_target_dbfs": (float(master_cfg.get("peak_target_dbfs", -3.0))
+                             if premaster_mode else None),
         "integrated_lufs": round(loudness, 2) if np.isfinite(loudness) else None,
         "true_peak_dbtp": round(peak_final, 2),
         "sample_peak_dbfs": round(sample_peak_after, 2),

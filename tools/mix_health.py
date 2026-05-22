@@ -195,7 +195,22 @@ def _third_octave_psd_db(mono: np.ndarray, sr: int) -> dict[float, float]:
 # ---------------------------------------------------------------------------
 
 def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
-                      lufs_target: float, tp_ceiling: float) -> dict:
+                      lufs_target: float, tp_ceiling: float,
+                      stage_targets: dict | None = None) -> dict:
+    """Stage-aware LUFS / true-peak / LRA verdict.
+
+    `stage_targets` (from `_STAGE_TARGETS`) controls the tolerance bands —
+    premaster handoff allows ±2 LUFS / ±2 dB peak slop, master is tighter.
+    Falls back to the historical mastering numbers (±0.5 LU green / ±1.5
+    yellow / TP within 1 dB of ceiling) if `stage_targets` is None.
+    """
+    if stage_targets is None:
+        stage_targets = {
+            "lufs_tolerance_green": _TARGETS["lufs_tolerance_db"],
+            "lufs_tolerance_yellow": 1.5,
+            "tp_yellow_band_db": 1.0,
+        }
+
     meter = pyln.Meter(sr)
     try:
         lufs = float(meter.integrated_loudness(data if data.shape[1] > 1 else mono))
@@ -210,10 +225,11 @@ def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
     # Verdicts
     lufs_err = abs(lufs - lufs_target)
     lufs_v = _verdict(
-        green=lufs_err <= _TARGETS["lufs_tolerance_db"],
-        yellow=lufs_err <= 1.5,
+        green=lufs_err <= stage_targets["lufs_tolerance_green"],
+        yellow=lufs_err <= stage_targets["lufs_tolerance_yellow"],
     )
-    tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 1.0)
+    tp_yellow_band = stage_targets["tp_yellow_band_db"]
+    tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + tp_yellow_band)
     lra_v = _verdict(green=lra >= _TARGETS["lra_min_lu"], yellow=lra >= 4.0)
 
     return {
@@ -452,10 +468,48 @@ def _render_text(report: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+def _detect_mix_stage(mix_path: Path) -> str:
+    """Read mix_report.json next to the mix.wav to detect premaster vs master
+    stage. Falls back to 'master' (legacy default) if no report is found or
+    the field is missing — this preserves old behavior for pre-premaster-mode
+    sessions.
+    """
+    report_path = mix_path.with_name(mix_path.stem + "_report.json")
+    if not report_path.exists():
+        return "master"
+    try:
+        d = json.loads(report_path.read_text(encoding="utf-8"))
+        return str(d.get("mix_stage", "master"))
+    except (OSError, json.JSONDecodeError):
+        return "master"
+
+
+# Stage-specific gates. The premaster gates match modern industry handoff
+# practice (SOS, LANDR, iZotope, Major Mixing): integrated ~-18 LUFS with
+# ±2 LU tolerance, peak headroom at -3 dBFS, no brick-wall expected.
+_STAGE_TARGETS = {
+    "premaster": {
+        "lufs_target": -18.0,
+        "lufs_tolerance_green": 2.0,
+        "lufs_tolerance_yellow": 4.0,
+        "tp_ceiling_dbtp": -3.0,
+        "tp_yellow_band_db": 2.0,
+    },
+    "master": {
+        "lufs_target": -14.0,
+        "lufs_tolerance_green": 0.5,
+        "lufs_tolerance_yellow": 1.5,
+        "tp_ceiling_dbtp": -1.0,
+        "tp_yellow_band_db": 1.0,
+    },
+}
+
+
 def mix_health(session_dir: Path, output_dir: Path,
                reference: Path | None = None,
-               lufs_target: float = -14.0,
-               tp_ceiling: float = -1.0) -> dict:
+               lufs_target: float | None = None,
+               tp_ceiling: float | None = None,
+               target_stage: str | None = None) -> dict:
     # Locate the mix
     mix_candidates = [
         session_dir / "mixes" / "mix.wav",
@@ -468,12 +522,24 @@ def mix_health(session_dir: Path, output_dir: Path,
             f"Run render_mix --render first."
         )
 
+    # Resolve stage + targets. CLI `--lufs-target` / `--tp-ceiling` override
+    # the stage defaults if provided. `--target-stage` overrides autodetect.
+    stage = target_stage or _detect_mix_stage(mix_path)
+    if stage not in _STAGE_TARGETS:
+        stage = "master"
+    sg = _STAGE_TARGETS[stage]
+    effective_lufs_target = lufs_target if lufs_target is not None else sg["lufs_target"]
+    effective_tp_ceiling = tp_ceiling if tp_ceiling is not None else sg["tp_ceiling_dbtp"]
+    print(f"Mix stage: {stage} (LUFS target {effective_lufs_target}, "
+          f"TP ceiling {effective_tp_ceiling} dBTP)", flush=True)
+
     print(f"Reading {mix_path}...", flush=True)
     data, sr = sf.read(str(mix_path), always_2d=True)
     mono = data.mean(axis=1).astype(np.float64)
 
     print("  [1/5] Loudness...", flush=True)
-    loudness = _loudness_section(mono, data, sr, lufs_target, tp_ceiling)
+    loudness = _loudness_section(mono, data, sr, effective_lufs_target, effective_tp_ceiling,
+                                 stage_targets=sg)
     print("  [2/5] Stereo...", flush=True)
     stereo = _stereo_section(data, sr)
     print("  [3/5] Tonal balance...", flush=True)
@@ -513,10 +579,16 @@ def main() -> None:
     )
     parser.add_argument("--reference", type=Path, default=None,
                         help="Optional reference WAV for tonal-balance comparison")
-    parser.add_argument("--lufs-target", type=float, default=-14.0,
-                        help="LUFS target (default: -14 for streaming)")
-    parser.add_argument("--tp-ceiling", type=float, default=-1.0,
-                        help="True peak ceiling in dBTP (default: -1.0)")
+    parser.add_argument("--lufs-target", type=float, default=None,
+                        help="Override LUFS target. Default: autodetected from "
+                             "mix_report.json (premaster -> -18, master -> -14).")
+    parser.add_argument("--tp-ceiling", type=float, default=None,
+                        help="Override true peak ceiling in dBTP. Default: "
+                             "autodetected (premaster -> -3, master -> -1.0).")
+    parser.add_argument("--target-stage", choices=["premaster", "master"], default=None,
+                        help="Force the stage gates (skips autodetect from "
+                             "mix_report.json). 'premaster' = pre-mastering "
+                             "handoff numbers, 'master' = final delivery.")
     args = parser.parse_args()
 
     if not args.session_dir.is_dir():
@@ -530,6 +602,7 @@ def main() -> None:
         reference=args.reference,
         lufs_target=args.lufs_target,
         tp_ceiling=args.tp_ceiling,
+        target_stage=args.target_stage,
     )
 
 

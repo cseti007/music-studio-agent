@@ -73,7 +73,7 @@ alternative that avoids per-tool cold-start cost entirely — see its `--help`.
 | `tools/apply_pitch_correct.py` | Vocal pitch correction via librosa.pyin + psola PSOLA shifting + scale quantisation. Detects voice f0 frame-by-frame, snaps to the nearest scale degree of the chosen key/mode, blends original→quantised by `strength` (0=no correction, 1=full Auto-Tune snap). 7 modes: major, minor, harmonic_minor, dorian, mixolydian, chromatic, natural_minor. Presets: pitch_correct_subtle, pitch_correct_pop, pitch_correct_hard_tune. Requires the `psola` package. | `<file> --output-dir DIR --scale-root NOTE --scale-mode MODE [--strength 0-1] [--preset NAME] [--fmin HZ] [--fmax HZ]` |
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 LUFS before comparison; PSD is computed only on active frames (RMS > -45 dBFS) and pairs are time-gated (Jaccard co-activity < 0.15 suppressed). Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
-| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. **Per-bus auto-trim:** every bus carries `auto_trim_db` (calibration) alongside `volume_db` (style/user taste). Effective gain = `auto_trim_db + volume_db`. Calibration is computed during `--generate-config` (and refreshable via `--recompute-autotrim`) by measuring each bus's dry-sum LUFS in topological order so every bus's dry-sum output lands at -18 LUFS regardless of stem count. `volume_db` then layers a pure relative offset on top — drum dry-sum still sits at -18, but `vocal_lead` with `+2.0` sits at -16. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (**guarded — tape sat refuses if bus crest < 8 dB or LRA < 4 LU**), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]`. After flipping `active: true/false` on tracks, re-run `mix_config.json --recompute-autotrim` — surgical, only refreshes the per-bus calibration. |
+| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. **Per-bus auto-trim:** every bus carries `auto_trim_db` (calibration) alongside `volume_db` (style/user taste). Effective gain = `auto_trim_db + volume_db`. Calibration is computed during `--generate-config` (and refreshable via `--recompute-autotrim`) by measuring each bus's dry-sum LUFS in topological order so every bus's dry-sum output lands at -18 LUFS regardless of stem count. `volume_db` then layers a pure relative offset on top — drum dry-sum still sits at -18, but `vocal_lead` with `+2.0` sits at -16. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (**guarded — tape sat refuses if bus crest < 8 dB or LRA < 4 LU**), parallel_saturation (guarded), reverb_send. **Master chain — premaster mode (default):** glue comp + EQ + peak normalize to `peak_target_dbfs` (default -3 dBFS). NO clipper, NO M/S, NO LUFS-target normalization, NO brick-wall limiter. Industry handoff: mastering (`master_mix.py`) owns those moves. Legacy combined mix+master chain via `master.premaster_mode: false` opt-in (clipper / M/S / lufs_target / true_peak_dbfs only applied in this mode). Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]`. After flipping `active: true/false` on tracks, re-run `mix_config.json --recompute-autotrim` — surgical, only refreshes the per-bus calibration. |
 | `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
 | `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 6 chain presets (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_mb\|...] [--target-lufs N] [--tp-ceiling N]` |
 | `tools/style_check.py` | Grade a stereo mix against a named style profile — quantitative answer to "is this a modern_rock mix" without needing a reference track. Built-in profiles: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. Measures integrated LUFS, LRA, crest factor, and 5-band spectral RMS (tonal balance) at the profile's LUFS target, returns a traffic-light verdict (GREEN/YELLOW/RED) + 0-100 score + per-check deltas + EQ recommendations for off-target bands. Hard-fail rule: a RED on LUFS or LRA forces overall RED. | `mix.wav --style NAME --output-dir DIR` or `--list-styles` |
@@ -196,19 +196,31 @@ Moving any of these into a single flat `analysis/` would either break the audio-
   }
 },
 "master": {
-  "lufs_target": -14.0,
-  "true_peak_dbfs": -1.0,
-  "comp": {                    // optional master glue compressor
+  // PREMASTER MODE (default, recommended). render_mix produces a CLEAN
+  // mix.wav handoff to mastering. NO limiter / LUFS-norm / clipper / M/S
+  // baked in — those are mastering's job. See "Mix vs master separation"
+  // in docs/knowledge.md.
+  "premaster_mode": true,
+  "peak_target_dbfs": -3.0,    // peak normalize the sum to this target
+
+  // Optional glue + EQ are still allowed in premaster mode (subtle bus
+  // shaping is mix-phase work, not mastering):
+  "comp": {                    // gentle master glue compressor (1-2 dB GR)
     "threshold_db": -10.0,
-    "ratio": 2.0,
-    "attack_ms": 10.0,
+    "ratio": 1.5,
+    "attack_ms": 30.0,
     "release_ms": 300.0,
     "makeup_db": 0.0
   },
-  "eq": [                      // optional master EQ (zero-phase, applied after comp)
+  "eq": [                      // subtle tonal shaping (NOT loudness-focused)
     {"type": "highpass", "hz": 30},
-    {"type": "highshelf", "hz": 12000, "db": 1.5}
+    {"type": "peak", "hz": 2500, "q": 1.0, "db": 0.5}
   ]
+  // The following keys are IGNORED in premaster mode (warning logged) —
+  // they belong to master_mix.py:
+  //   "lufs_target", "true_peak_dbfs", "clipper", "ms"
+  // To use the legacy combined mix+master chain set:
+  //   "premaster_mode": false
 },
 "reverb_buses": {              // optional: shared reverb buses (vocal mixing standard)
   "vocal_plate": {
@@ -298,9 +310,17 @@ time-align (and auto-flip polarity if needed), then update the track's
 
 ## Workflow
 
-The full pipeline is two phases — MIX, then MASTER. Each phase ends with a
-required scorecard (mix_health, master_health). The master phase only starts
-when mix_health is green or 1-yellow.
+The full pipeline is two phases — MIX, then MASTER. **They are SEPARATE.**
+The MIX phase produces a clean **premaster** (`mix.wav` at peak -3 dBFS, no
+limiter, no LUFS norm to -14, no clipper). The MASTER phase (`master_mix.py`)
+takes that premaster and applies the full mastering chain (LUFS-norm,
+limiter, clipper, ISP correction) per delivery format. **Do not bake
+mastering moves into the mix render** — that's the cascaded-limiter bug
+this pipeline used to have. Industry references: SOS, LANDR, iZotope,
+Major Mixing; see docs/knowledge.md "Mix vs master separation".
+
+Each phase ends with a required scorecard (mix_health, master_health). The
+master phase only starts when mix_health is green or 1-yellow.
 
 ```
 [MIX PHASE — analysis triggers in <brackets>]
