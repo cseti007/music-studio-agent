@@ -68,8 +68,70 @@ def _detect_bus(name: str) -> str:
     return "master"
 
 
+# Drum kit panning conventions (audience perspective — modern mixing default).
+# Pitches sweep across the stereo field; cymbals placed where they physically
+# sit relative to the drummer. The drummer's right-hand cymbals (hi-hat, ride)
+# end up on the audience's LEFT side of the stereo image — the convention is
+# "audience perspective" so the panning matches what a listener facing the
+# kit on stage would hear.
+#
+# Sources: standard rock-mix references (Producer Society, iZotope, Sound on
+# Sound LCR / hard-pan articles). Tweak via mix_config.json per-track `pan`
+# field if a particular session has unusual kit placement.
+#
+# More specific keys (e.g. "RACK TOM 2") MUST come before less specific ones
+# (e.g. "RACK TOM") so the first match wins.
+_DRUM_PAN_DEFAULTS: list[tuple[str, float]] = [
+    # Toms — left-to-right pitch sweep
+    ("RACK TOM 1",  -0.4),
+    ("RACK TOM 2",  -0.15),
+    ("RACK TOM",    -0.4),    # generic single rack
+    ("FLOOR TOM",   +0.5),
+    ("FLOOR",       +0.5),    # short-form
+    # Cymbals — drummer's physical layout (audience perspective)
+    ("HIHAT",       -0.2),
+    ("HI-HAT",      -0.2),
+    ("RIDE",        +0.3),
+    # Kick / snare / generic crash → center
+    ("KICK",         0.0),
+    ("SN ",          0.0),
+    (" SN",          0.0),
+    ("SNARE",        0.0),
+    ("CRASH",        0.0),
+]
+
+
 def _detect_pan(name: str) -> float:
+    """Detect a sensible default pan for a track name.
+
+    Order of resolution:
+      1. OH / ROOM stereo pairs use the L/R suffix (existing behaviour) —
+         each pair contributes hard stereo width.
+      2. Mono drum-kit pieces (toms, hi-hat, ride, kick, snare) get the
+         audience-perspective default pan from `_DRUM_PAN_DEFAULTS`.
+      3. Any other name with a standalone L or R word → ±0.7 (stereo pair).
+      4. Otherwise center.
+
+    Used by `--generate-config` to populate per-track `pan` fields. Override
+    per-track in mix_config.json if a session has unusual kit / mic placement.
+    """
     u = name.upper()
+
+    # Stereo pairs (OH / ROOM): use L/R suffix as before
+    if "OH " in u or " OH" in u or "OVERHEAD" in u or "ROOM " in u or " ROOM" in u:
+        if re.search(r'\bL\b', u):
+            return -0.7
+        if re.search(r'\bR\b', u):
+            return 0.7
+        # Stereo pair without explicit L/R suffix — leave at center
+        return 0.0
+
+    # Drum-kit pieces (mono mics) — apply audience-perspective spread
+    for keyword, pan in _DRUM_PAN_DEFAULTS:
+        if keyword in u:
+            return pan
+
+    # Generic L/R suffix detection (stereo pairs on non-drum tracks)
     if re.search(r'\bL\b', u):
         return -0.7
     if re.search(r'\bR\b', u):

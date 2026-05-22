@@ -58,8 +58,8 @@
   "default_bus_pan": {
     "drums": 0.0,
     "bass": 0.0,
-    "gtr_1": -0.6,
-    "gtr_laci": 0.6,
+    "gtr_1": -0.85,
+    "gtr_laci": 0.85,
     "gtr_terka": 0.0,
     "gtr": 0.0,
     "vocal_lead": 0.0,

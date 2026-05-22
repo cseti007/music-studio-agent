@@ -645,9 +645,9 @@ class TestStyleCheck:
         from render_mix import _load_style_bus_pans
 
         modern = _load_style_bus_pans("modern_rock")
-        # modern_rock convention: wide rhythm guitars at ±0.6
-        assert modern["gtr_1"] == -0.6
-        assert modern["gtr_laci"] == 0.6
+        # modern_rock convention: industry hard pan ≥ ±0.85
+        assert modern["gtr_1"] == -0.85
+        assert modern["gtr_laci"] == 0.85
         assert modern["bass"] == 0.0  # bass always center
         assert modern["drums"] == 0.0
 
@@ -662,6 +662,56 @@ class TestStyleCheck:
 
         assert _load_style_bus_pans(None) == {}
         assert _load_style_bus_pans("not_a_genre") == {}
+
+    def test_detect_pan_routes_drumkit_pieces_to_audience_perspective(self):
+        """`_detect_pan` returns audience-perspective default pans for drum-kit
+        pieces (toms spread, hi-hat slightly left, ride slightly right) and
+        leaves the L/R stereo-pair behaviour intact for OH and ROOM mics.
+        """
+        from render_mix import _detect_pan
+        # Toms: left-to-right pitch sweep
+        assert _detect_pan("RACK TOM 1.05") == -0.4
+        assert _detect_pan("RACK TOM 2.05") == -0.15
+        assert _detect_pan("FLOOR TOM.05") == +0.5
+        # Cymbals
+        assert _detect_pan("HIHAT.05") == -0.2
+        assert _detect_pan("HI-HAT.05") == -0.2
+        assert _detect_pan("RIDE.05") == +0.3
+        assert _detect_pan("CRASH.05") == 0.0
+        # Kick / snare → center
+        assert _detect_pan("KICK IN.05") == 0.0
+        assert _detect_pan("KICK OUT.05") == 0.0
+        assert _detect_pan("KICK SUB.05") == 0.0
+        assert _detect_pan("SN TOP.05") == 0.0
+        assert _detect_pan("SN BOTTOM.05") == 0.0
+        # Stereo pairs use L/R suffix (existing behaviour)
+        assert _detect_pan("OH AEA.01 L.05") == -0.7
+        assert _detect_pan("OH AEA.01 R.05") == +0.7
+        assert _detect_pan("ROOM CLOSE.01 L.05") == -0.7
+        assert _detect_pan("ROOM CLOSE.01 R.05") == +0.7
+        # Non-drum tracks: L/R suffix still works
+        assert _detect_pan("BG VOX L") == -0.7
+        assert _detect_pan("BG VOX R") == +0.7
+        # Non-drum, no L/R → center
+        assert _detect_pan("GTR 1 FENDER.06") == 0.0
+        assert _detect_pan("BASS DI CLEAN") == 0.0
+        assert _detect_pan("20221130 Téridő Ver&Refr tiszta") == 0.0
+
+    def test_modern_rock_style_uses_industry_hard_pan(self):
+        """modern_rock convention (researched 2025): hard pan ≥ ±0.85 for
+        double-tracked rhythm guitars. Earlier values (±0.6) were too
+        conservative relative to industry standard."""
+        from render_mix import _load_style_bus_pans
+        pans = _load_style_bus_pans("modern_rock")
+        assert abs(pans["gtr_1"]) >= 0.8, (
+            f"modern_rock gtr_1 pan {pans['gtr_1']} too narrow — industry "
+            f"hard-pan convention is ±0.85 or wider"
+        )
+        # punchy_modern_rock should be even harder (LCR full)
+        pans = _load_style_bus_pans("punchy_modern_rock")
+        assert abs(pans["gtr_1"]) >= 0.95, (
+            f"punchy_modern_rock gtr_1 pan {pans['gtr_1']} should be near LCR ±1.0"
+        )
 
     def test_generate_config_applies_style_pan_to_buses(self, tmp_path):
         """A `--generate-config --style modern_rock` run with guitar tracks
@@ -687,9 +737,9 @@ class TestStyleCheck:
         out_cfg = tmp_path / "mix_config.json"
         generate_config(tmp_path, out_cfg, style="modern_rock")
         cfg = json.loads(out_cfg.read_text())
-        # modern_rock pan defaults applied
-        assert cfg["buses"]["gtr_1"]["pan"] == -0.6
-        assert cfg["buses"]["gtr_laci"]["pan"] == 0.6
+        # modern_rock pan defaults applied (industry hard pan)
+        assert cfg["buses"]["gtr_1"]["pan"] == -0.85
+        assert cfg["buses"]["gtr_laci"]["pan"] == 0.85
         assert cfg["buses"]["bass"]["pan"] == 0.0  # bass always center
         assert cfg["buses"]["drums"]["pan"] == 0.0  # drums always center
 

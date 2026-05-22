@@ -511,6 +511,47 @@ crowded with mid-range guitar content masking the kick attack.
 - If both are at 0, decide: are they sequential / doubling? Then leave at 0.
   Are they truly parallel different guitarists? Then pan per the style table.
 
+### Drum-kit panning (audience perspective)
+
+`_detect_pan` in render_mix recognises drum-kit pieces by name and assigns
+audience-perspective pans automatically during `--generate-config`. The
+convention is "what would a listener facing the kit on stage hear" — pitches
+sweep across the stereo field, cymbals sit where they physically are on the
+kit (drummer's right-hand cymbals end up on the audience's left side).
+
+| Track name keyword | Pan | Reasoning |
+|---|---|---|
+| KICK / SN / SNARE / CRASH (generic) | 0 (center) | Foundation hits stay center |
+| RACK TOM 1 | -0.4 | Highest-pitched tom, leftmost |
+| RACK TOM 2 | -0.15 | Mid tom, slightly left |
+| RACK TOM (generic) | -0.4 | Single rack tom defaults to left |
+| FLOOR TOM | +0.5 | Lowest-pitched tom, right |
+| HIHAT / HI-HAT | -0.2 | Drummer's right hand reaches audience-left |
+| RIDE | +0.3 | Drummer's right-hand-far-reach cymbal |
+| OH ... L / R | -0.7 / +0.7 | Overheads provide most of the kit's stereo image |
+| ROOM ... L / R | -0.7 / +0.7 | Room mics widen ambience |
+
+Sources: standard rock-mix references (Producer Society 2025, Sound on Sound
+LCR articles, iZotope panning tips). Tweak via mix_config.json per-track
+`pan` field if a particular session has unusual kit placement or the listener
+prefers drummer-perspective (mirror image — high tom on right).
+
+**Why the pitch sweep matters.** A kick + snare at center plus toms spread
+L-to-R by pitch gives the listener a clear directional cue: the drummer's
+fills move across the stereo image, not just amplitude-bouncing in the
+center. Combined with OH L/R at hard ±0.7, the kit feels "set up in front
+of you" rather than collapsed to a mono mid-band column.
+
+### Industry LCR pan values (researched 2025)
+
+Modern rock production frequently uses **hard pan (85-100%)** for double-
+tracked rhythm guitars, often the LCR (Left-Center-Right) convention. The
+shipped style profile values reflect this — `modern_rock` at ±0.85 and
+`punchy_modern_rock` at ±1.0 (full LCR). Sources: Nail The Mix, Sound on
+Sound, Producer Society, iZotope. Earlier internal numbers (±0.6) were
+more conservative than industry standard and got bumped after a real-world
+mix revealed the centre column was crowded by guitars + bass + drums.
+
 ---
 
 ## Frequency Bands (reference)
