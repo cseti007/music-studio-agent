@@ -234,23 +234,25 @@ class TestMasterHealth:
     def test_per_band_phase_coherence_detects_mono_low_end(self):
         """A signal with both channels identical in the low band must report
         sub-band correlation ≈ 1.0."""
-        from master_health import _phase_coherence_per_band
+        from master_health import _filter_bands_LR, _phase_coherence_per_band
 
         rng = np.random.default_rng(0)
         L = rng.standard_normal(SR * 3) * 0.3
         R = L.copy()  # exactly mono
-        phase = _phase_coherence_per_band(L, R, SR)
+        bands_LR = _filter_bands_LR(L, R, SR)
+        phase = _phase_coherence_per_band(bands_LR)
         assert phase["sub"] > 0.95, f"mono sub got correlation {phase['sub']}"
         assert phase["mid"] > 0.95
 
     def test_per_band_phase_coherence_detects_wide_top(self):
         """Decorrelated noise should report low correlation in higher bands."""
-        from master_health import _phase_coherence_per_band
+        from master_health import _filter_bands_LR, _phase_coherence_per_band
 
         rng = np.random.default_rng(0)
         L = rng.standard_normal(SR * 3) * 0.3
         R = np.random.default_rng(1).standard_normal(SR * 3) * 0.3
-        phase = _phase_coherence_per_band(L, R, SR)
+        bands_LR = _filter_bands_LR(L, R, SR)
+        phase = _phase_coherence_per_band(bands_LR)
         # Independently-seeded noise → correlation near 0
         assert abs(phase["air"]) < 0.2
 

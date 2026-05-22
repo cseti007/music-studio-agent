@@ -72,7 +72,21 @@ def _band_filter(channel: np.ndarray, sr: int, lo: float, hi: float) -> np.ndarr
     return sosfilt(sos, channel)
 
 
-def _phase_coherence_per_band(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
+def _filter_bands_LR(L: np.ndarray, R: np.ndarray, sr: int) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Filter L + R into each named band ONCE. Returns {name: (L_band, R_band)}.
+
+    Both `_phase_coherence_per_band` and `_ms_width_per_band` used to call
+    `_band_filter` independently for the same bands — 20 sosfilt calls on
+    multi-MB stereo signals (~5 s wasted). Sharing the filtered arrays cuts
+    that in half.
+    """
+    out: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for name, lo, hi in _PHASE_BANDS:
+        out[name] = (_band_filter(L, sr, lo, hi), _band_filter(R, sr, lo, hi))
+    return out
+
+
+def _phase_coherence_per_band(bands_LR: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
     """L/R correlation per frequency band.
 
     Sub band correlation should be near 1.0 (sub mono); air band correlation
@@ -80,9 +94,7 @@ def _phase_coherence_per_band(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
     diagnostic for "does the bass collapse on mono?" / "is the top wide enough?".
     """
     bands: dict[str, float] = {}
-    for name, lo, hi in _PHASE_BANDS:
-        L_band = _band_filter(L, sr, lo, hi)
-        R_band = _band_filter(R, sr, lo, hi)
+    for name, (L_band, R_band) in bands_LR.items():
         if np.std(L_band) > 1e-10 and np.std(R_band) > 1e-10:
             corr = float(np.corrcoef(L_band, R_band)[0, 1])
         else:
@@ -91,7 +103,7 @@ def _phase_coherence_per_band(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
     return bands
 
 
-def _ms_width_per_band(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
+def _ms_width_per_band(bands_LR: dict[str, tuple[np.ndarray, np.ndarray]]) -> dict:
     """Side/mid energy ratio per frequency band.
 
     Mastering target: sub band side energy should be near zero (mono sub),
@@ -99,9 +111,7 @@ def _ms_width_per_band(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
     ms_width_ratio that mix_health reports.
     """
     bands: dict[str, float] = {}
-    for name, lo, hi in _PHASE_BANDS:
-        L_band = _band_filter(L, sr, lo, hi)
-        R_band = _band_filter(R, sr, lo, hi)
+    for name, (L_band, R_band) in bands_LR.items():
         mid = (L_band + R_band) * 0.5
         side = (L_band - R_band) * 0.5
         rms_m = float(np.sqrt(np.mean(mid ** 2) + 1e-12))
@@ -383,8 +393,10 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
 
 
 def _phase_section(L: np.ndarray, R: np.ndarray, sr: int) -> dict:
-    phase = _phase_coherence_per_band(L, R, sr)
-    ms = _ms_width_per_band(L, R, sr)
+    # Filter into all bands once; both stats read from the shared cache.
+    bands_LR = _filter_bands_LR(L, R, sr)
+    phase = _phase_coherence_per_band(bands_LR)
+    ms = _ms_width_per_band(bands_LR)
 
     issues = []
     # Mastering best practice: sub correlation > 0.85 (near mono)
@@ -542,14 +554,55 @@ def _render_text(report: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
+_HEALTH_CACHE_VERSION = 1
+
+
+def _health_cache_signature(master_path: Path, format_name: str | None,
+                            reference_paths: list[Path] | None) -> dict:
+    """Stable signature for caching a master_health run.
+
+    Cache key = master WAV (mtime + size) + format name + reference set
+    (each ref's mtime + size). If unchanged, we can replay the JSON without
+    redoing band filtering, LUFS measurement, true-peak resample, etc.
+    """
+    stat = master_path.stat()
+    refs = []
+    for r in reference_paths or []:
+        if r.exists():
+            rs = r.stat()
+            refs.append({"path": str(r), "mtime_ns": int(rs.st_mtime_ns), "size": int(rs.st_size)})
+    return {
+        "version": _HEALTH_CACHE_VERSION,
+        "master_mtime_ns": int(stat.st_mtime_ns),
+        "master_size": int(stat.st_size),
+        "format": format_name,
+        "references": refs,
+    }
+
+
 def master_health(master_path: Path, output_dir: Path,
                   format_name: str | None = None,
-                  reference_paths: list[Path] | None = None) -> dict:
+                  reference_paths: list[Path] | None = None,
+                  use_cache: bool = True) -> dict:
+    json_path = output_dir / f"master_health_{format_name or 'generic'}.json"
+    txt_path = output_dir / f"master_health_{format_name or 'generic'}.txt"
+
+    if use_cache and master_path.exists() and json_path.exists() and txt_path.exists():
+        try:
+            cached = json.loads(json_path.read_text(encoding="utf-8"))
+            if cached.get("_cache") == _health_cache_signature(master_path, format_name, reference_paths):
+                print(f"Reading {master_path}...  -> CACHE HIT ({json_path})", flush=True)
+                # Replay the text body so the user still sees the verdict
+                print(txt_path.read_text(encoding="utf-8"))
+                return cached
+        except (OSError, json.JSONDecodeError):
+            pass
+
     print(f"Reading {master_path}...", flush=True)
-    data, sr = sf.read(str(master_path), always_2d=True)
+    data, sr = sf.read(str(master_path), always_2d=True, dtype="float32")
     if data.shape[1] == 1:
         data = np.repeat(data, 2, axis=1)
-    stereo = data.T.astype(np.float64)
+    stereo = data.T.astype(np.float32)
     L, R = stereo[0], stereo[1]
     mono = (L + R) * 0.5
 
@@ -574,6 +627,7 @@ def master_health(master_path: Path, output_dir: Path,
         "punch": punch,
         "compression_history": history,
         "reference_deck": refdeck,
+        "_cache": _health_cache_signature(master_path, format_name, reference_paths),
     }
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -612,6 +666,9 @@ def main() -> None:
                              "master_mix --all-formats.")
     parser.add_argument("--reference", type=Path, nargs="*", default=None,
                         help="One or more reference WAVs (mastered tracks) for the deck comparison")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Skip the mtime-based cache and force re-analysis even if "
+                             "master_health_<format>.{json,txt} exist with a matching cache key.")
     args = parser.parse_args()
 
     refs = [p for p in (args.reference or []) if p.exists()]
@@ -644,6 +701,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 format_name=fmt,
                 reference_paths=refs,
+                use_cache=not args.no_cache,
             )
             results.append((fmt, r))
 
@@ -674,6 +732,7 @@ def main() -> None:
         output_dir=args.output_dir,
         format_name=args.format,
         reference_paths=refs,
+        use_cache=not args.no_cache,
     )
 
 

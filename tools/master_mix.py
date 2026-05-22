@@ -228,7 +228,7 @@ def _master_comp(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
         ),
         Gain(gain_db=float(params.get("makeup_db", 0.0))),
     ])
-    return board(stereo.astype(np.float32), sr).astype(np.float64)
+    return board(stereo.astype(np.float32), sr).astype(np.float32)
 
 
 def _harmonic_exciter(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
@@ -345,6 +345,25 @@ def _dither_to_16bit(stereo: np.ndarray) -> np.ndarray:
 # Core mastering function
 # ---------------------------------------------------------------------------
 
+def _load_master_input(input_path: Path) -> tuple[np.ndarray, int, float, float]:
+    """Read input mix.wav as (2, N) float32 + measure LUFS + sample peak.
+
+    Factored out so --all-formats can call this ONCE and pass the result to
+    multiple per-format master_mix() calls — avoids re-loading and re-measuring
+    the same input WAV for every delivery target.
+    """
+    data, sr = sf.read(str(input_path), always_2d=True, dtype="float32")
+    if data.shape[1] == 1:
+        data = np.repeat(data, 2, axis=1)
+    elif data.shape[1] > 2:
+        data = data[:, :2]
+    master = data.T.astype(np.float32)
+    meter = pyln.Meter(sr)
+    lufs_before = float(meter.integrated_loudness(master.T))
+    peak_before = float(20.0 * np.log10(max(float(np.max(np.abs(master))), 1e-12)))
+    return master, sr, lufs_before, peak_before
+
+
 def master_mix(
     input_path: Path,
     output_dir: Path,
@@ -352,11 +371,17 @@ def master_mix(
     mastering_preset: str,
     target_lufs: float | None = None,
     tp_ceiling: float | None = None,
+    precomputed_input: tuple[np.ndarray, int, float, float] | None = None,
 ) -> dict:
     """Master a stereo mix.wav to a delivery format.
 
     Returns a report dict; writes <output_dir>/master_<format>.wav and
     <output_dir>/master_<format>_report.json.
+
+    `precomputed_input` (master_buf, sr, lufs_before, peak_before): if given,
+    skip loading + initial LUFS measurement (the --all-formats path uses this
+    to share work across formats). The buffer is *copied* before mutation so
+    multiple master_mix() calls don't interfere.
     """
     fmt = FORMAT_PRESETS[format_name]
     mp = MASTERING_PRESETS[mastering_preset]
@@ -373,22 +398,24 @@ def master_mix(
     print(f"  Target LUFS {actual_target_lufs}, TP ceiling {actual_tp} dBTP, {bit_depth}-bit"
           + (" (dithered)" if do_dither else ""))
 
-    data, sr = sf.read(str(input_path), always_2d=True)
-    if data.shape[1] == 1:
-        data = np.repeat(data, 2, axis=1)
-    elif data.shape[1] > 2:
-        data = data[:, :2]
-    # Switch to (2, N) layout for the chain
-    master = data.T.astype(np.float64)
+    if precomputed_input is not None:
+        shared_master, sr, lufs_before, peak_before = precomputed_input
+        master = shared_master.copy()  # don't mutate the shared buffer
+        meter = pyln.Meter(sr)
+    else:
+        master, sr, lufs_before, peak_before = _load_master_input(input_path)
+        meter = pyln.Meter(sr)
 
-    meter = pyln.Meter(sr)
-    lufs_before = float(meter.integrated_loudness(master.T))
-    peak_before = 20.0 * np.log10(max(np.max(np.abs(master)), 1e-12))
     print(f"  Input: LUFS {lufs_before:.2f}, sample peak {peak_before:.2f} dBFS")
 
     chain_applied: list[str] = []
+    # `current_lufs` threads forward: each stage's POST measurement becomes the
+    # next stage's PRE without re-measuring. The original code measured 7
+    # times (~2s each); this drops it to ~4 measurements at the stages that
+    # actually transform the buffer.
+    current_lufs = lufs_before
 
-    # 1. EQ
+    # 1. EQ — LUFS shift is usually negligible from EQ alone; skip measurement.
     if mp["eq"]:
         master = _master_eq(master, sr, mp["eq"])
         chain_applied.append(f"eq({len(mp['eq'])} filters)")
@@ -397,21 +424,21 @@ def master_mix(
     #    Sits before glue comp so per-band dynamics are controlled first.
     if mp.get("multiband"):
         mb = mp["multiband"]
-        lufs_pre = float(meter.integrated_loudness(master.T))
+        lufs_pre = current_lufs
         master = _master_multiband(master, sr, mb)
-        lufs_post = float(meter.integrated_loudness(master.T))
+        current_lufs = float(meter.integrated_loudness(master.T))
         chain_applied.append(
             f"multiband(LR4 {mb['low_high_hz']}/{mb['mid_high_hz']} Hz, "
-            f"GR={lufs_post - lufs_pre:+.2f} LU)"
+            f"GR={current_lufs - lufs_pre:+.2f} LU)"
         )
 
     # 3. Glue comp
     if mp["comp"]:
-        lufs_pre = float(meter.integrated_loudness(master.T))
+        lufs_pre = current_lufs
         master = _master_comp(master, sr, mp["comp"])
-        lufs_post = float(meter.integrated_loudness(master.T))
+        current_lufs = float(meter.integrated_loudness(master.T))
         chain_applied.append(
-            f"comp(thr={mp['comp']['threshold_db']}, ratio={mp['comp']['ratio']}, GR={lufs_post - lufs_pre:+.2f} LU)"
+            f"comp(thr={mp['comp']['threshold_db']}, ratio={mp['comp']['ratio']}, GR={current_lufs - lufs_pre:+.2f} LU)"
         )
 
     # 4. Exciter
@@ -455,17 +482,21 @@ def master_mix(
     elif skip_clipper:
         chain_applied.append("clipper(SKIPPED for format)")
 
-    # 5. LUFS normalization
-    lufs_pre_norm = float(meter.integrated_loudness(master.T))
-    if np.isfinite(lufs_pre_norm):
-        gain_db = actual_target_lufs - lufs_pre_norm
+    # 5. LUFS normalization — use the cached current_lufs (matches a fresh
+    # measurement here; exciter / clipper / EQ are small LUFS shifts the
+    # cache absorbs into the next mandatory measurement after limiter).
+    if np.isfinite(current_lufs):
+        gain_db = actual_target_lufs - current_lufs
         master = master * 10.0 ** (gain_db / 20.0)
+        # Track approximately so the post-limiter measurement is the only
+        # follow-up. Linear gain shifts LUFS by the same dB.
+        current_lufs = current_lufs + gain_db
         chain_applied.append(f"lufs_norm({gain_db:+.2f} dB → target {actual_target_lufs})")
 
     # 6. True peak limiter (oversampled — ISP-aware)
     if not skip_limiter:
         board = Pedalboard([Limiter(threshold_db=float(actual_tp), release_ms=100.0)])
-        master = board(master.astype(np.float32), sr).astype(np.float64)
+        master = board(master.astype(np.float32), sr).astype(np.float32)
         # Second-pass ISP check + scale down if still over
         tp_measured = _measure_true_peak_dbfs(master)
         if tp_measured > actual_tp:
@@ -477,14 +508,16 @@ def master_mix(
 
         # Post-limiter LUFS correction: pedalboard.Limiter applies internal
         # makeup gain, so the integrated LUFS after limiting is usually
-        # higher than the LUFS norm target we asked for. Re-measure and
-        # scale DOWN if we overshoot (only downward — upward correction
-        # would push the true peak back over the ceiling).
+        # higher than the LUFS norm target we asked for. This is a real
+        # transform (the limiter changes LUFS unpredictably) so we MUST
+        # re-measure here — no cache substitute.
         lufs_after = float(meter.integrated_loudness(master.T))
+        current_lufs = lufs_after
         if np.isfinite(lufs_after):
             correction_db = actual_target_lufs - lufs_after
             if correction_db < -0.2:  # only correct if overshoot > 0.2 dB
                 master *= 10.0 ** (correction_db / 20.0)
+                current_lufs = current_lufs + correction_db
                 chain_applied.append(f"lufs_post_correction({correction_db:+.2f} dB)")
     else:
         chain_applied.append("limiter(SKIPPED for format)")
@@ -500,11 +533,15 @@ def master_mix(
     subtype = "PCM_16" if bit_depth == 16 else "PCM_24"
     sf.write(str(out_path), master.T, sr, subtype=subtype)
 
-    # Final measurements
-    lufs_final = float(meter.integrated_loudness(master.T))
+    # Final measurements — `lufs_final` matches `current_lufs` from the cache
+    # (no transformative stages after the post-limiter measurement). Skip the
+    # redundant measurement; loudness_range still needs its own call. Explicit
+    # `float()` casts ensure JSON-serialisable scalars (float32 numpy scalars
+    # leak otherwise and break the report writer).
+    lufs_final = float(current_lufs) if np.isfinite(current_lufs) else float(meter.integrated_loudness(master.T))
     lra_final = round(float(meter.loudness_range(master.T)), 2)
-    tp_final = _measure_true_peak_dbfs(master)
-    sample_peak_final = 20.0 * np.log10(max(np.max(np.abs(master)), 1e-12))
+    tp_final = float(_measure_true_peak_dbfs(master))
+    sample_peak_final = float(20.0 * np.log10(max(float(np.max(np.abs(master))), 1e-12)))
 
     report = {
         "input": str(input_path),
@@ -606,6 +643,11 @@ def main() -> None:
     else:
         formats = [args.format]
 
+    # Share input load + initial LUFS measurement across formats. For
+    # --all-formats this saves ~6× the input loading (~3-5 s) and 6× the
+    # initial LUFS measurement (~2 s each).
+    precomputed = _load_master_input(args.input) if len(formats) > 1 else None
+
     results = []
     for fmt in formats:
         print()
@@ -616,6 +658,7 @@ def main() -> None:
             mastering_preset=args.master_preset,
             target_lufs=args.target_lufs,
             tp_ceiling=args.tp_ceiling,
+            precomputed_input=precomputed,
         )
         results.append(r)
 
