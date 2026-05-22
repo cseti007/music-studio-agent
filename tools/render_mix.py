@@ -147,6 +147,33 @@ def _load_style_bus_defaults(style: str | None) -> dict[str, float]:
     return profile.get("default_bus_volume_db", {})
 
 
+def _load_style_bus_pans(style: str | None) -> dict[str, float]:
+    """Look up `default_bus_pan` from the named style profile.
+
+    Returns {} if `style` is None or the profile doesn't exist / lacks
+    the field. Callers should fall back to 0.0 (center) for any bus not
+    in the returned dict.
+
+    Genre conventions (typical 2 rhythm guitarist setup):
+      - modern_rock:        gtr_1 -0.6,  gtr_laci +0.6  (wide L/R)
+      - punchy_modern_rock: gtr_1 -0.7,  gtr_laci +0.7  (very wide)
+      - classic_rock:       gtr_1 -0.5,  gtr_laci +0.5  (band-feel)
+      - pop:                gtr_1 -0.4,  gtr_laci +0.4  (conservative)
+      - hip_hop:            gtr_1  0,    gtr_laci  0    (centered, drum-led)
+      - jazz_acoustic:      gtr_1 -0.3,  gtr_laci +0.3  (narrow, intimate)
+    """
+    if not style:
+        return {}
+    profile_path = Path(__file__).resolve().parent / "style_profiles" / f"{style}.json"
+    if not profile_path.exists():
+        return {}
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return profile.get("default_bus_pan", {})
+
+
 def generate_config(session_dir: Path, output_path: Path, style: str | None = None) -> None:
     sr = 48000
     session_json = session_dir / "session.json"
@@ -155,9 +182,16 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
             sr = json.load(f).get("sample_rate", 48000)
 
     style_bus_defaults = _load_style_bus_defaults(style)
+    style_bus_pans = _load_style_bus_pans(style)
     if style_bus_defaults:
-        print(f"Using style '{style}' bus defaults: "
+        print(f"Using style '{style}' bus volume defaults: "
               + ", ".join(f"{k}={v:+.1f}" for k, v in style_bus_defaults.items()))
+    if style_bus_pans:
+        # Only print non-zero entries — center is the default and not informative.
+        non_center = {k: v for k, v in style_bus_pans.items() if v != 0.0}
+        if non_center:
+            print(f"Using style '{style}' bus pan defaults: "
+                  + ", ".join(f"{k}={v:+.2f}" for k, v in non_center.items()))
 
     tracks_root = session_dir / "tracks"
     scan_dir = tracks_root if tracks_root.is_dir() else session_dir
@@ -209,9 +243,13 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
             }
 
     # Top-level bus volume_db: use the style profile default if given, else 0 dB.
+    # Bus pan: same idea — style profile says e.g. modern_rock gtr_1 -0.6.
     # auto_trim_db is computed below by measuring active stem dry-sums.
     def _bus_default(name: str) -> float:
         return float(style_bus_defaults.get(name, 0.0))
+
+    def _bus_pan(name: str) -> float:
+        return float(style_bus_pans.get(name, 0.0))
 
     buses = {
         # Default to comp_drum_bus_gentle (2:1, -8 dB, ~2 dB GR) per modern
@@ -219,10 +257,10 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         # max at busiest moments"). The harder comp_drum_bus (4:1, -10 dB,
         # ~5 dB GR) is too aggressive for a default — switch manually if a
         # session genuinely needs heavier glue.
-        "drums":  {"volume_db": _bus_default("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus_gentle", "parent_bus": None},
-        "bass":   {"volume_db": _bus_default("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
-        **{name: {**cfg, "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
-        "guitar": {"volume_db": _bus_default("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
+        "drums":  {"volume_db": _bus_default("drums"),  "pan": _bus_pan("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus_gentle", "parent_bus": None},
+        "bass":   {"volume_db": _bus_default("bass"),   "pan": _bus_pan("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
+        **{name: {**cfg, "pan": _bus_pan(name), "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
+        "guitar": {"volume_db": _bus_default("guitar"), "pan": _bus_pan("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
     }
 
     # Vocal sub-buses if vocal tracks were detected. Both feed into a shared
@@ -232,10 +270,10 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
     has_vocal_bg = any(t["bus"] == "vocal_bg" for t in tracks)
     if has_vocal_lead or has_vocal_bg:
         if has_vocal_lead:
-            buses["vocal_lead"] = {"volume_db": _bus_default("vocal_lead"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
+            buses["vocal_lead"] = {"volume_db": _bus_default("vocal_lead"), "pan": _bus_pan("vocal_lead"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
         if has_vocal_bg:
-            buses["vocal_bg"] = {"volume_db": _bus_default("vocal_bg"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
-        buses["vocal"] = {"volume_db": _bus_default("vocal"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": None}
+            buses["vocal_bg"] = {"volume_db": _bus_default("vocal_bg"), "pan": _bus_pan("vocal_bg"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
+        buses["vocal"] = {"volume_db": _bus_default("vocal"), "pan": _bus_pan("vocal"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": None}
 
     mixes_dir = session_dir / "mixes"
     config = {

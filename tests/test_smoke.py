@@ -616,6 +616,83 @@ class TestStyleCheck:
         assert _load_style_bus_defaults(None) == {}
         assert _load_style_bus_defaults("not_a_real_genre") == {}
 
+    def test_all_profiles_have_default_bus_pan(self):
+        """Every style profile must declare `default_bus_pan` for the standard
+        bus names (drums, bass, gtr_1, gtr_laci, gtr, vocal_lead). This is
+        the panning equivalent of `default_bus_volume_db`.
+        """
+        import json
+        from pathlib import Path
+        required_buses = {"drums", "bass", "gtr_1", "gtr_laci", "gtr", "vocal_lead"}
+        profiles = list(Path("tools/style_profiles").glob("*.json"))
+        assert profiles, "no style profiles found"
+        for p in profiles:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            pans = d.get("default_bus_pan", {})
+            assert pans, f"{p.name} missing default_bus_pan"
+            missing = required_buses - pans.keys()
+            assert not missing, f"{p.name} missing pan entries for {missing}"
+            for name, v in pans.items():
+                assert isinstance(v, (int, float)), \
+                    f"{p.name}.{name} pan must be numeric, got {type(v).__name__}"
+                assert -1.0 <= v <= 1.0, \
+                    f"{p.name}.{name} pan {v} out of [-1.0, 1.0]"
+
+    def test_load_style_bus_pans_returns_correct_values(self):
+        """`render_mix._load_style_bus_pans` returns the per-bus pan map for a
+        known style, empty dict for unknown/None.
+        """
+        from render_mix import _load_style_bus_pans
+
+        modern = _load_style_bus_pans("modern_rock")
+        # modern_rock convention: wide rhythm guitars at ±0.6
+        assert modern["gtr_1"] == -0.6
+        assert modern["gtr_laci"] == 0.6
+        assert modern["bass"] == 0.0  # bass always center
+        assert modern["drums"] == 0.0
+
+        # hip_hop: rhythm guitars not panned (drum-led)
+        hh = _load_style_bus_pans("hip_hop")
+        assert hh["gtr_1"] == 0.0
+        assert hh["gtr_laci"] == 0.0
+
+        # jazz_acoustic: narrower than rock
+        jazz = _load_style_bus_pans("jazz_acoustic")
+        assert -0.5 < jazz["gtr_1"] < -0.2, f"jazz gtr_1 pan {jazz['gtr_1']}"
+
+        assert _load_style_bus_pans(None) == {}
+        assert _load_style_bus_pans("not_a_genre") == {}
+
+    def test_generate_config_applies_style_pan_to_buses(self, tmp_path):
+        """A `--generate-config --style modern_rock` run with guitar tracks
+        produces a mix_config.json where gtr_1 / gtr_laci buses have pan
+        -0.6 / +0.6 (the modern_rock default).
+        """
+        import json
+        import soundfile as sf
+        import numpy as np
+        from render_mix import generate_config
+
+        # Make a tiny tracks layout with two guitars
+        tracks_root = tmp_path / "tracks"
+        for name in ["GTR 1 FENDER.01", "GTR LACI 57.01", "BASS DI.01"]:
+            d = tracks_root / name
+            d.mkdir(parents=True)
+            # short noise stem
+            n = 48000  # 1 sec
+            sig = (np.random.default_rng(hash(name) % 10000).standard_normal((n, 2))
+                   * 0.1).astype(np.float32)
+            sf.write(str(d / "assembled.wav"), sig, 48000, subtype="PCM_24")
+
+        out_cfg = tmp_path / "mix_config.json"
+        generate_config(tmp_path, out_cfg, style="modern_rock")
+        cfg = json.loads(out_cfg.read_text())
+        # modern_rock pan defaults applied
+        assert cfg["buses"]["gtr_1"]["pan"] == -0.6
+        assert cfg["buses"]["gtr_laci"]["pan"] == 0.6
+        assert cfg["buses"]["bass"]["pan"] == 0.0  # bass always center
+        assert cfg["buses"]["drums"]["pan"] == 0.0  # drums always center
+
     def test_borderline_flag_thresholds(self):
         """severity 0.7 is the borderline threshold for a GREEN check.
 

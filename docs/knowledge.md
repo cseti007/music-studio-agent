@@ -444,6 +444,75 @@ thresholds (premaster: ±2 LU around -18 LUFS, peak ≤ -3 dBFS; master:
 
 ---
 
+## Panning convention by band size
+
+Rock-band stereo placement is conventional, not arbitrary. The default per-bus
+pan values shipped in `tools/style_profiles/<name>.json` `default_bus_pan` are
+applied automatically by `render_mix --generate-config --style NAME`. Below is
+the rationale; deviate intentionally, not by accident.
+
+**Foundation buses are always center** regardless of style:
+- `drums` parent: 0 (kick / snare / tom / hi-hat are individually placed via
+  per-track pan, but the bus output is centered; the L/R stereo width comes
+  from the OH and ROOM mic positions)
+- `bass`: 0 (mono foundation — sub frequencies don't translate well off
+  centre; a panned bass loses translation on mono playback systems)
+- `vocal_lead`: 0 (the listener locates the singer in the centre of the
+  stereo image; off-centre lead vocal is reserved for arrangement effects)
+
+**Rhythm guitar buses are panned by number of guitarists:**
+
+| Active rhythm guitar buses | Convention | Example pans |
+|---|---|---|
+| **1 guitarist** | Center (or slight ±0.2) | `gtr_1: 0` |
+| **2 guitarists** (classic 2-guitar wall) | Hard L/R | `gtr_1: -0.6, gtr_laci: +0.6` |
+| **3 guitarists** | Two wide + center | `gtr_1: -0.6, gtr_laci: +0.6, gtr_terka: 0` |
+| **4+ guitarists** | Spread evenly | -0.7, -0.3, +0.3, +0.7 (consider whether overdubs are warranted) |
+
+**Genre-specific spread for 2 guitarists:**
+
+| Style | `gtr_1` | `gtr_laci` | Character |
+|---|---|---|---|
+| `punchy_modern_rock` | -0.7 | +0.7 | Very wide, aggressive |
+| `tool_inspired` | -0.65 | +0.65 | Wide, dark image |
+| `modern_rock` | -0.6 | +0.6 | Standard wide rhythm wall |
+| `classic_rock` | -0.5 | +0.5 | Slightly narrower, band-feel |
+| `pop` | -0.4 | +0.4 | Conservative, vocal-centric |
+| `jazz_acoustic` | -0.3 | +0.3 | Narrow, intimate placement |
+| `hip_hop` | 0 | 0 | Centered, drum-and-bass-led |
+
+**When NOT to pan wide (even with multiple rhythm guitar buses):**
+
+- The 2 guitar buses are the **same player in different sections** of the song
+  (e.g. terido's `gtr_1` plays intro 11-30s, `gtr_laci` plays body 30-210s —
+  they never sound simultaneously, so panning has nothing to separate, just
+  produces "switching from left to right" between sections). Detection: scan
+  the timeline activity per bus; if pairwise overlap < 10 % of either bus's
+  total active time, treat as sequential and keep at center.
+- The 2 buses are **doubling the same riff** with high correlation (> 0.8).
+  Panning these wide just produces an L/R mono-ish image with comb filtering
+  at the centre. Either commit to keeping them stacked (center) or true-double
+  them with detuning / different takes before panning.
+- A **single overdub for atmosphere/lead** (e.g. gtr_terka with only 17 s of
+  activity acting as a solo or accent) → center, not panned. Lead lines and
+  solos traditionally sit center.
+
+**Why this matters perceptually.** Two rhythm guitars panned 0/0 share the
+centre with the bass and the kick. The centre channel becomes the dominant
+"loudness column" in the mix, and the bass — being the most constant and
+sub-heavy element — perceptually leads. Panning the guitars out moves their
+mid-frequency content (200 Hz - 5 kHz) to the sides, clearing the centre for
+bass/kick punch and adding stereo width. **The bass numerical level doesn't
+change — but the perceived dominance drops** because the centre is no longer
+crowded with mid-range guitar content masking the kick attack.
+
+**Operational rule.** After `render_mix --render`, audit:
+- `mix_config.json` `buses.<bus>.pan` for 2+ rhythm guitar buses
+- If both are at 0, decide: are they sequential / doubling? Then leave at 0.
+  Are they truly parallel different guitarists? Then pan per the style table.
+
+---
+
 ## Frequency Bands (reference)
 
 Used in analyze.py band RMS measurements:

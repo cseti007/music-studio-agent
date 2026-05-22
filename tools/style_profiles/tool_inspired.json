@@ -3,9 +3,9 @@
   "version": "2.0",
   "description": "Tool aesthetic, calibrated against the actual Aenima 2019 remaster (Forty Six & 2). Darker than typical modern rock, controlled sub and low, scooped lower-mids, preserved 2-5 kHz presence, very controlled high-air. Pushed-but-streaming-friendly LUFS target.",
   "sources": [
-    "Measured spectrum of Tool — Forty Six & 2 (Aenima 2019 Remaster, FLAC)",
-    "Original master sits at ~-9.6 LUFS / LRA 9 LU / crest 12 dB — heavy production",
-    "Profile targets calibrated to -14 LUFS reference (streaming-friendly Tool character) — measured Aenima values shifted +1 dB from -15 LUFS measurement"
+    "Measured spectrum of Tool \u2014 Forty Six & 2 (Aenima 2019 Remaster, FLAC)",
+    "Original master sits at ~-9.6 LUFS / LRA 9 LU / crest 12 dB \u2014 heavy production",
+    "Profile targets calibrated to -14 LUFS reference (streaming-friendly Tool character) \u2014 measured Aenima values shifted +1 dB from -15 LUFS measurement"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS measured on the 2019 Aenima remaster at -15 LUFS, then shifted +1 dB to align with the profile's -14 LUFS streaming target. Profile v1.0 was based on an incorrect 'Tool = heavy sub + scooped mids' assumption; v2.0 reflects the actual spectrum reveal that Tool 2019 remaster is darker overall, with controlled sub.",
   "lufs": {
@@ -54,5 +54,15 @@
       "target": -41.0,
       "tolerance": 4.0
     }
+  },
+  "default_bus_pan": {
+    "drums": 0.0,
+    "bass": 0.0,
+    "gtr_1": -0.65,
+    "gtr_laci": 0.65,
+    "gtr_terka": 0.0,
+    "gtr": 0.0,
+    "vocal_lead": 0.0,
+    "vocal_bg": 0.0
   }
 }

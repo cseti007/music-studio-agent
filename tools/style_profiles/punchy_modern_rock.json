@@ -1,7 +1,7 @@
 {
   "name": "punchy_modern_rock",
   "version": "1.0",
-  "description": "Punchier variant of modern_rock — emphasised kick body, controlled boxy 350 Hz region, forward snare/vocal presence at 3 kHz, gentle cymbal control. Calibrated to a real session iteration (v11 manual fine-tune over the modern_rock baseline).",
+  "description": "Punchier variant of modern_rock \u2014 emphasised kick body, controlled boxy 350 Hz region, forward snare/vocal presence at 3 kHz, gentle cymbal control. Calibrated to a real session iteration (v11 manual fine-tune over the modern_rock baseline).",
   "sources": [
     "Calibrated against a real-session master that received the following manual fine-tune over the modern_rock baseline",
     "Recommended master chain (copy into mix_config.master): see master_chain_template below"
@@ -102,5 +102,15 @@
         "makeup_db": 0.0
       }
     }
+  },
+  "default_bus_pan": {
+    "drums": 0.0,
+    "bass": 0.0,
+    "gtr_1": -0.7,
+    "gtr_laci": 0.7,
+    "gtr_terka": 0.0,
+    "gtr": 0.0,
+    "vocal_lead": 0.0,
+    "vocal_bg": 0.0
   }
 }

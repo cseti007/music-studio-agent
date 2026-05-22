@@ -1,7 +1,7 @@
 {
   "name": "jazz_acoustic",
   "version": "1.1",
-  "description": "Jazz / acoustic / singer-songwriter / folk. Highly dynamic, natural top end, gentle low end. Light or no limiting — LRA stays high to preserve performance dynamics.",
+  "description": "Jazz / acoustic / singer-songwriter / folk. Highly dynamic, natural top end, gentle low end. Light or no limiting \u2014 LRA stays high to preserve performance dynamics.",
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Jazz / Vocal Jazz / Folk)",
     "Streaming mastering guides 2025: jazz/acoustic target -16 to -20 LUFS typical",
@@ -54,5 +54,14 @@
       "target": -32.0,
       "tolerance": 3.5
     }
+  },
+  "default_bus_pan": {
+    "drums": 0.0,
+    "bass": 0.0,
+    "gtr_1": -0.3,
+    "gtr_laci": 0.3,
+    "gtr": 0.0,
+    "vocal_lead": 0.0,
+    "vocal_bg": 0.0
   }
 }

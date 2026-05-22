@@ -492,3 +492,44 @@ toolset (closed-source).
 - A specific session asks for an immersive mix
 - Don't do this as a generic upgrade — the complexity is large and rock-
   band-stem-mixing rarely benefits from Atmos
+
+---
+
+## 10. Docs refactor — split CLAUDE.md + knowledge.md into topical files
+
+**What.** CLAUDE.md is currently 800+ lines, docs/knowledge.md is 1500+ lines.
+Both are single monolithic files that have grown organically and are hard
+to navigate. Split into topical sub-files:
+
+```
+CLAUDE.md                       # tight operational guide (200-300 lines max)
+  → links to:
+docs/
+  gain_staging.md               # per-clip vs per-channel, autotrim, headroom
+  mixing_conventions.md         # panning, balance, premaster handoff
+  mastering.md                  # master_mix chain, formats, master_health
+  analysis_decision_tree.md     # the big table; quoted by CLAUDE.md
+  vocal_pipeline.md             # de-esser, pitch correct, vocal chain order
+  forensic.md                   # find_clicks, polarity, source forward
+  knowledge.md                  # remaining: domain ref, frequency bands
+```
+
+**Why.** The May 2026 panning miss happened partly because the agent skimmed
+a 2300-line doc set and the panning convention literally wasn't in there.
+Smaller topical files are easier to fully ingest and easier to add to. The
+agent decision tree should be a focused 100-line table, not buried in a
+800-line operational doc.
+
+**Scope.** Medium. 2-3 hours of editing — most content already exists, just
+needs reorganising. The links from CLAUDE.md to the sub-files need to be
+clear and discoverable. Tests don't change. Memory entries don't change
+(they reference concepts, not file paths). The risk is that the next
+contributor doesn't notice the new structure and adds back to CLAUDE.md
+inline.
+
+**Triggers.** Worth doing when:
+- CLAUDE.md crosses ~1000 lines or knowledge.md crosses ~2000 lines (close
+  to that now)
+- A user reports that the agent missed something the docs cover (already
+  happened in May 2026 — panning conventions)
+- Onboarding a second contributor / cross-checking with another agent
