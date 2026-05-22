@@ -1,9 +1,17 @@
 """Replay a mix_chain.json recall sheet — rebuild the entire mix from scratch.
 
 Reads a mix_chain.json (produced by `tools/build_chain.py`) and re-runs every
-processing step on every active stem in the recorded order, by calling the
-existing apply_*.py CLI tools via subprocess. After all stems are rebuilt,
-runs `render_mix --render --stems` against the session's mix_config.json.
+processing step on every active stem in the recorded order. After all stems
+are rebuilt, runs `render_mix --render --stems` against the session's
+mix_config.json.
+
+**In-process mode (default):** the apply_*.py modules are imported once and
+each step is dispatched to its callable function directly. Avoids per-step
+Python cold-start (~3-5s × N steps) — a 25-step chain replay runs in seconds
+of DSP time instead of minutes of subprocess overhead.
+
+**Subprocess mode (`--subprocess`):** falls back to spawning `python tool.py`
+for each step. Useful for debugging when in-process state might be misleading.
 
 Usage:
   python tools/replay_chain.py output/<session>/mix_chain.json
@@ -15,6 +23,9 @@ Usage:
 
   python tools/replay_chain.py output/<session>/mix_chain.json --stem "KICK IN.05"
   # Replay a single stem only (for debugging)
+
+  python tools/replay_chain.py output/<session>/mix_chain.json --subprocess
+  # Force the old subprocess path (each step in its own Python process)
 
 The default behaviour is overwrite-in-place — the original output/<session>/
 directory is the target. Back up first if you want to keep the previous run.
@@ -28,10 +39,15 @@ import shlex
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 
 TOOLS_DIR = Path(__file__).resolve().parent
+
+# Make sibling tools importable when this file is run directly (not as a module)
+if str(TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOLS_DIR))
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +312,275 @@ _STEP_TO_BUILDER = {
 }
 
 
+# ---------------------------------------------------------------------------
+# In-process dispatch — (callable, kwargs) instead of argv
+# ---------------------------------------------------------------------------
+#
+# Imports are lazy so --dry-run / --subprocess modes pay no import cost.
+
+def _lazy_import(modname: str):
+    import importlib
+    return importlib.import_module(modname)
+
+
+def _call_gain_per_clip(step: dict, session_json: Path):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent.parent  # .../tracks/
+    track_name = step["input"].split(":", 1)[1] if ":" in step["input"] else step["input"]
+    mod = _lazy_import("apply_gain")
+    return mod.apply_gain_per_clip, {
+        "session_json": session_json,
+        "output_dir": output_dir,
+        "track_names": [track_name],
+        "all_tracks": False,
+        "target_lufs": args.get("target_lufs"),
+        "peak_ceiling_db": float(args.get("peak_ceiling_db", -1.0)),
+        "normalize": bool(args.get("normalize", True)),
+    }
+
+
+def _call_gain_per_channel(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_gain")
+    kwargs = {
+        "file_path": Path(step["input"]),
+        "output_dir": output_dir,
+        "peak_ceiling_db": float(args.get("peak_ceiling_db", -1.0)),
+    }
+    if "gain_db" in args:
+        kwargs["gain_db"] = float(args["gain_db"])
+    elif "target_lufs" in args:
+        kwargs["target_lufs"] = float(args["target_lufs"])
+    return mod.apply_gain_per_channel, kwargs
+
+
+def _call_align(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("align_phase")
+    return mod.align_phase, {
+        "reference_path": Path(args["reference"]),
+        "target_path": Path(step["input"]),
+        "output_dir": output_dir,
+        "max_delay_ms": float(args.get("max_delay_ms", 20.0)),
+        "segment_sec": float(args.get("segment_sec", 10.0)),
+    }
+
+
+def _call_eq(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_eq")
+    # Preset → expand to filters list (apply_eq's signature only takes filters list)
+    filters = args.get("filters", [])
+    if "preset" in args and not filters:
+        preset = args["preset"]
+        preset_path = TOOLS_DIR / "presets" / f"{preset}.json"
+        if preset_path.exists():
+            filters = json.loads(preset_path.read_text(encoding="utf-8")).get("filters", [])
+    return mod.apply_eq, {
+        "input_path": Path(step["input"]),
+        "output_dir": output_dir,
+        "filters": filters,
+        "phase": args.get("phase", "minimum"),
+    }
+
+
+def _call_comp(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_compression")
+    # apply_compression signature requires threshold/ratio/attack/release; if a
+    # preset is provided, expand to those values.
+    if "preset" in args:
+        preset_path = TOOLS_DIR / "presets" / f"{args['preset']}.json"
+        if preset_path.exists():
+            preset_data = json.loads(preset_path.read_text(encoding="utf-8"))
+            p = preset_data.get("settings", preset_data)
+            kwargs = {
+                "input_path": Path(step["input"]),
+                "output_dir": output_dir,
+                "threshold_db": float(p.get("threshold_db", -10.0)),
+                "ratio": float(p.get("ratio", 2.0)),
+                "attack_ms": float(p.get("attack_ms", 10.0)),
+                "release_ms": float(p.get("release_ms", 100.0)),
+                "makeup_db": p.get("makeup_db"),
+                "mix": float(p.get("mix", 1.0)),
+            }
+        else:
+            raise FileNotFoundError(f"comp preset not found: {preset_path}")
+    else:
+        kwargs = {
+            "input_path": Path(step["input"]),
+            "output_dir": output_dir,
+            "threshold_db": float(args["threshold_db"]),
+            "ratio": float(args["ratio"]),
+            "attack_ms": float(args["attack_ms"]),
+            "release_ms": float(args["release_ms"]),
+            "makeup_db": args.get("makeup_db"),
+            "mix": float(args.get("mix", 1.0)),
+        }
+    return mod.apply_compression, kwargs
+
+
+def _call_gate(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_gate")
+    if "preset" in args:
+        preset_path = TOOLS_DIR / "presets" / f"{args['preset']}.json"
+        if preset_path.exists():
+            p = json.loads(preset_path.read_text(encoding="utf-8")).get("settings", {})
+            kwargs = {
+                "input_path": Path(step["input"]),
+                "output_dir": output_dir,
+                "threshold_db": float(p.get("threshold_db", -40.0)),
+                "range_db": float(p.get("range_db", 30.0)),
+                "attack_ms": float(p.get("attack_ms", 1.0)),
+                "hold_ms": float(p.get("hold_ms", 50.0)),
+                "release_ms": float(p.get("release_ms", 100.0)),
+                "hysteresis_db": float(p.get("hysteresis_db", 6.0)),
+            }
+        else:
+            raise FileNotFoundError(f"gate preset not found: {preset_path}")
+    else:
+        kwargs = {
+            "input_path": Path(step["input"]),
+            "output_dir": output_dir,
+            "threshold_db": float(args["threshold_db"]),
+            "range_db": float(args["range_db"]),
+            "attack_ms": float(args["attack_ms"]),
+            "hold_ms": float(args["hold_ms"]),
+            "release_ms": float(args["release_ms"]),
+            "hysteresis_db": float(args.get("hysteresis_db", 6.0)),
+        }
+    return mod.apply_gate, kwargs
+
+
+def _call_amp(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_amp")
+    kwargs = {
+        "file_path": Path(step["input"]),
+        "output_dir": output_dir,
+    }
+    if "preset" in args:
+        preset_path = TOOLS_DIR / "presets" / f"{args['preset']}.json"
+        if preset_path.exists():
+            p = json.loads(preset_path.read_text(encoding="utf-8")).get("settings", {})
+            for k in ("drive", "asymmetry", "hp_hz", "lp_hz", "low_shelf_hz",
+                      "low_shelf_db", "mid_hz", "mid_db", "mid_q"):
+                if k in p:
+                    kwargs[k] = p[k]
+    for k in ("drive", "asymmetry", "hp_hz", "lp_hz", "low_shelf_hz",
+              "low_shelf_db", "mid_hz", "mid_db", "mid_q"):
+        if k in args and args[k] is not None:
+            kwargs[k] = args[k]
+    return mod.apply_amp, kwargs
+
+
+def _call_reverb(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_reverb")
+    kwargs = {
+        "file_path": Path(step["input"]),
+        "output_dir": output_dir,
+    }
+    if "preset" in args:
+        # apply_reverb has a PRESETS dict — let the callable resolve it via preset_name kwarg
+        kwargs["preset_name"] = args["preset"]
+    for k_json, k_kwarg in (
+        ("pre_delay_ms", "pre_delay_ms"),
+        ("wet", "wet"),
+        ("hp_hz", "hp_hz"),
+        ("lp_hz", "lp_hz"),
+        ("ir", "ir_path"),
+        ("send", "send"),
+    ):
+        if k_json in args and args[k_json] is not None:
+            kwargs[k_kwarg] = args[k_json]
+    return mod.apply_reverb, kwargs
+
+
+def _call_transient(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_transient")
+    kwargs = {
+        "input_path": Path(step["input"]),
+        "output_dir": output_dir,
+        "preset": args.get("preset"),
+    }
+    for k in ("attack_db", "sustain_db", "fast_ms", "slow_ms"):
+        if k in args and args[k] is not None:
+            kwargs[k] = args[k]
+    return mod.apply_transient_file, kwargs
+
+
+def _call_saturation(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_saturation")
+    kwargs = {
+        "input_path": Path(step["input"]),
+        "output_dir": output_dir,
+    }
+    if "preset" in args:
+        kwargs["preset_name"] = args["preset"]
+    for k in ("mode", "drive", "asymmetry", "mix"):
+        if k in args and args[k] is not None:
+            kwargs[k] = args[k]
+    return mod.apply_saturation, kwargs
+
+
+def _call_delay(step: dict):
+    args = step["args"]
+    output_dir = Path(step["output"]).parent
+    mod = _lazy_import("apply_delay")
+    kwargs = {
+        "input_path": Path(step["input"]),
+        "output_dir": output_dir,
+    }
+    if "preset" in args:
+        kwargs["preset_name"] = args["preset"]
+    for k_json, k_kwarg in (
+        ("mode", "mode"), ("delay_ms", "delay_ms"), ("feedback", "feedback"),
+        ("mix", "mix"), ("bpm", "bpm"), ("division", "division"),
+        ("hp_hz", "hp_hz"), ("lp_hz", "lp_hz"), ("send", "send"),
+    ):
+        if k_json in args and args[k_json] is not None:
+            kwargs[k_kwarg] = args[k_json]
+    return mod.apply_delay, kwargs
+
+
+_STEP_TO_CALLABLE = {
+    "gain_per_clip":     _call_gain_per_clip,
+    "gain_per_channel":  _call_gain_per_channel,
+    "align_phase":       _call_align,
+    "eq":                _call_eq,
+    "comp":              _call_comp,
+    "gate":              _call_gate,
+    "amp":               _call_amp,
+    "reverb":            _call_reverb,
+    "transient":         _call_transient,
+    "saturation":        _call_saturation,
+    "delay":             _call_delay,
+}
+
+
+def _build_inproc(step: dict, session_json: Path):
+    """Return (callable, kwargs) for an in-process call, or (None, None) if unsupported."""
+    builder = _STEP_TO_CALLABLE.get(step["step"])
+    if builder is None:
+        return None, None
+    if step["step"] == "gain_per_clip":
+        return builder(step, session_json)
+    return builder(step)
+
+
 def _build_argv(step: dict, session_json: Path) -> list[str] | None:
     """Return argv to run for this chain step, or None if unsupported."""
     builder = _STEP_TO_BUILDER.get(step["step"])
@@ -319,7 +604,15 @@ def _resolve_chain_path(arg: Path) -> Path:
     return arg
 
 
-def replay(chain_path: Path, dry_run: bool, stem_filter: str | None) -> int:
+def replay(
+    chain_path: Path,
+    dry_run: bool,
+    stem_filter: str | None,
+    use_subprocess: bool = False,
+) -> int:
+    """Replay a mix_chain.json. Default = in-process dispatch (fast). Set
+    `use_subprocess=True` to spawn one Python per step (legacy / debugging).
+    """
     chain = json.loads(chain_path.read_text(encoding="utf-8"))
     session_json = Path(chain.get("session_json", ""))
     mix_config = Path(chain.get("mix_config", ""))
@@ -328,6 +621,9 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None) -> int:
         if not session_json.exists():
             print(f"FATAL: session.json not found at {session_json}", file=sys.stderr)
             return 2
+
+    mode_label = "subprocess" if (use_subprocess or dry_run) else "in-process"
+    print(f"Replay mode: {mode_label}")
 
     n_stems = 0
     n_steps_total = 0
@@ -355,21 +651,47 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None) -> int:
             if dry_run:
                 print(f"      $ {quoted}")
                 continue
-            proc = subprocess.run(argv, capture_output=True, text=True)
-            if proc.returncode != 0:
+            if use_subprocess:
+                proc = subprocess.run(argv, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    n_steps_failed += 1
+                    print(f"      FAIL ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
+                continue
+            # In-process dispatch
+            func, kwargs = _build_inproc(step, session_json)
+            if func is None:
+                # Fall back to subprocess for unsupported in-process
+                proc = subprocess.run(argv, capture_output=True, text=True)
+                if proc.returncode != 0:
+                    n_steps_failed += 1
+                    print(f"      FAIL ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
+                continue
+            try:
+                func(**kwargs)
+            except Exception as exc:
                 n_steps_failed += 1
-                print(f"      FAIL ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
+                print(f"      FAIL (in-process): {exc}", file=sys.stderr)
+                traceback.print_exc(limit=4)
 
     if not dry_run and mix_config.exists():
         print(f"\n=== Rendering mix ({mix_config}) ===")
-        argv = [
-            sys.executable, str(TOOLS_DIR / "render_mix.py"),
-            str(mix_config), "--render", "--stems",
-        ]
-        proc = subprocess.run(argv)
-        if proc.returncode != 0:
-            print("FAIL: render_mix returned non-zero", file=sys.stderr)
-            n_steps_failed += 1
+        if use_subprocess:
+            argv = [
+                sys.executable, str(TOOLS_DIR / "render_mix.py"),
+                str(mix_config), "--render", "--stems",
+            ]
+            proc = subprocess.run(argv)
+            if proc.returncode != 0:
+                print("FAIL: render_mix returned non-zero", file=sys.stderr)
+                n_steps_failed += 1
+        else:
+            try:
+                render_mix_mod = _lazy_import("render_mix")
+                render_mix_mod.render_mix(mix_config, output_wav=None, render_stems=True)
+            except Exception as exc:
+                n_steps_failed += 1
+                print(f"FAIL: render_mix (in-process): {exc}", file=sys.stderr)
+                traceback.print_exc(limit=4)
 
     elapsed = time.time() - t0
     print(f"\nReplay done in {elapsed:.1f}s — {n_stems} stems, {n_steps_total} steps run, "
@@ -387,6 +709,10 @@ def main() -> None:
                         help="Print every command without executing")
     parser.add_argument("--stem", type=str, default=None,
                         help="Replay only this single stem (for debugging)")
+    parser.add_argument("--subprocess", action="store_true",
+                        help="Force per-step subprocess dispatch (legacy / debugging). "
+                             "Default is in-process: tool modules are imported once and "
+                             "called directly, skipping the ~3-5s Python cold-start per step.")
     args = parser.parse_args()
 
     chain_path = _resolve_chain_path(args.chain)
@@ -394,7 +720,12 @@ def main() -> None:
         print(f"FATAL: chain file not found: {chain_path}", file=sys.stderr)
         sys.exit(2)
 
-    rc = replay(chain_path, dry_run=args.dry_run, stem_filter=args.stem)
+    rc = replay(
+        chain_path,
+        dry_run=args.dry_run,
+        stem_filter=args.stem,
+        use_subprocess=args.subprocess,
+    )
     sys.exit(rc)
 
 

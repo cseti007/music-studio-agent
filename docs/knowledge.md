@@ -252,6 +252,76 @@ is only needed for final delivery to a specific platform.
 - Plugin unity gain: compensate output after each plugin so in ≈ out level-wise
 - Individual track headroom before plugins: aim for -18 to -12 dBFS peak
 
+### Bus auto-trim — the per-bus gain-staging invariant
+
+**Invariant:** every bus's dry-sum output (volume_db = 0) sits at **-18 LUFS**,
+regardless of how many stems it contains.
+
+**Why this matters.** Per-clip normalisation calibrates each clip to -18 LUFS.
+When a bus sums N stems, the bus integrated level rises roughly by `10·log10(N)`
+(more for correlated content, less for uncorrelated). A 15-stem drum bus
+therefore sits ~6–10 LUFS hotter than a 2-stem bass bus, even though every
+underlying clip was normalised identically. Without bus-level compensation,
+the master sum becomes peak-hot and the limiter has to crush it — which is
+where "túlvezérlés / recsegés" complaints originate. A style profile's
+`default_bus_volume_db` cannot fix this on its own: it assumes a single-stem
+baseline.
+
+**How render_mix solves it.** The bus has two gain fields:
+
+- `auto_trim_db` — calibration, written by `--generate-config` or
+  `--recompute-autotrim`. Brings the bus dry-sum output to -18 LUFS by
+  measuring the actual sum of active stems (per-track volume_db + pan + child
+  bus contributions, in topological order).
+- `volume_db` — taste, written by the style profile or the user. Pure relative
+  offset on top of the calibration.
+
+At render time, **effective gain = auto_trim_db + volume_db**. With volume_db = 0
+on every bus, every bus output sits at -18 LUFS at the bus's `final` stage.
+
+**Operational rules.**
+
+1. After `--generate-config`, the `auto_trim_db` field is already present —
+   trust it; do not manually compensate "drums is too hot" by lowering its
+   `volume_db`. That used to be the workaround for the missing calibration; it
+   now compounds with the auto-trim and pushes the bus way too quiet.
+2. If the user changes `active: true/false` on tracks **after** the config was
+   generated, re-run `python tools/render_mix.py mix_config.json --recompute-autotrim`.
+   The flag is surgical — only `auto_trim_db` is touched, everything else
+   (active flags, volume_db, pan, presets, sends) is preserved.
+3. The style profile's `default_bus_volume_db` populates `volume_db` —
+   `modern_rock` gives `vocal_lead: +2.0`, `guitar: -3.0`, etc. on top of the
+   calibration. These remain valid: they shape the relative balance once the
+   bus levels are unified.
+4. Master target after auto-trim: with 3–4 top-level buses each at -18 LUFS,
+   the master sum lands around -10 to -13 LUFS pre-norm. LUFS normalization to
+   -14 then applies a modest +1–4 dB; the limiter does ≤2 dB GR on transients.
+
+**Don't reach for `volume_db` to fix peak-hot drums.** -18 LUFS drums with
+22 dB crest factor produce peaks at ~0 dBFS — that's the nature of drums, not
+a bus level problem. If the master limiter still works too hard:
+
+- First, check `mix_report.json` `bus_peaks` — if a single bus dominates the
+  master peak, look at its bus comp preset.
+- For drums: the `comp_drum_bus` preset (4:1, -10 dB) does ~5 dB GR and tames
+  peaks. `comp_drum_bus_gentle` (2:1, -8 dB) does ~2.5 dB GR and preserves
+  more dynamics. Pick based on what the music needs, not on the peak number.
+- Adding `master.clipper` is the next move if peaks still exceed -3 dBFS at
+  master sum. The clipper's relevance check requires LRA ≥ 4 LU at the
+  measurement point, so if the upstream chain already squashed dynamics, the
+  clipper SKIPS — that is correct behavior, do not force.
+
+**What auto-trim does NOT fix.**
+- Low LRA from per-clip + per-bus compression. The autotrim doesn't touch
+  dynamic range; it only moves levels.
+- Phase-coherent doubling (e.g. `BASS DI CLEAN` + `BASS DI PEDAL` from the
+  same source). The autotrim *compensates* for the +3–6 dB doubling in the
+  bus sum (it sees the actual loudness), but the comb-filter coloration
+  between the two tracks remains. `align_phase.py` and/or deactivating one
+  copy is the right fix for that, surfaced by `phase_warnings` in mix_report.
+- Master peak limiting on percussive material. Drums at -18 LUFS just have
+  hot peaks; nothing in the bus chain can change that without compression.
+
 ---
 
 ## Frequency Bands (reference)

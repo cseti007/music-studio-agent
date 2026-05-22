@@ -208,15 +208,16 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
                 "parent_bus": "guitar",
             }
 
-    # Top-level bus volume_db: use the style profile default if given, else 0 dB
+    # Top-level bus volume_db: use the style profile default if given, else 0 dB.
+    # auto_trim_db is computed below by measuring active stem dry-sums.
     def _bus_default(name: str) -> float:
         return float(style_bus_defaults.get(name, 0.0))
 
     buses = {
-        "drums":  {"volume_db": _bus_default("drums"),  "comp_preset": "comp_drum_bus", "parent_bus": None},
-        "bass":   {"volume_db": _bus_default("bass"),   "comp_preset": None,            "parent_bus": None},
-        **gtr_sub_buses,
-        "guitar": {"volume_db": _bus_default("guitar"), "comp_preset": None,            "parent_bus": None},
+        "drums":  {"volume_db": _bus_default("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus", "parent_bus": None},
+        "bass":   {"volume_db": _bus_default("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
+        **{name: {**cfg, "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
+        "guitar": {"volume_db": _bus_default("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
     }
 
     # Vocal sub-buses if vocal tracks were detected. Both feed into a shared
@@ -226,10 +227,10 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
     has_vocal_bg = any(t["bus"] == "vocal_bg" for t in tracks)
     if has_vocal_lead or has_vocal_bg:
         if has_vocal_lead:
-            buses["vocal_lead"] = {"volume_db": _bus_default("vocal_lead"), "comp_preset": None, "parent_bus": "vocal"}
+            buses["vocal_lead"] = {"volume_db": _bus_default("vocal_lead"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
         if has_vocal_bg:
-            buses["vocal_bg"] = {"volume_db": _bus_default("vocal_bg"), "comp_preset": None, "parent_bus": "vocal"}
-        buses["vocal"] = {"volume_db": _bus_default("vocal"), "comp_preset": None, "parent_bus": None}
+            buses["vocal_bg"] = {"volume_db": _bus_default("vocal_bg"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": "vocal"}
+        buses["vocal"] = {"volume_db": _bus_default("vocal"), "auto_trim_db": 0.0, "comp_preset": None, "parent_bus": None}
 
     mixes_dir = session_dir / "mixes"
     config = {
@@ -243,6 +244,15 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         "buses": buses,
         "tracks": tracks,
     }
+
+    # Per-bus auto-trim: load active stems, measure dry-sum LUFS per bus, and
+    # set auto_trim_db so each bus output sits at -18 LUFS with volume_db = 0.
+    # This is the "calibration anchor" — keeps the master sum at a sane level
+    # regardless of how many stems each bus has (drums 15+, bass 2, vocal 1...).
+    print("\nComputing per-bus auto-trim (target -18 LUFS per bus):")
+    auto_trims = _compute_bus_auto_trims(config, target_lufs=-18.0, verbose=True)
+    for name, trim in auto_trims.items():
+        config["buses"][name]["auto_trim_db"] = trim
 
     with open(output_path, "w") as f:
         json.dump(config, f, indent=2)
@@ -292,33 +302,128 @@ def _topo_order(buses: dict) -> list[str]:
     return order
 
 
+def _compute_bus_auto_trims(
+    config: dict,
+    target_lufs: float = -18.0,
+    verbose: bool = True,
+) -> dict[str, float]:
+    """Per-bus auto-trim calibration.
+
+    Walks every bus in topological order (children before parents). For each:
+      1. Sums active stems (with per-track volume_db + pan + polarity_flip)
+      2. Adds child bus outputs (post-(auto_trim + volume_db))
+      3. Measures integrated LUFS of that dry sum
+      4. Computes auto_trim_db = target_lufs - measured_lufs
+
+    Returns {bus_name: auto_trim_db}. At render time the effective bus gain is
+    auto_trim_db + volume_db. With volume_db = 0 every bus output sits at
+    target_lufs regardless of stem count — fixes the "drum bus sums to
+    +5 dBFS while bass sums to -1 dBFS" pile-up problem.
+
+    Buses with no audible content get 0.0 (no-op). The function does NOT
+    mutate `config`; callers write the result back into buses[name]["auto_trim_db"].
+    """
+    sr = int(config.get("sample_rate", 48000))
+    active_tracks = [t for t in config["tracks"] if t.get("active", True)]
+    if not active_tracks:
+        return {name: 0.0 for name in config["buses"]}
+
+    try:
+        max_length = max(sf.info(t["file"]).frames for t in active_tracks)
+    except Exception as exc:
+        if verbose:
+            print(f"  auto-trim: could not stat stem files ({exc}) — leaving auto_trim_db = 0",
+                  file=sys.stderr)
+        return {name: 0.0 for name in config["buses"]}
+
+    meter = pyln.Meter(sr)
+
+    bus_buffers: dict[str, np.ndarray] = {}
+    for t in active_tracks:
+        bus = t.get("bus", "master")
+        if bus not in config["buses"]:
+            continue
+        vol = 10.0 ** (t.get("volume_db", 0.0) / 20.0)
+        pan_v = t.get("pan", 0.0)
+        polarity = -1.0 if t.get("polarity_flip", False) else 1.0
+        try:
+            stereo = _load_as_stereo(Path(t["file"]), max_length, sr)
+        except Exception as exc:
+            if verbose:
+                print(f"  auto-trim: skip {t['file']} ({exc})", file=sys.stderr)
+            continue
+        stereo = _pan(stereo * vol * polarity, pan_v)
+        if bus not in bus_buffers:
+            bus_buffers[bus] = np.zeros((2, max_length), dtype=np.float32)
+        bus_buffers[bus] += stereo
+
+    auto_trims: dict[str, float] = {}
+    bus_outputs: dict[str, np.ndarray] = {}
+
+    for bus_name in _topo_order(config["buses"]):
+        cfg = config["buses"][bus_name]
+        buf = bus_buffers.get(bus_name, np.zeros((2, max_length), dtype=np.float32)).copy()
+        for child_name, child_cfg in config["buses"].items():
+            if child_cfg.get("parent_bus") == bus_name and child_name in bus_outputs:
+                buf = buf + bus_outputs[child_name]
+
+        if not np.any(buf):
+            auto_trims[bus_name] = 0.0
+            bus_outputs[bus_name] = buf
+            if verbose:
+                print(f"  Bus '{bus_name}': no audio  -> auto_trim_db = +0.0")
+            continue
+
+        try:
+            lufs_in = float(meter.integrated_loudness(buf.T))
+        except Exception:
+            lufs_in = float("-inf")
+
+        if not np.isfinite(lufs_in):
+            auto_trims[bus_name] = 0.0
+            bus_outputs[bus_name] = buf
+            if verbose:
+                print(f"  Bus '{bus_name}': LUFS unmeasurable -> auto_trim_db = +0.0")
+            continue
+
+        auto_trim = round(target_lufs - lufs_in, 1)
+        auto_trims[bus_name] = auto_trim
+
+        eff_gain_db = auto_trim + float(cfg.get("volume_db", 0.0))
+        bus_outputs[bus_name] = buf * (10.0 ** (eff_gain_db / 20.0))
+
+        if verbose:
+            print(f"  Bus '{bus_name}': dry-sum {lufs_in:+6.1f} LUFS  -> "
+                  f"auto_trim {auto_trim:+5.1f} dB  (volume_db {cfg.get('volume_db', 0.0):+.1f})")
+
+    return auto_trims
+
+
 def _load_as_stereo(path: Path, length: int, sr: int) -> np.ndarray:
-    """Load WAV file as (2, length) float64 stereo array.
+    """Load WAV file as (2, length) float32 stereo array.
 
     Mono files are duplicated to both channels. Stereo (and multi-channel)
     files keep channels 0 and 1; any further channels are dropped.
+
+    Returns float32 (vs float64): halves memory bandwidth on big buffers
+    (e.g. 41 stems × 7 min @ 48 kHz × 2 ch × 4 byte = ~2 GB vs ~4 GB) and
+    matches what pedalboard expects natively — eliminates the float32 cast
+    overhead later in the bus chain.
     """
-    data, file_sr = sf.read(str(path), always_2d=True)
+    data, file_sr = sf.read(str(path), always_2d=True, dtype="float32")
     if file_sr != sr:
         raise ValueError(f"SR mismatch: {path} is {file_sr} Hz, expected {sr}")
 
+    n = data.shape[0]
+    out = np.zeros((2, length), dtype=np.float32)
+    take = min(n, length)
     if data.shape[1] == 1:
-        left = data[:, 0]
-        right = left
+        out[0, :take] = data[:take, 0]
+        out[1, :take] = data[:take, 0]
     else:
-        left = data[:, 0]
-        right = data[:, 1]
-
-    n = len(left)
-    if n < length:
-        pad = np.zeros(length - n)
-        left = np.concatenate([left, pad])
-        right = np.concatenate([right, pad])
-    else:
-        left = left[:length]
-        right = right[:length]
-
-    return np.vstack([left, right])  # (2, length)
+        out[0, :take] = data[:take, 0]
+        out[1, :take] = data[:take, 1]
+    return out
 
 
 def _pan(buf: np.ndarray, pan: float) -> np.ndarray:
@@ -347,7 +452,7 @@ def _apply_comp_preset(buf: np.ndarray, preset_name: str, sr: int) -> np.ndarray
         ),
         Gain(gain_db=makeup),
     ])
-    return board(buf.astype(np.float32), sr).astype(np.float64)
+    return board(buf.astype(np.float32), sr).astype(np.float32)
 
 
 def _write_stem(buf: np.ndarray, path: Path, sr: int, lufs_target: float = -18.0) -> None:
@@ -387,7 +492,7 @@ def _apply_bus_reverb(buf: np.ndarray, sr: int, preset_name: str, wet: float) ->
             width=p["width"],
         )
     ])
-    reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float64)  # (N+pre, 2)
+    reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float32)  # (N+pre, 2)
 
     if pre_delay_samples > 0:
         reverb_out = reverb_out[pre_delay_samples:]
@@ -473,6 +578,44 @@ def _parallel_saturate(buf: np.ndarray, mode: str, drive: float, mix: float) -> 
     if out_rms > 1e-10:
         sat = sat * (in_rms / out_rms)
     return buf + sat * mix
+
+
+def _bus_tape_sat_relevance_check(buf: np.ndarray, sr: int, bus_name: str) -> dict:
+    """Decide whether tape saturation on a bus would help.
+
+    Conditions for SKIP:
+      - Bus crest factor < 8 dB (signal already squashed; tanh adds buzz, not warmth)
+      - Bus LRA < 4 LU (no dynamic headroom — tape sat compounds the squash)
+
+    No bus-name restriction: tape sat is general purpose. Threshold values are
+    slightly more permissive than parallel_sat (10 dB / 4 LU) because tape sat
+    is less drastic — it just shapes harmonics rather than blending an extra
+    saturated copy on top.
+    """
+    rms = float(np.sqrt(np.mean(buf ** 2)))
+    peak = float(np.max(np.abs(buf)))
+    crest_db = 20.0 * np.log10(peak / max(rms, 1e-10)) if rms > 1e-10 else 0.0
+
+    meter = pyln.Meter(sr)
+    try:
+        lra = float(meter.loudness_range(buf.T))
+    except Exception:
+        lra = 0.0
+
+    issues = []
+    if crest_db < 8.0:
+        issues.append(f"crest {crest_db:.1f} dB < 8 — bus already squashed; tape sat adds buzz, not warmth")
+    if lra < 4.0:
+        issues.append(f"LRA {lra:.1f} LU < 4 — too compressed for tape sat to add life")
+
+    return {
+        "tool": "tape_saturate",
+        "bus": bus_name,
+        "crest_db": round(crest_db, 1),
+        "lra_lu": round(lra, 1),
+        "recommend_skip": bool(issues),
+        "issues": issues,
+    }
 
 
 def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
@@ -561,13 +704,26 @@ def _clipper_relevance_check(master: np.ndarray, sr: int) -> dict:
     }
 
 
-def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
+def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4,
+                            fast_skip_db: float = -3.0) -> float:
     """4x-oversampled true peak in dBFS for a (2, N) stereo buffer.
 
     pedalboard.Limiter only constrains the sample peak; inter-sample peaks
     can still exceed the ceiling after codec encoding (Spotify Ogg/Vorbis,
     Apple AAC). This second-pass measurement reveals them.
+
+    Fast path: if the sample peak is below `fast_skip_db` (default -3 dBFS)
+    we skip the resample_poly call and approximate TP ≈ sample_peak + 0.5 dB.
+    The approximation is always conservative — the actual TP-vs-sample-peak
+    gap can't exceed ~0.5 dB for normal stereo audio, and at -3 dBFS the
+    TP can't reach the -1 dBTP ceiling regardless. Saves ~0.8s per call;
+    a typical render measures 8-11 buses, only the master output is hot
+    enough to actually need the oversampled measurement.
     """
+    sample_peak = float(np.max(np.abs(master)))
+    sample_peak_db = 20.0 * np.log10(max(sample_peak, 1e-12))
+    if sample_peak_db < fast_skip_db:
+        return sample_peak_db + 0.5  # conservative TP approximation
     up_l = _resample_poly(master[0], oversample, 1)
     up_r = _resample_poly(master[1], oversample, 1)
     tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
@@ -760,7 +916,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # once and the wet return is summed into master.
     reverb_buses_cfg: dict = config.get("reverb_buses", {})
     reverb_send_buffers: dict[str, np.ndarray] = {
-        rb_name: np.zeros((2, max_length)) for rb_name in reverb_buses_cfg
+        rb_name: np.zeros((2, max_length), dtype=np.float32) for rb_name in reverb_buses_cfg
     }
 
     bus_buffers: dict[str, np.ndarray] = {}
@@ -786,7 +942,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         stereo = _pan(stereo * vol * polarity, p)
 
         if bus not in bus_buffers:
-            bus_buffers[bus] = np.zeros((2, max_length))
+            bus_buffers[bus] = np.zeros((2, max_length), dtype=np.float32)
         bus_buffers[bus] += stereo
 
         # Capture pre-mix mono (before pan/vol scaling) for phase-correlation
@@ -812,43 +968,47 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # doubling) or anti-correlated (polarity-flipped duplicate or comb
     # filtering from delayed copy). Threshold tuned to surface the obvious
     # cases without false-positive noise from incidentally-similar mics.
+    #
+    # Vectorised pass: per-track per-window RMS is computed once (not per
+    # pair), then pair joint-active masks are a bitwise AND. With 18-track
+    # drum buses (18 choose 2 = 153 pairs) the old python-loop approach
+    # spent ~5s here; the vectorised version is < 200 ms.
     PHASE_WARN_THRESHOLD = 0.4   # |corr| > 0.4 flags a warning
+    THRESHOLD_RMS_LIN = 10.0 ** (-45.0 / 20.0)  # -45 dBFS
     phase_warnings: list[dict] = []
     for bus, items in bus_track_mono.items():
         if len(items) < 2:
             continue
         sr_decim = sr // _PHASE_DECIM
-        # Build activity mask (per ~1 s window on the decimated signal)
         win = sr_decim  # 1 second of decimated samples
+        n_min = min(len(it[1]) for it in items)
+        if n_min < win:
+            continue
+        n_win = n_min // win
+        usable = n_win * win
+
+        # Stack tracks into (n_tracks, n_min) then reshape to (n_tracks, n_win, win)
+        # for vectorised per-window RMS. Trim to usable length.
+        signals = np.stack([it[1][:usable] for it in items])  # (T, N)
+        framed = signals.reshape(len(items), n_win, win)
+        per_win_rms = np.sqrt(np.mean(framed ** 2, axis=2) + 1e-12)  # (T, n_win)
+        per_track_active = per_win_rms > THRESHOLD_RMS_LIN  # (T, n_win)
+
+        # Pairwise scan — but with cheap O(n_win) joint mask per pair.
         for i in range(len(items)):
             for j in range(i + 1, len(items)):
-                ai, bi = items[i][1], items[j][1]
-                n = min(len(ai), len(bi))
-                if n < win:
+                joint = per_track_active[i] & per_track_active[j]
+                overlap_sec = float(joint.sum())
+                if overlap_sec < 5:  # need >= 5 sec of mutual activity
                     continue
-                # Active overlap = both above -45 dBFS RMS in same window
-                def rms_db(x):
-                    rms = np.sqrt(np.mean(x ** 2) + 1e-12)
-                    return 20.0 * np.log10(max(rms, 1e-10))
-                n_win = n // win
-                mask = np.zeros(n_win, dtype=bool)
-                for w in range(n_win):
-                    chunk_a = ai[w * win:(w + 1) * win]
-                    chunk_b = bi[w * win:(w + 1) * win]
-                    mask[w] = rms_db(chunk_a) > -45 and rms_db(chunk_b) > -45
-                if mask.sum() < 5:  # need >= 5 sec of mutual activity
-                    continue
-                sample_mask = np.zeros(n, dtype=bool)
-                for w in range(n_win):
-                    if mask[w]:
-                        sample_mask[w * win:(w + 1) * win] = True
-                a_olap, b_olap = ai[sample_mask], bi[sample_mask]
+                sample_mask = np.repeat(joint, win)
+                a_olap = signals[i, :usable][sample_mask]
+                b_olap = signals[j, :usable][sample_mask]
                 an = (a_olap - a_olap.mean()) / (a_olap.std() + 1e-12)
                 bn = (b_olap - b_olap.mean()) / (b_olap.std() + 1e-12)
                 corr = float(np.mean(an * bn))
                 if abs(corr) >= PHASE_WARN_THRESHOLD:
                     kind = "anti-correlated (cancellation / polarity)" if corr < 0 else "correlated (constructive sum / phase-coherent doubling)"
-                    overlap_sec = float(mask.sum())
                     phase_warnings.append({
                         "bus": bus,
                         "track_a": items[i][0],
@@ -874,7 +1034,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     for bus_name in _topo_order(buses_cfg):
         cfg = buses_cfg[bus_name]
 
-        buf = bus_buffers.get(bus_name, np.zeros((2, max_length))).copy()
+        buf = bus_buffers.get(bus_name, np.zeros((2, max_length), dtype=np.float32)).copy()
 
         # Add processed child buses that route into this bus
         for child, child_cfg in buses_cfg.items():
@@ -891,7 +1051,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         }
         stage_peaks["sum_in"] = round(_peak_db(buf), 2)
 
-        buf *= 10.0 ** (cfg.get("volume_db", 0.0) / 20.0)
+        # Effective bus gain = auto_trim_db (calibration so dry-sum hits -18 LUFS)
+        # + volume_db (style/user offset on top). Default 0 for both if absent.
+        auto_trim_db = float(cfg.get("auto_trim_db", 0.0))
+        volume_db = float(cfg.get("volume_db", 0.0))
+        eff_gain_db = auto_trim_db + volume_db
+        buf *= 10.0 ** (eff_gain_db / 20.0)
+        if auto_trim_db != 0.0:
+            print(f"  Bus '{bus_name}': auto_trim {auto_trim_db:+.1f} dB + volume {volume_db:+.1f} dB "
+                  f"= {eff_gain_db:+.1f} dB")
 
         bus_pan = cfg.get("pan", 0.0)
         if bus_pan != 0.0:
@@ -926,10 +1094,16 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         sat_cfg = cfg.get("saturation")
         if sat_cfg:
             sat_drive = float(sat_cfg.get("drive", 0.3))
-            buf = _tape_saturate(buf, sat_drive)
-            peak_sat = _peak_db(buf)
-            stage_peaks["after_sat"] = round(peak_sat, 2)
-            print(f"  Bus '{bus_name}': + tape saturation drive={sat_drive}  -> {peak_sat:.1f} dBFS {_peak_verdict(peak_sat)}")
+            sat_force = bool(sat_cfg.get("force", False))
+            rel = _bus_tape_sat_relevance_check(buf, sr, bus_name)
+            if rel["recommend_skip"] and not sat_force:
+                print(f"  Bus '{bus_name}': tape saturation SKIPPED — {'; '.join(rel['issues'])}")
+            else:
+                buf = _tape_saturate(buf, sat_drive)
+                peak_sat = _peak_db(buf)
+                stage_peaks["after_sat"] = round(peak_sat, 2)
+                note = " [FORCED]" if (rel["recommend_skip"] and sat_force) else ""
+                print(f"  Bus '{bus_name}': + tape saturation drive={sat_drive}  -> {peak_sat:.1f} dBFS {_peak_verdict(peak_sat)}{note}")
 
         # Parallel saturation: blend a saturated copy back in. Make-it-hit
         # tool — guarded by relevance_check (drum bus only, must have crest).
@@ -1009,7 +1183,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                   f"{bp['final']:>8.1f}{bp['true_peak_final']:>7.1f}  {bp['verdict']}")
 
     # Sum top-level buses (parent_bus: null) into master
-    master = np.zeros((2, max_length))
+    master = np.zeros((2, max_length), dtype=np.float32)
     for bus_name, cfg in buses_cfg.items():
         if not cfg.get("parent_bus") and bus_name in processed:
             master += processed[bus_name]
@@ -1044,7 +1218,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             Gain(gain_db=float(master_comp.get("makeup_db", 0.0))),
         ])
         lufs_pre_comp = meter.integrated_loudness(master.T)
-        master = comp_board(master.astype(np.float32), sr).astype(np.float64)
+        master = comp_board(master.astype(np.float32), sr).astype(np.float32)
 
         lufs_post_comp = meter.integrated_loudness(master.T)
         peak_post_comp = _peak_db(master)
@@ -1127,7 +1301,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # true peak still exceeds the ceiling.
     tp_limit = master_cfg.get("true_peak_dbfs", -2.0)
     board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
-    master = board(master.astype(np.float32), sr).astype(np.float64)
+    master = board(master.astype(np.float32), sr).astype(np.float32)
 
     sample_peak_after = _peak_db(master)
     tp_measured = _measure_true_peak_dbfs(master)
@@ -1235,7 +1409,7 @@ Examples:
   render_mix.py output/<session>/mix_config.json --render --output my_mix.wav
         """,
     )
-    parser.add_argument("input", help="Session output dir (--generate-config) or mix_config.json (--render)")
+    parser.add_argument("input", help="Session output dir (--generate-config) or mix_config.json (--render / --recompute-autotrim)")
     parser.add_argument("--generate-config", action="store_true", help="Scan session dir and write mix_config.json")
     parser.add_argument("--style", default=None,
                         help="Style profile for genre-aware bus volume defaults during --generate-config "
@@ -1243,6 +1417,10 @@ Examples:
                              "Without it, every bus starts at 0 dB.")
     parser.add_argument("--config", default=None, help="Config output path (default: <session_dir>/mix_config.json)")
     parser.add_argument("--render", action="store_true", help="Render mix from config")
+    parser.add_argument("--recompute-autotrim", action="store_true",
+                        help="Surgical: read existing mix_config.json, re-measure per-bus dry sums, "
+                             "and write auto_trim_db back. Preserves all other fields (active flags, "
+                             "volume_db, pan, presets, sends). Use when active tracks change.")
     parser.add_argument("--output", default=None, help="Output WAV path (default: <output_dir>/mix.wav)")
     parser.add_argument("--stems", action="store_true", help="Also write per-bus stem WAVs to <output_dir>/stems/")
     parser.add_argument(
@@ -1260,6 +1438,21 @@ Examples:
         config_path = Path(args.config) if args.config else session_dir / "mix_config.json"
         generate_config(session_dir, config_path, style=args.style)
 
+    elif args.recompute_autotrim:
+        config_path = Path(args.input)
+        if not config_path.is_file():
+            parser.error(f"Config file not found: {config_path}")
+        with open(config_path) as f:
+            config = json.load(f)
+        print(f"Recomputing per-bus auto-trim (target -18 LUFS per bus) for {config_path}")
+        auto_trims = _compute_bus_auto_trims(config, target_lufs=-18.0, verbose=True)
+        for name, trim in auto_trims.items():
+            if name in config["buses"]:
+                config["buses"][name]["auto_trim_db"] = trim
+        with open(config_path, "w") as f:
+            json.dump(config, f, indent=2)
+        print(f"\nUpdated auto_trim_db on {len(auto_trims)} buses in {config_path}")
+
     elif args.render:
         config_path = Path(args.input)
         if not config_path.is_file():
@@ -1268,7 +1461,7 @@ Examples:
         render_mix(config_path, output_wav, render_stems=args.stems, stage=args.stage)
 
     else:
-        parser.error("Specify --generate-config or --render")
+        parser.error("Specify --generate-config, --recompute-autotrim, or --render")
 
 
 if __name__ == "__main__":

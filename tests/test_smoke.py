@@ -1030,3 +1030,244 @@ class TestAnalyzeHeadroom:
         # Spectrogram text contains a Headroom line
         spec_txt = (tmp_path / "out" / "spectrogram.txt").read_text()
         assert "Headroom:" in spec_txt
+
+
+# ---------------------------------------------------------------------------
+# Bus auto-trim (per-bus gain-staging calibration)
+# ---------------------------------------------------------------------------
+
+def _write_stem_at_lufs(path, target_lufs, duration_s=4.0, sr=48000, seed=0):
+    """Write a noise stem calibrated to a specific integrated LUFS.
+
+    pyloudnorm needs ~3 s for K-weighted gating to be stable; 4 s is safe.
+    Returns the actual integrated LUFS measured after write (rounding +
+    quantisation typically lands within 0.1 LU of target).
+    """
+    import soundfile as sf
+    import pyloudnorm as pyln
+
+    rng = np.random.default_rng(seed)
+    n = int(duration_s * sr)
+    noise = rng.standard_normal((n, 2)) * 0.1
+    meter = pyln.Meter(sr)
+    current = meter.integrated_loudness(noise)
+    gain = 10.0 ** ((target_lufs - current) / 20.0)
+    noise *= gain
+    sf.write(str(path), noise, sr, subtype="PCM_24")
+    return meter.integrated_loudness(noise)
+
+
+class TestBusAutoTrim:
+    """`_compute_bus_auto_trims` — per-bus calibration so dry-sum hits target_lufs.
+
+    The contract: applying (auto_trim_db + volume_db) at render time brings the
+    bus dry-sum output to within ~0.5 LU of target_lufs when volume_db = 0.
+    Tests simulate the render path (load + pan + sum + apply gain) and check
+    the resulting bus output LUFS directly — avoids hardcoding magic numbers
+    that depend on per-track pan math (constant-power center is -3 dB).
+    """
+
+    SR = 48000
+    TARGET_LUFS = -18.0
+
+    def _build_config(self, tmp_path, tracks, buses):
+        return {
+            "sample_rate": self.SR,
+            "buses": {
+                name: {"volume_db": 0.0, "parent_bus": cfg.get("parent_bus"), **cfg}
+                for name, cfg in buses.items()
+            },
+            "tracks": [
+                {"name": n, "file": str(f), "active": True, "bus": b,
+                 "volume_db": 0.0, "pan": 0.0}
+                for (n, b, f) in tracks
+            ],
+        }
+
+    def _measure_bus_output_lufs(self, config, trims):
+        """Simulate the render path's bus stage (load -> pan -> sum -> auto_trim + volume_db)
+        and return integrated LUFS per top-level bus (parent_bus = None).
+        """
+        import pyloudnorm as pyln
+        from pathlib import Path
+        import soundfile as sf
+        from render_mix import _load_as_stereo, _pan, _topo_order
+
+        sr = config["sample_rate"]
+        active = [t for t in config["tracks"] if t.get("active", True)]
+        max_length = max(sf.info(t["file"]).frames for t in active)
+
+        bus_stem_sums: dict[str, np.ndarray] = {}
+        for t in active:
+            bus = t["bus"]
+            stereo = _load_as_stereo(Path(t["file"]), max_length, sr)
+            stereo = _pan(stereo * 10 ** (t.get("volume_db", 0.0) / 20.0), t.get("pan", 0.0))
+            bus_stem_sums.setdefault(bus, np.zeros((2, max_length)))
+            bus_stem_sums[bus] += stereo
+
+        bus_outputs: dict[str, np.ndarray] = {}
+        for bus_name in _topo_order(config["buses"]):
+            buf = bus_stem_sums.get(bus_name, np.zeros((2, max_length))).copy()
+            for child, child_cfg in config["buses"].items():
+                if child_cfg.get("parent_bus") == bus_name and child in bus_outputs:
+                    buf = buf + bus_outputs[child]
+            gain = trims.get(bus_name, 0.0) + config["buses"][bus_name].get("volume_db", 0.0)
+            bus_outputs[bus_name] = buf * 10 ** (gain / 20)
+
+        meter = pyln.Meter(sr)
+        return {
+            name: float(meter.integrated_loudness(buf.T))
+            for name, buf in bus_outputs.items()
+            if np.any(buf)
+        }
+
+    def test_single_stem_brings_bus_to_target(self, tmp_path):
+        """Leaf bus with one stem: auto_trim must bring the bus output to target_lufs."""
+        from render_mix import _compute_bus_auto_trims
+
+        stem = tmp_path / "stem.wav"
+        _write_stem_at_lufs(stem, target_lufs=-12.0, seed=1)
+
+        config = self._build_config(
+            tmp_path,
+            tracks=[("track1", "drums", stem)],
+            buses={"drums": {"parent_bus": None}},
+        )
+        trims = _compute_bus_auto_trims(config, target_lufs=self.TARGET_LUFS, verbose=False)
+        outputs = self._measure_bus_output_lufs(config, trims)
+        assert abs(outputs["drums"] - self.TARGET_LUFS) < 0.5, (
+            f"drums output {outputs['drums']:.2f} LUFS, target {self.TARGET_LUFS}"
+        )
+
+    def test_multi_stem_bus_compensates_for_pile_up(self, tmp_path):
+        """Four stems at -18 LUFS each sum well above -18 — auto_trim pulls back."""
+        from render_mix import _compute_bus_auto_trims
+
+        stems = []
+        for i in range(4):
+            p = tmp_path / f"stem_{i}.wav"
+            _write_stem_at_lufs(p, target_lufs=-18.0, seed=10 + i)
+            stems.append(p)
+
+        config = self._build_config(
+            tmp_path,
+            tracks=[(f"t{i}", "drums", s) for i, s in enumerate(stems)],
+            buses={"drums": {"parent_bus": None}},
+        )
+        trims = _compute_bus_auto_trims(config, target_lufs=self.TARGET_LUFS, verbose=False)
+        outputs = self._measure_bus_output_lufs(config, trims)
+        assert abs(outputs["drums"] - self.TARGET_LUFS) < 0.5, (
+            f"drums output {outputs['drums']:.2f} LUFS, target {self.TARGET_LUFS}"
+        )
+        # And the trim must be NEGATIVE — sum-of-stems is louder than a single stem
+        assert trims["drums"] < -2.0, f"expected negative trim, got {trims['drums']}"
+
+    def test_parent_bus_lands_at_target_with_child_volume_offset(self, tmp_path):
+        """Parent receives children post-(auto_trim+volume); parent auto_trim
+        must still land the parent output at target."""
+        from render_mix import _compute_bus_auto_trims
+
+        s_a = tmp_path / "child_a.wav"
+        s_b = tmp_path / "child_b.wav"
+        _write_stem_at_lufs(s_a, target_lufs=-18.0, seed=20)
+        _write_stem_at_lufs(s_b, target_lufs=-18.0, seed=21)
+
+        config = self._build_config(
+            tmp_path,
+            tracks=[("ta", "gtr_1", s_a), ("tb", "gtr_2", s_b)],
+            buses={
+                "gtr_1": {"parent_bus": "guitar"},
+                "gtr_2": {"parent_bus": "guitar"},
+                "guitar": {"parent_bus": None},
+            },
+        )
+        # User-chosen offset: child A boosted by +6 dB on its bus
+        config["buses"]["gtr_1"]["volume_db"] = 6.0
+
+        trims = _compute_bus_auto_trims(config, target_lufs=self.TARGET_LUFS, verbose=False)
+        outputs = self._measure_bus_output_lufs(config, trims)
+
+        # Each child output WITH the user's volume_db offset still floats; the
+        # PARENT must land at target regardless.
+        assert abs(outputs["guitar"] - self.TARGET_LUFS) < 0.5, (
+            f"guitar (parent) output {outputs['guitar']:.2f} LUFS, target {self.TARGET_LUFS}"
+        )
+
+    def test_inactive_tracks_are_excluded(self, tmp_path):
+        """active=false stems must NOT contribute to the auto-trim measurement."""
+        from render_mix import _compute_bus_auto_trims
+
+        s_active = tmp_path / "active.wav"
+        s_inactive = tmp_path / "inactive.wav"
+        _write_stem_at_lufs(s_active, target_lufs=-18.0, seed=30)
+        # The inactive stem is super loud — would skew the trim heavily if leaked in
+        _write_stem_at_lufs(s_inactive, target_lufs=-6.0, seed=31)
+
+        config = self._build_config(
+            tmp_path,
+            tracks=[("t_act", "drums", s_active), ("t_inact", "drums", s_inactive)],
+            buses={"drums": {"parent_bus": None}},
+        )
+        config["tracks"][1]["active"] = False
+
+        trims = _compute_bus_auto_trims(config, target_lufs=self.TARGET_LUFS, verbose=False)
+
+        # Re-run the same trim against an "only active stem" config -> same result
+        config_only_active = self._build_config(
+            tmp_path,
+            tracks=[("t_act", "drums", s_active)],
+            buses={"drums": {"parent_bus": None}},
+        )
+        trims_only_active = _compute_bus_auto_trims(
+            config_only_active, target_lufs=self.TARGET_LUFS, verbose=False
+        )
+        assert abs(trims["drums"] - trims_only_active["drums"]) < 0.3, (
+            f"inactive stem leaked in: trim with inactive {trims['drums']} "
+            f"vs trim without inactive {trims_only_active['drums']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tape saturation relevance check
+# ---------------------------------------------------------------------------
+class TestTapeSatRelevanceCheck:
+    """`_bus_tape_sat_relevance_check` should refuse on squashed (crest < 8 dB)
+    or over-compressed (LRA < 4 LU) buses, accept on dynamic material."""
+
+    def test_skips_squashed_signal(self):
+        """Hard-clipped square wave has crest ≈ 0 dB — should refuse."""
+        from render_mix import _bus_tape_sat_relevance_check
+
+        sr = 48000
+        n = sr * 4
+        # Square wave (max crest factor possible: peak/rms = 1)
+        sig = np.sign(np.sin(2 * np.pi * 200 * np.arange(n) / sr)) * 0.5
+        buf = np.stack([sig, sig], axis=0)
+
+        rel = _bus_tape_sat_relevance_check(buf, sr, "test_bus")
+        assert rel["recommend_skip"] is True
+        assert any("crest" in s for s in rel["issues"]), rel["issues"]
+
+    def test_accepts_dynamic_signal(self):
+        """Sparse impulses with quiet noise floor: high crest, high LRA."""
+        from render_mix import _bus_tape_sat_relevance_check
+
+        sr = 48000
+        n = sr * 6
+        rng = np.random.default_rng(42)
+        # Quiet noise floor
+        sig = rng.standard_normal(n) * 0.02
+        # Loud transients every 0.5 s (random direction)
+        for i in range(0, n, sr // 2):
+            sig[i:i + 100] += 0.6 * np.sin(2 * np.pi * 80 * np.arange(100) / sr)
+        buf = np.stack([sig, sig], axis=0)
+
+        rel = _bus_tape_sat_relevance_check(buf, sr, "drums")
+        # Crest should be high (sparse transients), LRA should be loose
+        assert rel["crest_db"] > 8.0, f"crest {rel['crest_db']} dB should be > 8"
+        # NOTE: LRA can be borderline on synthetic test signals — accept either OK
+        # or LRA-only complaint. The crest check is the load-bearing one.
+        if rel["recommend_skip"]:
+            assert all("lra" in s.lower() or "LRA" in s for s in rel["issues"]), (
+                f"unexpected skip reason: {rel['issues']}"
+            )

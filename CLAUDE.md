@@ -13,24 +13,41 @@ All processing happens via Python CLI tools in `tools/`. Claude orchestrates the
 3. Check `output/` for any previous analysis runs on that session.
 4. **Run `tools/audit_session.py output/<session>/session.json --output-dir output/<session>/analysis`** — surfaces tracks that share identical source files (phase-coherent duplicates). Show the flagged groups to the user and ASK which to keep before generating mix_config. Common patterns: `<name>` + `<name>.L` + `<name>.R` triples (one stereo wav referenced three times), or `<name>` + `<name>.dup1.XX` pairs (editor accidentally cloned a track). Setting `active: false` on the suggested deactivate-list in mix_config prevents +6 dB phase-coherent doubling.
 5. Ask the user which takes / mic-blend / dup-versions to use in the render (per `mix_config.json` `active` field). Don't decide unilaterally — the `render_mix --generate-config` output explicitly says "Set active=false for alternate takes you don't want (dup versions)"; surface that decision to the user.
-6. **Ask the user what genre/style** the song is (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic / other). The generic `volume_db: 0.0` defaults from `render_mix --generate-config` rarely match modern conventions — drums/bass are typically the foundation with guitar 3-4 dB below, vocal 2 dB above guitar. Use `--style NAME` on `--generate-config` to load genre-appropriate bus starting points from `tools/style_profiles/<name>.json` `default_bus_volume_db`. The agent and user should still iterate from there — the profile values are a *starting reference*, not a fixed answer.
+6. **Ask the user what genre/style** the song is (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic / other). Use `--style NAME` on `--generate-config` so the style profile's `default_bus_volume_db` ends up in `volume_db` (modern_rock: drums 0, bass 0, guitar -3, vocal_lead +2, vocal_bg -2). **The agent should NOT hand-edit `volume_db` away from style defaults to compensate for "drum bus too hot / bass too quiet" — that's what `auto_trim_db` is for, and it's already computed by `--generate-config`.** Effective bus gain at render time = `auto_trim_db + volume_db`; the calibration lifts every bus's dry sum to -18 LUFS regardless of stem count, and `volume_db` is just the style/taste delta on top. If `active: true/false` changes after the config was generated, refresh with `python tools/render_mix.py mix_config.json --recompute-autotrim` — surgical, only `auto_trim_db` is touched.
 7. Ask what the goal is before running anything (delivery-ready master, demo, mix-health gate against a reference, etc).
 
 ## Python environment
 
-Use the project virtual environment. Set it up once:
+The project uses the `music-mix-agent` conda environment. **Prefer activating
+the env once at session start and using plain `python` from then on** — every
+`conda run -n music-mix-agent python` call pays ~1.5–2 s of conda resolution
+overhead on top of Python's own ~3 s cold-start. For a 20-step replay_chain
+that's ~30–40 s of pure environment-setup time.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+# Once per shell (saves ~1.5-2s per tool invocation)
+conda activate music-mix-agent
+python tools/<script>.py ...
+
+# Or, if you can't activate (one-off invocation from outside an activated shell)
+conda run -n music-mix-agent python tools/<script>.py ...
 ```
 
-Always invoke tools with the activated venv's Python:
+**Parallelising batched calls.** For "apply tool X on every stem in a session"
+workflows, use the OS-level parallelism that's already there — don't sleep
+behind a single Python interpreter:
 
 ```bash
-python3 tools/<script>.py
+# Apply EQ to every stem in parallel (-P 4 = 4 workers)
+ls output/<session>/tracks/*/assembled.wav | xargs -P 4 -I {} \
+    python tools/apply_eq.py {} --output-dir $(dirname {})
+
+# batch_analyze.py already does multiprocessing internally
+python tools/batch_analyze.py output/<session> --workers 8
 ```
+
+`tools/pipeline.py` (Phase 2 orchestrator) provides a higher-level in-process
+alternative that avoids per-tool cold-start cost entirely — see its `--help`.
 
 ## Available tools
 
@@ -56,7 +73,7 @@ python3 tools/<script>.py
 | `tools/apply_pitch_correct.py` | Vocal pitch correction via librosa.pyin + psola PSOLA shifting + scale quantisation. Detects voice f0 frame-by-frame, snaps to the nearest scale degree of the chosen key/mode, blends original→quantised by `strength` (0=no correction, 1=full Auto-Tune snap). 7 modes: major, minor, harmonic_minor, dorian, mixolydian, chromatic, natural_minor. Presets: pitch_correct_subtle, pitch_correct_pop, pitch_correct_hard_tune. Requires the `psola` package. | `<file> --output-dir DIR --scale-root NOTE --scale-mode MODE [--strength 0-1] [--preset NAME] [--fmin HZ] [--fmax HZ]` |
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 LUFS before comparison; PSD is computed only on active frames (RMS > -45 dBFS) and pairs are time-gated (Jaccard co-activity < 0.15 suppressed). Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
-| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (tape), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]` |
+| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. **Per-bus auto-trim:** every bus carries `auto_trim_db` (calibration) alongside `volume_db` (style/user taste). Effective gain = `auto_trim_db + volume_db`. Calibration is computed during `--generate-config` (and refreshable via `--recompute-autotrim`) by measuring each bus's dry-sum LUFS in topological order so every bus's dry-sum output lands at -18 LUFS regardless of stem count. `volume_db` then layers a pure relative offset on top — drum dry-sum still sits at -18, but `vocal_lead` with `+2.0` sits at -16. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (**guarded — tape sat refuses if bus crest < 8 dB or LRA < 4 LU**), parallel_saturation (guarded), reverb_send. Master chain: glue comp + EQ + clipper (guarded) + M/S (guarded) + LUFS normalize + true peak limit. Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]`. After flipping `active: true/false` on tracks, re-run `mix_config.json --recompute-autotrim` — surgical, only refreshes the per-bus calibration. |
 | `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
 | `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 6 chain presets (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_mb\|...] [--target-lufs N] [--tp-ceiling N]` |
 | `tools/style_check.py` | Grade a stereo mix against a named style profile — quantitative answer to "is this a modern_rock mix" without needing a reference track. Built-in profiles: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. Measures integrated LUFS, LRA, crest factor, and 5-band spectral RMS (tonal balance) at the profile's LUFS target, returns a traffic-light verdict (GREEN/YELLOW/RED) + 0-100 score + per-check deltas + EQ recommendations for off-target bands. Hard-fail rule: a RED on LUFS or LRA forces overall RED. | `mix.wav --style NAME --output-dir DIR` or `--list-styles` |
@@ -159,16 +176,18 @@ Moving any of these into a single flat `analysis/` would either break the audio-
 ```json
 "buses": {
   "drums": {
-    "volume_db": 0.0,          // bus fader
+    "auto_trim_db": -2.5,      // calibration: brings bus dry-sum to -18 LUFS at volume_db=0. WRITTEN BY --generate-config / --recompute-autotrim — do not edit manually. Effective gain = auto_trim_db + volume_db.
+    "volume_db": 0.0,          // style/user offset on top of auto_trim_db. Style profile populates this (modern_rock: drums 0, vocal_lead +2, guitar -3).
     "pan": 0.0,                // -1.0 (L) to 1.0 (R), applied after volume
     "eq": [                    // optional per-bus EQ (zero-phase, applied after volume/pan, BEFORE comp). Same filter schema as master.eq (peak / highshelf / lowshelf / highpass / lowpass)
       {"type": "peak", "hz": 5000, "q": 1.2, "db": -2.0}  // e.g. cut drum cymbals here without touching guitar/vocal presence
     ],
     "comp_preset": "comp_drum_bus",  // optional bus compressor preset. Use comp_drum_bus_gentle if the render mix_health LRA falls below 4 LU (the default 4:1 preset crushes dynamics, which then blocks the master clipper and drum bus parallel-sat relevance checks downstream).
-    "saturation": {"drive": 0.3},   // optional tape saturation (symmetric tanh)
+    "saturation": {"drive": 0.3},   // optional tape saturation (symmetric tanh). GUARDED: relevance check refuses if bus crest < 8 dB or LRA < 4 LU; pass {"drive": 0.3, "force": true} to override.
     "parent_bus": null         // routes into this parent bus
   },
   "guitar": {
+    "auto_trim_db": -4.2,
     "volume_db": -3.0,
     "pan": 0.0,
     "saturation": {"drive": 0.25},

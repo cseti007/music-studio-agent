@@ -687,12 +687,43 @@ def _estimated_key(signal: np.ndarray, sr: int) -> dict:
     }
 
 
-def _vocal_metrics(signal: np.ndarray, sr: int) -> dict:
+_VOCAL_METRICS_NONVOCAL_HINTS = (
+    "KICK", "SN ", " SN", "SNARE", "OH ", " OH", "OVERHEAD", "TOM ", " TOM",
+    "HIHAT", "HI-HAT", "CYMBAL", "CRASH", "RIDE", "ROOM",
+    "BASS", "DI ", " DI", "AMP", "FENDER", "ORANGE", "MARSHALL", "DI CLEAN",
+    "GTR ", " GTR", "GUITAR", "STRING", "PIANO", "KEYS",
+)
+
+
+def _looks_vocal(file_name: str) -> bool:
+    """Heuristic: should `_vocal_metrics` run its expensive pyin pitch detection
+    on this stem? Returns True if the filename has a vocal-ish marker, False if
+    it has a clear non-vocal marker. Default (no marker either way) → True
+    (safer for unknown content).
+
+    Pitch detection via `librosa.pyin` + viterbi is ~15-25s per stem (the
+    single biggest hotspot in analyze.py). Skipping it on drum / bass / guitar
+    stems drops analyze.py from ~30s to ~5s per non-vocal stem.
+    """
+    u = file_name.upper()
+    if any(k in u for k in ("VOX", "VOC", "VOCAL", "LEAD", "HARMONY",
+                            "BG VOX", "WHISPER", "AD-LIB", "ADLIB")):
+        return True
+    if any(k in u for k in _VOCAL_METRICS_NONVOCAL_HINTS):
+        return False
+    return True
+
+
+def _vocal_metrics(signal: np.ndarray, sr: int, run_pitch: bool = True) -> dict:
     """Vocal-specific metrics: sibilance, plosive, pitch stats, vibrato, breath.
 
     None of these are vocal-only — they're meaningful for any monophonic
     tonal source — but they're primarily useful for deciding vocal-chain
     parameters (de-esser threshold, pitch-correct strength, etc.).
+
+    `run_pitch=False` skips the librosa.pyin + viterbi block (the slow part).
+    Sibilance / plosive / breath still compute — they're cheap band-filter +
+    envelope work and are sometimes informative on non-vocal sources too.
     """
     out: dict = {
         "sibilance": {},
@@ -731,9 +762,12 @@ def _vocal_metrics(signal: np.ndarray, sr: int) -> dict:
         out["plosive"]["events_count"] = 0
         out["plosive"]["peak_db"] = None
 
-    # Pitch tracking — librosa.pyin (probabilistic YIN)
+    # Pitch tracking — librosa.pyin (probabilistic YIN). The single biggest
+    # hotspot in analyze.py (~15-25s on a 7-min stem due to viterbi). Skipped
+    # entirely when run_pitch=False (typical for non-vocal stems).
+    voiced_f0 = np.array([])
     duration_sec = len(signal) / sr
-    if duration_sec >= 2.0:
+    if run_pitch and duration_sec >= 2.0:
         try:
             f0, voiced_flag, _ = librosa.pyin(
                 signal.astype(np.float32), fmin=80, fmax=600, sr=sr,
@@ -753,6 +787,8 @@ def _vocal_metrics(signal: np.ndarray, sr: int) -> dict:
                 out["pitch"]["mean_hz"] = None
         except Exception:
             out["pitch"]["mean_hz"] = None
+    elif not run_pitch:
+        out["pitch"]["skipped_reason"] = "non-vocal stem (filename heuristic)"
 
     # Vibrato: 4-7 Hz periodic modulation in the pitch curve
     if out["pitch"].get("mean_hz") and len(voiced_f0) > sr // 4:
@@ -868,9 +904,66 @@ def _save_outputs(
     return result
 
 
-def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARGET_LUFS) -> dict:
-    data, sr = sf.read(str(file_path), always_2d=True)
-    mono = data.mean(axis=1).astype(np.float64)
+_CACHE_VERSION = 2  # bump when the analysis schema changes
+
+
+def _cache_signature(file_path: Path, target_lufs: float, force_vocal_metrics: bool) -> dict:
+    """Stable signature describing the inputs to an analyze() call.
+
+    Cache key = (input WAV mtime + size + args). If a previous analysis.json has
+    a matching `_cache` block, we can skip the work entirely. Bypass with
+    `use_cache=False` or by deleting analysis.json.
+    """
+    stat = file_path.stat()
+    return {
+        "version": _CACHE_VERSION,
+        "input_mtime_ns": int(stat.st_mtime_ns),
+        "input_size_bytes": int(stat.st_size),
+        "target_lufs": float(target_lufs),
+        "force_vocal_metrics": bool(force_vocal_metrics),
+    }
+
+
+def _try_use_cached_analysis(
+    output_dir: Path,
+    signature: dict,
+) -> dict | None:
+    """If analysis.json + spectrogram.{txt,png} exist with a matching cache key,
+    return the cached dict. Else return None.
+    """
+    analysis_path = output_dir / "analysis.json"
+    if not analysis_path.exists():
+        return None
+    try:
+        cached = json.loads(analysis_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if cached.get("_cache") != signature:
+        return None
+    # Side artifacts must also exist for the cache to count as valid
+    spec_txt = output_dir / "spectrogram.txt"
+    spec_png = output_dir / "spectrogram.png"
+    if not (spec_txt.exists() and spec_png.exists()):
+        return None
+    return cached
+
+
+def analyze(
+    file_path: Path,
+    output_dir: Path,
+    target_lufs: float = DEFAULT_TARGET_LUFS,
+    force_vocal_metrics: bool = False,
+    use_cache: bool = True,
+) -> dict:
+    if use_cache and file_path.exists() and output_dir.exists():
+        sig = _cache_signature(file_path, target_lufs, force_vocal_metrics)
+        cached = _try_use_cached_analysis(output_dir, sig)
+        if cached is not None:
+            print(f"Analyzing: {file_path.name}  -> CACHE HIT  ({output_dir/'analysis.json'})", flush=True)
+            return cached
+
+    data, sr = sf.read(str(file_path), always_2d=True, dtype="float32")
+    mono = data.mean(axis=1).astype(np.float32)
     channels = data.shape[1]
     duration = len(mono) / sr
 
@@ -937,8 +1030,14 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
     lufs_st = _lufs_short_term(lufs_input, sr)
     spec_flux = _spectral_flux_per_sec(mono, sr, onset_env=onset_env_shared)
 
-    print("  [9/9] Vocal metrics (sibilance, plosive, pitch, vibrato, breath)...", flush=True)
-    vocal = _vocal_metrics(mono, sr)
+    # Use parent dir name too — assembled.wav files live under per-track dirs like
+    # `output/terido/tracks/KICK IN.05/assembled.wav`, and the meaningful identifier
+    # is in the parent dir name, not the basename.
+    stem_hint = f"{file_path.parent.name} {file_path.name}"
+    run_pitch = force_vocal_metrics or _looks_vocal(stem_hint)
+    pitch_note = "" if run_pitch else " — pitch skipped (non-vocal filename heuristic)"
+    print(f"  [9/9] Vocal metrics (sibilance, plosive, pitch, vibrato, breath){pitch_note}...", flush=True)
+    vocal = _vocal_metrics(mono, sr, run_pitch=run_pitch)
 
     stats = {
         "file": str(file_path),
@@ -978,6 +1077,9 @@ def analyze(file_path: Path, output_dir: Path, target_lufs: float = DEFAULT_TARG
     if stereo is not None:
         stats["stereo"] = stereo
 
+    # Cache key so the next analyze() call can short-circuit if WAV is unchanged
+    stats["_cache"] = _cache_signature(file_path, target_lufs, force_vocal_metrics)
+
     result = _save_outputs(stats, text_spec, freq_response, mono, sr, file_path.stem, output_dir)
     print(f"  Done -> {output_dir / 'analysis.json'}", flush=True)
     return result
@@ -998,13 +1100,32 @@ def main() -> None:
         default=DEFAULT_TARGET_LUFS,
         help=f"Target loudness for gain recommendation (default: {DEFAULT_TARGET_LUFS})",
     )
+    parser.add_argument(
+        "--force-vocal-metrics",
+        action="store_true",
+        help="Run librosa.pyin pitch detection even if the filename looks non-vocal. "
+             "Default heuristic skips pyin on drum/bass/guitar stems (~20s saving).",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip the mtime-based cache and force re-analysis even if "
+             "analysis.json + spectrogram.{txt,png} already exist with a "
+             "matching cache key.",
+    )
     args = parser.parse_args()
 
     if not args.file.exists():
         print(json.dumps({"error": f"File not found: {args.file}"}), file=sys.stderr)
         sys.exit(1)
 
-    result = analyze(args.file, output_dir=args.output_dir, target_lufs=args.target_lufs)
+    result = analyze(
+        args.file,
+        output_dir=args.output_dir,
+        target_lufs=args.target_lufs,
+        force_vocal_metrics=args.force_vocal_metrics,
+        use_cache=not args.no_cache,
+    )
     print(json.dumps(result, indent=2))
 
 

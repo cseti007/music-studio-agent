@@ -104,6 +104,56 @@ def _load_preset(name: str) -> dict:
 # CLI
 # ---------------------------------------------------------------------------
 
+def apply_transient_file(
+    input_path: Path,
+    output_dir: Path,
+    attack_db: float = 0.0,
+    sustain_db: float = 0.0,
+    fast_ms: float = 2.0,
+    slow_ms: float = 50.0,
+    preset: str | None = None,
+) -> dict:
+    """File-level wrapper around `apply_transient`: read WAV → shape → write WAV + report.
+
+    Used by replay_chain's in-process pipeline. CLI `main()` delegates here.
+    Preset (if given) sets the defaults; explicit attack/sustain kwargs override.
+    """
+    if preset:
+        p = _load_preset(preset)
+        s = p.get("settings", {})
+        if attack_db == 0.0:
+            attack_db = float(s.get("attack_db", 0.0))
+        if sustain_db == 0.0:
+            sustain_db = float(s.get("sustain_db", 0.0))
+        fast_ms = float(s.get("fast_ms", fast_ms))
+        slow_ms = float(s.get("slow_ms", slow_ms))
+
+    data, sr = sf.read(str(input_path), always_2d=True)
+    shaped = apply_transient(data, sr, attack_db, sustain_db, fast_ms, slow_ms)
+
+    peak_in = float(20 * np.log10(np.max(np.abs(data)) + 1e-10))
+    peak_out = float(20 * np.log10(np.max(np.abs(shaped)) + 1e-10))
+
+    out_name = f"{input_path.stem}_transient.wav"
+    out_path = output_dir / out_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sf.write(str(out_path), shaped, sr, subtype="PCM_24")
+
+    report = {
+        "input": str(input_path),
+        "output": str(out_path),
+        "preset": preset,
+        "attack_db": attack_db,
+        "sustain_db": sustain_db,
+        "fast_ms": fast_ms,
+        "slow_ms": slow_ms,
+        "peak_in_dbfs": round(peak_in, 2),
+        "peak_out_dbfs": round(peak_out, 2),
+    }
+    (output_dir / "transient_report.json").write_text(json.dumps(report, indent=2))
+    return report
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Apply transient shaping to a stem.",
