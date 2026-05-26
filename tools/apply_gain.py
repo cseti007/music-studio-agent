@@ -344,6 +344,237 @@ def _assemble_track_with_clip_gain(
     return report
 
 
+def _assemble_track_continuous(
+    track: dict,
+    session: dict,
+    output_dir: Path,
+    crossfade_ms: float = 50.0,
+    interloper_head_ms: float | None = None,
+    interloper_tail_ms: float | None = None,
+    cluster_gap_sec: float = 1.0,
+    normalize_per_source: bool = False,
+    source_target_lufs: float = -18.0,
+) -> dict:
+    """Continuous-source assembly: bypass per-clip slip-edits within a take.
+
+    For each unique source WAV referenced by the track, cluster the clips by
+    timeline proximity. Each cluster becomes ONE placement that plays a
+    continuous chunk of the source (covering what the editor used within the
+    cluster). Placements are blended into the output with equal-power
+    crossfades at edges; interloper placements (short clips landing inside a
+    larger placement) get optionally wider head/tail crossfades.
+
+    Eliminates the 100s of slip-edit boundaries within a source take that
+    cause comb-filter warble / phase-discontinuity clicks when summed with
+    short crossfades. Trade-off: bass timing tracks the player's natural
+    playing, not the editor's slip-edit corrections.
+
+    See test_continuous_bass.py for the original prototype + rationale.
+    """
+    from collections import defaultdict
+
+    sr = session["sample_rate"]
+    clips = track["clips"]
+    track_name = track["name"]
+
+    if not clips:
+        return {"track": track_name, "error": "no clips"}
+
+    cluster_gap_samples = int(cluster_gap_sec * sr)
+    max_pad_samples = int(0.2 * sr)  # 200ms upper bound for adaptive pad
+
+    # Group clips by source file, then cluster within source by timeline gap.
+    by_source: dict[str, list[dict]] = defaultdict(list)
+    for c in clips:
+        by_source[c["source_file"]].append(c)
+
+    placements: list[tuple[str, int, int, int]] = []
+    for src_file, src_clips in by_source.items():
+        cs_sorted = sorted(src_clips, key=lambda c: c["timeline_start_sample"])
+        clusters: list[list[dict]] = [[cs_sorted[0]]]
+        for c in cs_sorted[1:]:
+            prev_end = (clusters[-1][-1]["timeline_start_sample"]
+                        + clusters[-1][-1]["length_samples"])
+            if c["timeline_start_sample"] - prev_end > cluster_gap_samples:
+                clusters.append([])
+            clusters[-1].append(c)
+
+        try:
+            n_frames = sf.info(src_file).frames
+        except Exception as exc:
+            print(f"  WARN: skip {src_file} ({exc})", file=sys.stderr)
+            continue
+
+        for cluster in clusters:
+            anchors = [c["timeline_start_sample"] - c["source_offset_sample"]
+                       for c in cluster]
+            median_anchor = int(np.median(anchors))
+            src_lo = min(c["source_offset_sample"] for c in cluster)
+            src_hi = max(c["source_offset_sample"] + c["length_samples"]
+                         for c in cluster)
+            # Adaptive pad: scales with cluster duration / clip count, capped
+            # at 200ms. Short single-clip clusters (interlopers) get minimal
+            # pad to avoid playing source material the editor never used.
+            cluster_dur = src_hi - src_lo
+            cluster_pad = min(max_pad_samples, cluster_dur // 8,
+                              len(cluster) * int(0.02 * sr))
+            src_lo = max(0, src_lo - cluster_pad)
+            src_hi = min(n_frames, src_hi + cluster_pad)
+            placements.append((src_file, median_anchor, src_lo, src_hi))
+
+    placements.sort(key=lambda p: p[1] + p[2])
+
+    # Detect interlopers + assign per-placement crossfade widths.
+    head_xfade_samples = int(round(
+        (interloper_head_ms if interloper_head_ms is not None else crossfade_ms)
+        * sr / 1000.0))
+    tail_xfade_samples = int(round(
+        (interloper_tail_ms if interloper_tail_ms is not None else crossfade_ms)
+        * sr / 1000.0))
+    default_xfade_samples = int(round(crossfade_ms * sr / 1000.0))
+
+    placements_extended: list[tuple] = []
+    for i, (src_file, anchor, src_lo, src_hi) in enumerate(placements):
+        tl_start_i = anchor + src_lo
+        tl_end_i = anchor + src_hi
+        is_interloper = any(
+            anchor_o + src_lo_o <= tl_start_i and tl_end_i <= anchor_o + src_hi_o
+            for j, (_sf, anchor_o, src_lo_o, src_hi_o) in enumerate(placements)
+            if j != i
+        )
+        if is_interloper and (head_xfade_samples > 0 or tail_xfade_samples > 0):
+            try:
+                n_frames = sf.info(src_file).frames
+            except Exception:
+                n_frames = src_hi
+            new_src_lo = max(0, src_lo - head_xfade_samples)
+            new_src_hi = min(n_frames, src_hi + tail_xfade_samples)
+            placements_extended.append((src_file, anchor, new_src_lo, new_src_hi,
+                                       True, head_xfade_samples, tail_xfade_samples))
+        else:
+            placements_extended.append((src_file, anchor, src_lo, src_hi,
+                                       False, default_xfade_samples,
+                                       default_xfade_samples))
+
+    if not placements_extended:
+        return {"track": track_name, "error": "no placements"}
+
+    timeline_end = max(anchor + src_hi for _, anchor, _, src_hi, _, _, _
+                       in placements_extended)
+    output = np.zeros(timeline_end, dtype=np.float64)
+
+    placement_log: list[dict] = []
+    for src_file, anchor, src_lo, src_hi, is_interloper, head_xf, tail_xf in placements_extended:
+        try:
+            data, _sr = sf.read(src_file, start=src_lo, frames=src_hi - src_lo,
+                                always_2d=True)
+        except Exception as exc:
+            print(f"  WARN: skip read {src_file} ({exc})", file=sys.stderr)
+            continue
+        if _sr != sr:
+            print(f"  WARN: sr mismatch on {src_file} ({_sr} vs {sr})",
+                  file=sys.stderr)
+            continue
+        # Force mono
+        if data.shape[1] > 1:
+            data = data.mean(axis=1)
+        else:
+            data = data[:, 0]
+
+        tl_start = anchor + src_lo
+        tl_end_this = tl_start + len(data)
+        tl_start_c = max(0, tl_start)
+        tl_end_c = min(timeline_end, tl_end_this)
+        data_start = tl_start_c - tl_start
+        data_end = data_start + (tl_end_c - tl_start_c)
+        data_slice = data[data_start:data_end].copy()
+        seg_len = len(data_slice)
+
+        # Per-source normalize: bring each placement to source_target_lufs.
+        # Evens out inter-source recording-gain variations (different sections
+        # tracked at different levels). Applied BEFORE crossfade so the boundary
+        # blends with already-normalized content.
+        placement_lufs_before = None
+        placement_gain_db = 0.0
+        if normalize_per_source and seg_len > sr:  # need at least 1s for LUFS measurement
+            try:
+                # Make stereo for pyloudnorm (it requires shape (n, 2) or (n,))
+                lufs_meas = float(pyln.Meter(sr).integrated_loudness(data_slice))
+                if np.isfinite(lufs_meas):
+                    placement_lufs_before = lufs_meas
+                    placement_gain_db = source_target_lufs - lufs_meas
+                    gain_linear = 10.0 ** (placement_gain_db / 20.0)
+                    data_slice = data_slice * gain_linear
+            except Exception:
+                pass
+
+        head_eff = min(head_xf, seg_len // 2)
+        tail_eff = min(tail_xf, seg_len // 2)
+
+        existing = output[tl_start_c:tl_end_c]
+        head_has = head_eff > 0 and np.any(np.abs(existing[:head_eff]) > 1e-7)
+        tail_has = tail_eff > 0 and np.any(np.abs(existing[-tail_eff:]) > 1e-7)
+
+        new_segment = data_slice.copy()
+        if head_has:
+            fade_in = np.sqrt(np.linspace(0.0, 1.0, head_eff))
+            fade_out = np.sqrt(np.linspace(1.0, 0.0, head_eff))
+            new_segment[:head_eff] = (existing[:head_eff] * fade_out
+                                     + new_segment[:head_eff] * fade_in)
+        if tail_has:
+            fade_in = np.sqrt(np.linspace(0.0, 1.0, tail_eff))
+            fade_out = np.sqrt(np.linspace(1.0, 0.0, tail_eff))
+            new_segment[-tail_eff:] = (new_segment[-tail_eff:] * fade_out
+                                      + existing[-tail_eff:] * fade_in)
+
+        output[tl_start_c:tl_end_c] = new_segment
+        placement_log.append({
+            "source": Path(src_file).name,
+            "timeline_start_sec": round(tl_start / sr, 3),
+            "timeline_end_sec": round(tl_end_this / sr, 3),
+            "source_start_sec": round(src_lo / sr, 3),
+            "source_end_sec": round(src_hi / sr, 3),
+            "is_interloper": is_interloper,
+            "head_xfade_ms": round(head_eff * 1000.0 / sr, 1),
+            "tail_xfade_ms": round(tail_eff * 1000.0 / sr, 1),
+            "lufs_before_norm": round(placement_lufs_before, 2) if placement_lufs_before is not None else None,
+            "gain_applied_db": round(placement_gain_db, 2),
+        })
+
+    output_2d = output[:, None]
+    peak = float(np.max(np.abs(output_2d)))
+    if peak > 1.0:
+        print(f"WARNING: {track_name}: peak {20*np.log10(peak):.1f} dBFS — "
+              f"scaling down to -0.1 dBFS", file=sys.stderr)
+        output_2d = output_2d * (0.99 / peak)
+        peak = 0.99
+
+    stem_dir = output_dir / track_name
+    stem_dir.mkdir(parents=True, exist_ok=True)
+    out_path = stem_dir / "assembled.wav"
+    sf.write(str(out_path), output_2d, sr, subtype="PCM_24")
+
+    report = {
+        "track": track_name,
+        "output": str(out_path),
+        "mode": "continuous",
+        "default_crossfade_ms": crossfade_ms,
+        "interloper_head_ms": interloper_head_ms,
+        "interloper_tail_ms": interloper_tail_ms,
+        "cluster_gap_sec": cluster_gap_sec,
+        "duration_sec": round(timeline_end / sr, 3),
+        "channels": 1,
+        "placements_total": len(placements_extended),
+        "placements_interloper": sum(1 for p in placements_extended if p[4]),
+        "peak_dbfs": round(20.0 * np.log10(max(peak, 1e-10)), 2),
+        "sample_rate": sr,
+        "placements": placement_log,
+    }
+    (stem_dir / "gain_report.json").write_text(json.dumps(report, indent=2),
+                                              encoding="utf-8")
+    return report
+
+
 def apply_gain_per_clip(
     session_json: Path,
     output_dir: Path,
@@ -353,6 +584,11 @@ def apply_gain_per_clip(
     peak_ceiling_db: float = DEFAULT_PEAK_CEILING,
     normalize: bool = True,
     crossfade_ms: float = 5.0,
+    source_mode: str = "per-clip",
+    interloper_head_ms: float | None = None,
+    interloper_tail_ms: float | None = None,
+    normalize_per_source: bool = False,
+    source_target_lufs: float = -18.0,
 ) -> list[dict]:
     cfg = _load_config().get("gain", {})
     if target_lufs is None:
@@ -377,16 +613,37 @@ def apply_gain_per_clip(
 
     results = []
     for track in selected:
-        mode_label = f"target {target_lufs} LUFS" if normalize else "no normalize (original levels)"
-        xfade_label = f"crossfade {crossfade_ms} ms" if crossfade_ms > 0 else "no crossfade"
-        print(
-            f"Assembling: {track['name']} ({len(track['clips'])} clips, {mode_label}, {xfade_label})...",
-            file=sys.stderr,
-        )
-        result = _assemble_track_with_clip_gain(
-            track, data, output_dir, target_lufs, peak_ceiling_db,
-            normalize=normalize, crossfade_ms=crossfade_ms,
-        )
+        if source_mode == "continuous":
+            xfade_label = f"default xfade {crossfade_ms} ms"
+            if interloper_head_ms is not None or interloper_tail_ms is not None:
+                xfade_label += (f", interloper head={interloper_head_ms or crossfade_ms}ms "
+                                f"tail={interloper_tail_ms or crossfade_ms}ms")
+            norm_label = (f", normalize-per-source target {source_target_lufs} LUFS"
+                          if normalize_per_source else "")
+            print(
+                f"Assembling (continuous mode): {track['name']} "
+                f"({len(track['clips'])} clips, {xfade_label}{norm_label})...",
+                file=sys.stderr,
+            )
+            result = _assemble_track_continuous(
+                track, data, output_dir,
+                crossfade_ms=crossfade_ms,
+                interloper_head_ms=interloper_head_ms,
+                interloper_tail_ms=interloper_tail_ms,
+                normalize_per_source=normalize_per_source,
+                source_target_lufs=source_target_lufs,
+            )
+        else:
+            mode_label = f"target {target_lufs} LUFS" if normalize else "no normalize (original levels)"
+            xfade_label = f"crossfade {crossfade_ms} ms" if crossfade_ms > 0 else "no crossfade"
+            print(
+                f"Assembling: {track['name']} ({len(track['clips'])} clips, {mode_label}, {xfade_label})...",
+                file=sys.stderr,
+            )
+            result = _assemble_track_with_clip_gain(
+                track, data, output_dir, target_lufs, peak_ceiling_db,
+                normalize=normalize, crossfade_ms=crossfade_ms,
+            )
         results.append(result)
         print(json.dumps(result, indent=2))
 
@@ -519,6 +776,41 @@ def main() -> None:
              "Pro Tools / Logic default). Smooths source-discontinuity clicks at engineer "
              "slip-edits. Set to 0 to disable.",
     )
+    clip_group.add_argument(
+        "--source-mode", choices=("per-clip", "continuous"), default="per-clip",
+        help="Assembly strategy. 'per-clip' (default): assemble session-defined slip-edit "
+             "clips with crossfade smoothing. 'continuous': bypass slip-edits — for each "
+             "unique source WAV, cluster the clips by timeline proximity, play each "
+             "cluster as one continuous chunk at its median timeline anchor. Eliminates "
+             "warble/click artifacts on sustained material (bass DI especially) where "
+             "100s of slip-edit boundaries fight phase coherence. Trade-off: timing tracks "
+             "the player's natural playing, not the editor's slip-edit corrections.",
+    )
+    clip_group.add_argument(
+        "--interloper-head-ms", type=float, default=None, metavar="MS",
+        help="continuous mode: custom head crossfade (in ms) for interloper placements "
+             "— short clips that land INSIDE a longer placement (chorus doublers, "
+             "ornamentations). Defaults to --crossfade-ms. Useful with longer values "
+             "(1000-3000ms) to mask the transition between two different takes.",
+    )
+    clip_group.add_argument(
+        "--interloper-tail-ms", type=float, default=None, metavar="MS",
+        help="continuous mode: custom tail crossfade (in ms) for interloper placements. "
+             "Defaults to --crossfade-ms.",
+    )
+    clip_group.add_argument(
+        "--normalize-per-source", action="store_true",
+        help="continuous mode: normalize EACH placement (source-cluster) to "
+             "--source-target-lufs before crossfade-blending. Evens out "
+             "inter-source recording-gain variation (different sections tracked "
+             "at different gain levels by the engineer) without re-introducing "
+             "the per-clip-norm warble (only ~10-20 normalization points per "
+             "track vs 100s in per-clip mode).",
+    )
+    clip_group.add_argument(
+        "--source-target-lufs", type=float, default=-18.0, metavar="LUFS",
+        help="continuous mode: target LUFS for --normalize-per-source (default -18.0).",
+    )
 
     # per-channel options
     chan_group = parser.add_argument_group("per-channel options")
@@ -549,6 +841,11 @@ def main() -> None:
             peak_ceiling_db=args.peak_ceiling,
             normalize=not args.no_normalize,
             crossfade_ms=args.crossfade_ms,
+            source_mode=args.source_mode,
+            interloper_head_ms=args.interloper_head_ms,
+            interloper_tail_ms=args.interloper_tail_ms,
+            normalize_per_source=args.normalize_per_source,
+            source_target_lufs=args.source_target_lufs,
         )
 
     elif args.per_channel:

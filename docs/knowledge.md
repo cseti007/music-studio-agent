@@ -79,6 +79,110 @@ if 5 ms is not enough on a particular session. The crossfade tolerance allows up
 overlap or gap between adjacent clips to still be treated as a butt-up boundary — many DAWs
 write clip endpoints with sub-millisecond rounding.
 
+### Continuous source mode — `apply_gain --source-mode continuous`
+
+The 5 ms crossfade is the right move for OCCASIONAL slip-edits (few dozen per
+track). But for **heavily slip-edited sustained instruments** (bass DI,
+sustained vocals, sustained synth pads) where one source file is sliced into
+100s of clips with 10-40 ms source jumps at every boundary, the 5 ms crossfade
+creates a continuous **5-6 Hz amplitude/comb-filter warble** — audibly heard
+as "vibrato on the bass" or "phasing on the synth".
+
+**The physics:**
+- 100s of slip-edit boundaries each separated by ~1.7 s
+- Each boundary sums two source positions that are 10-40 ms apart
+- For 10-40 ms source jump on a bass note at 80-120 Hz, comb-filter notches land at 25, 75, 125, 175 Hz (right in the bass-fundamental range)
+- Multiplied by 100s of boundaries = continuous notch sweep = perceived warble
+
+**Detection at session-start:**
+```python
+# In session-start checklist, after parse_session.py
+for t in session['tracks']:
+    n_clips = len(t['clips'])
+    if n_clips < 20:
+        continue
+    sources = {c['source_file'] for c in t['clips']}
+    ratio = n_clips / max(len(sources), 1)
+    if ratio >= 5.0:
+        print(f"⚠ {t['name']}: {n_clips} clips / {len(sources)} sources "
+              f"(ratio {ratio:.1f}) — likely slip-edited, use --source-mode continuous")
+```
+
+**Threshold: `clips_per_source ≥ 5 AND total_clips ≥ 20` → heavy slip-editing.**
+
+**Continuous mode algorithm:**
+1. Group clips by source_file
+2. Within each source, cluster by timeline proximity (gap > 1.0 s = new cluster)
+3. Each cluster gets ONE placement at the cluster's median timeline anchor, playing source from `min(source_offset)` to `max(source_offset + length)` continuously (adaptive small pad based on clip count)
+4. Place clusters on the timeline; sort by effective start position
+5. **Interloper detection**: if a cluster's timeline range is fully INSIDE another's range, it's an interloper (short doubler dropped on top of a longer placement)
+6. Interlopers use wider asymmetric crossfades (e.g., `--interloper-head-ms 2000`, `--interloper-tail-ms 800`) to mask the take-to-take seam
+7. REPLACE (not sum) the buffer in the interloper's range — prevents doubled-bass mid-range
+
+**When to use:**
+- Bass DI (slip-edited tracks) → continuous mode
+- Sustained vocals → continuous mode
+- Sustained synth pads → continuous mode
+- **Drums → per-clip mode (default)** — each drum clip cut is editorial intent, NOT a slip-edit
+
+**Do NOT auto-apply level_notes on continuous-mode bass:**
+Continuous mode produces a much cleaner bass take → `librosa.onset_detect`
+finds significantly more transient onsets (terido: 151 in first 26 s vs 105
+in the per-clip leveled chain). With ~95 ms boost envelopes and dense
+onsets (>4-5 per second), the boosts pack into ~5-6 Hz amplitude modulation
+across the whole region — audibly identical to the slip-edit warble the
+continuous mode was supposed to fix.
+
+**Do NOT auto-apply align_phase between siblings of the same instrument** (e.g. CLEAN + PEDAL DI of the same bass take). With continuous mode the two takes naturally sum constructively without alignment; the polarity-detector can false-positive (correlation_score: -0.62 from frequency-dependent phase differences, NOT polarity) and the flip makes it WORSE.
+
+**Trade-off:** continuous mode plays the bass as the player NATURALLY performed it (not the editor's slip-edit corrections). Player timing might drift ±10-40 ms from the click in some passages. For most sessions this is preferable to the warble; if the drift is too audible, use `apply_quantize.py` (TBD tool) or fall back to per-clip with a longer `--crossfade-ms`.
+
+### Per-source normalize (`--normalize-per-source`)
+
+Continuous mode preserves the natural recording dynamics of each take — including the engineer's potentially-different INPUT GAIN settings between session takes. If the engineer recorded section A at -18 dB input gain and section B at -12 dB, those level differences persist in the continuous-mode assembly. Result: in-mix sections have audibly different volumes even after bus-level autotrim averages them.
+
+The `--normalize-per-source --source-target-lufs -18` flag combination normalizes EACH placement (source-cluster) to the target LUFS before crossfade-blending into the timeline. For a track with 5 source-files, that's 5 normalization points (vs 100+ in per-clip mode).
+
+**This is a refined form of per-clip normalization that solves the same goal (inter-section level consistency) with far fewer normalization boundaries and without flattening intra-take performance dynamics.**
+
+Comparison:
+
+| Dimension | Per-clip `--per-clip` (default normalize) | Per-source `--source-mode continuous --normalize-per-source` |
+|---|---|---|
+| Normalization points (100 clips / 5 sources) | 100 | 5 |
+| Inter-section consistency | Max (every clip level) | Good (every source level) |
+| Intra-take dynamics | FLATTENED (kills natural performance) | PRESERVED |
+| Boundary warble risk | yes (100+ × 5ms ≈ 500ms warble) | low (5-15 boundaries × 50ms ≈ 250-750ms blend) |
+| Best for | unstable player amplitude needing brutal leveling | natural performance dynamics + engineer section-gain fixes |
+
+**Field measurement — horgonyt 2026-05-25 (10 continuous-mode tracks: 2 bass + 8 guitars):**
+
+| Metric | v3 (no per-source norm) | v4 (per-source norm) |
+|---|---|---|
+| 3s-window loudness range (mix) | -39.6 → -18.1 = **21.5 LU** | -34.0 → -18.1 = **15.9 LU** |
+| Stddev across windows | 3.77 LU | 2.95 LU |
+| Quiet breakdown (4:00-5:15) | -29 LUFS | **-27 LUFS** (+2.5 LU lift) |
+| Loud chorus (2:45-3:45) | -19 LUFS | -19 LUFS (unchanged) |
+| Master sum_in | +0.92 dBFS | +0.58 dBFS |
+
+The per-source norm raised quiet sections without touching loud sections — natural compression without dynamic flattening within a take.
+
+**Use as default for slip-edited sustained instruments.** For drums (per-clip mode), the flag is ignored. For tracks with a single source-file referenced by many clips (e.g., bass with 100 clips / 1 source), the flag is a no-op (only 1 placement to normalize).
+
+**Workflow command:**
+
+```bash
+apply_gain --per-clip session.json --track "BASS DI CLEAN" --track "BASS DI PEDAL" \
+  --track "GTR 1 FENDER" --track "GTR 1 ORANGE" \
+  --track "GTR LACI FENDER.01" --track "GTR LACI ORANGE.01" \
+  --output-dir output/<session>/tracks \
+  --source-mode continuous --crossfade-ms 50 \
+  --interloper-head-ms 2000 --interloper-tail-ms 800 \
+  --normalize-per-source --source-target-lufs -18
+```
+
+This is the modern default for any heavily slip-edited sustained instrument.
+
 ### Polarity flip on bass DI PEDAL chains
 
 Many bass pedal chains (overdrive, fuzz, DI-box outputs, especially anything that re-amps
@@ -442,6 +546,150 @@ thresholds (premaster: ±2 LU around -18 LUFS, peak ≤ -3 dBFS; master:
 - Mat Leffler-Schulman Mastering: "Should I Leave the Limiter on the Mix Buss Before Mastering?" — NO
 - Music Guy Mixing: Drum Bus — 1-2 dB GR average
 
+### Premaster handoff — the concrete numeric target table
+
+The premaster (the stereo .wav handed from mix to mastering) must meet these
+industry targets BEFORE running `master_mix.py`. If any target is missed, fix
+the MIX, not the master — mastering cannot recover what the mix gave up.
+
+| Metric | Sweet spot | Acceptable | Hard fail |
+|---|---|---|---|
+| **Sample peak** | -3 dBFS | -6 to -3 dBFS | > -1 dBFS |
+| **True peak** | < -3 dBTP | < -1 dBTP | ≥ -1 dBTP |
+| **Integrated LUFS** | -18 to -20 LUFS | -25 to -16 LUFS | > -14 LUFS |
+| **LRA** | 8-12 LU | **≥ 6 LU** | < 4 LU |
+| **Crest factor** | 14-18 dB | 12-20 dB | > 22 dB suggests over-aggressive comp leaving rare loud peaks |
+
+Why these numbers:
+- **Peak -3 dBFS**: leaves 3 dB headroom for master EQ/comp/exciter without float-summing clipping. Above -1 dBFS the master clipper has nothing to clip and the limiter has to do all the work alone (audibly bad).
+- **TP < -3 dBTP**: streaming platforms limit to -1 or -2 dBTP after their normalization. Premaster at -3 dBTP gives mastering 2+ dB margin.
+- **LUFS -18 to -20**: mastering chain adds +4 to +6 dB LUFS lift. Starting at -20 LUFS → -14 LUFS spotify needs +6 dB lift (audibly OK). Starting at -16 LUFS only leaves +2 dB lift before clipping (master can't do much). Starting at -10 LUFS mastering must REDUCE — sounds bad.
+- **LRA ≥ 6 LU**: the hardest to hit and the most consequential. Below 6 LU the mix is already over-compressed; mastering can only add MORE comp (worse) or accept the dynamics loss. Above 12 LU under-compressed; mastering will do heavy glue (less control).
+- **Crest 14-18 dB**: combined with LRA — too-high crest with low LRA means rare loud transients above a flat sustained level. Master clipper hits those transients hard while the body doesn't move = distorted transients, dull body.
+
+**The LRA recovery caveat (terido 2026-05-23 lesson):**
+If per-track comps (kick / snare / tom / OH / guitar / vocal) are already
+baked into `assembled_eq_comp.wav` files, bus + master decompression CANNOT
+recover LRA. Tried softening drum bus comp (`comp_drum_bus_gentle` →
+`comp_drum_bus_minimal` 1.5:1), softening bass per-track comp
+(`comp_bass_di` 3:1 → `comp_bass_di_gentle` 2:1), removing master.comp,
+removing drum bus saturation. Result: LRA went from 3.33 to 3.39 LU
+(unchanged), crest went UP from 21.67 to 23.81 dB. The decompression
+released TRANSIENT peaks but didn't move the BODY level, so dynamics got
+WORSE for the master clipper.
+
+When LRA is locked low because per-track comps are baked, alternatives:
+1. **Accept the LRA limit** as a constraint (modern metal often sits at 3-5 LU)
+2. **Master with lower LUFS target** (-16 instead of -14) → less LUFS lift needed → less clipping
+3. **Use a master preset without clipper** (e.g. `modern_rock_spatial_noclip`) — accept slightly louder peaks for no clipper distortion
+4. **Multiband comp master** (`modern_rock_mb` preset) — handles tall-peak / low-body material more sympathetically
+5. **Full per-track rebake** — the only true LRA recovery, but hours of work
+
+**Diagnostic — perceived "overdrive" on master:**
+Don't reach for a different preset first. Check the premaster's LRA. If LRA < 6 LU AND the master clipper is doing > 5 dB of work above its threshold, the perceived overdrive is the soft clipper crushing transient peaks while sustained level barely moves. Root cause = mix compression, not master clipper.
+
+### Overdrive protection checklist (run AFTER every render, BEFORE asking user to listen)
+
+After every `render_mix --render`, parse `mix_report.json` and verify these 4 hard gates. If any fail, fix the MIX (lower hot bus `volume_db`) before delivery or A/B comparison — don't waste user listening time on a chain that's audibly distorted.
+
+| Gate | Threshold | Failure means |
+|---|---|---|
+| **Per-bus `final` peak** | ≤ 0 dBFS (sustained content) / ≤ +0.5 dBFS (drum bus only) | Master soft clipper will distort that bus's content audibly |
+| **Master `sum_in`** | ≤ +3 dBFS | Master clipper > 5 dB above threshold = perceived overdrive |
+| **Master `verdict`** | `[OK]` | Otherwise master chain itself flagged a problem |
+| **Limiter ISP correction** | ≤ 2 dB | Above 2 dB ISP = audibly squashed dynamics |
+
+**When a gate fails:**
+1. Sort bus_peaks by `final` desc; identify the hot bus(es)
+2. **For multiple children of a parent bus, lower the PARENT `volume_db`** (cleaner than per-child individual adjustments) — typical -2 dB on the parent if 2 children are >0 dBFS
+3. **For a single isolated bus** (e.g. drums alone hot), lower that bus's `volume_db` by enough to bring final below 0 dBFS
+4. Re-render, re-check
+
+**Why this matters:** without this gate, the perceived overdrive (which sounds like the source content being distorted, not "loud") wastes A/B iterations. The user reports "guitars are overdriven", we try multiple master presets, eventually arrive at "lower the buses" — all of which could be skipped if we caught it at render time.
+
+**Field reference — terido v14c (2026-05-24):**
+- gtr_1 final +1.5 dBFS, gtr_laci 0.0 dBFS, drums +2.4 dBFS
+- master sum_in +3.6 dBFS (5.6 dB above -2 clipper threshold)
+- User perception confirmed BEFORE I noticed the data
+- Fix: guitar parent `volume_db` -1 → -3, bass -3 → -4
+- Result: master sum_in dropped to ~+0.5 dBFS, clipper now works at 2-3 dB above threshold
+
+**Quick check snippet** — only check TOP-LEVEL buses (sub-buses are attenuated by their parent before reaching master, so their > 0 dBFS peaks are not master-clipping risks):
+
+```python
+import json
+config = json.load(open('output/<session>/mix_config.json'))
+r = json.load(open('output/<session>/mixes/mix_report.json'))
+top_level = {b for b, cfg in config['buses'].items() if cfg.get('parent_bus') is None}
+issues = []
+for bus, st in r['bus_peaks'].items():
+    if bus not in top_level: continue  # sub-buses skipped — parent attenuates them
+    cap = 0.5 if bus == 'drums' else 0.0
+    if st['final'] > cap:
+        issues.append(f'{bus} (top) final {st["final"]:+.1f} dBFS (cap {cap:+.1f})')
+if r['master_peaks']['sum_in'] > 3:
+    issues.append(f'master sum_in {r["master_peaks"]["sum_in"]:+.1f} dBFS (>+3)')
+if issues:
+    print('OVERDRIVE PROTECTION FAILED:'); [print(f'  - {i}') for i in issues]
+else:
+    print('Overdrive protection: PASSED')
+```
+
+Runs in <1 s. Should be part of the post-render workflow, not an optional step.
+
+**Common false positive:** child buses (`gtr_1`, `gtr_laci`, `gtr_terka` with `parent_bus: guitar`) often have final >0 dBFS because the parent's `volume_db` and `auto_trim_db` get applied AT the parent level, not propagated to the children. The children's `bus_peaks` reflect their own output before the parent's gain stage. If the parent's `final` is OK, the children's >0 dBFS is normal float-domain internal state — not a real clipper risk. Only check `parent_bus: null` buses.
+
+Concrete signature: per-band crest factor at 250 Hz - 2 kHz drops 0.2-0.3 dB
+vs a no-clipper control render. Use `master_mix.py --master-preset
+modern_rock_spatial_noclip` as a diagnostic: re-master the same premaster
+with no clipper, then compare. If the noclip version has noticeably less
+"overdrive" feel, the clipper IS the source. Fix at premaster level by
+lowering hot bus volume_db OR by switching to the noclip master preset for
+delivery (accepts slightly louder sample peaks for cleaner mid-band crest).
+
+**Diagnostic — perceived "ear/head fatigue" on extended listening:**
+The cumulative effect of multiple upper-mid + air boosts. Equal-loudness
+contour: the ear's most-sensitive band is 2-5 kHz — a +1 dB boost there
+feels like a +3 dB boost perceptually.
+
+Check the cumulative budget in the chain:
+- Guitar bus EQ presence boost (`+1.5 dB @ 3.5 kHz`)
+- Master EQ highshelf (`+1.5 dB @ 12 kHz`)
+- Master side EQ peak (`+1 dB @ 2.5 kHz`)
+- Master side EQ highshelf (`+3 dB @ 8 kHz`)
+- Master exciter (`mix 0.10` adds harmonics above 200 Hz)
+
+These STACK. A mix can easily end up with 4-5 dB of cumulative 2-8 kHz
+boost without any single stage feeling excessive. Effects:
+- Spectral centroid > 4500 Hz (bright side)
+- 2-8 kHz band sits within -2 to -3 dB of the modern_rock industry target
+  while the other bands sit -5 to -7 dB below — the high band relatively
+  stands out by 3-4 dB
+
+Fix: use the `modern_rock_spatial_dark` master preset — same spatial
+benefits (sub-mono <200 Hz, stereo_width 1.05) but ALL top emphasis dialed
+back (side highshelf +3 → +1, peak @ 2.5k removed, master EQ shelf +1 →
++0.5, exciter mix 0.10 → 0.05). Drops spectral centroid by ~150-200 Hz.
+
+### Master spatial preset family — when to use which
+
+The `master_mix.py` `MASTERING_PRESETS` dict has a family of `modern_rock_spatial*` variants. Each adds specific spatial moves on top of the base `modern_rock` preset:
+
+| Preset | Sub-mono on side | Top side EQ | Stereo width | Exciter mix | Clipper | Use when |
+|---|---|---|---|---|---|---|
+| `modern_rock` | none | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | baseline modern rock master |
+| `modern_rock_spatial` | HP @ 150 Hz | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | first spatial increment — adds sub-mono for vinyl compat |
+| `modern_rock_spatial_v9` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | **0.12** | soft -2 dB | Leprous/Wheel crisp top direction |
+| `modern_rock_spatial_v10` | HP @ 200 Hz | **+1 dB peak @ 2.5k + 3 dB shelf @ 8k** | **1.05** | 0.10 | soft -2 dB | full spatial: wider sub-mono, presence boost on side, stereo width bump |
+| `modern_rock_spatial_dark` | HP @ 200 Hz | +1 dB shelf @ 8k only | 1.05 | **0.05** | soft -2 dB | spatial benefits BUT top dialed back — for ear-fatigue cases |
+| `modern_rock_spatial_noclip` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | 0.10 | **NONE** | diagnostic — isolates clipper-induced distortion |
+
+**Decision tree:**
+- "Master sounds OK but I want subtle spatial cohesion" → `modern_rock_spatial`
+- "Want pronounced width + bright top (Leprous/Wheel target)" → `modern_rock_spatial_v9` or `_v10`
+- "Got ear fatigue after extended listening" → `modern_rock_spatial_dark`
+- "Hearing overdrive distortion, suspect clipper" → diagnose with `_noclip`, then either cool hot buses or stay with noclip for delivery
+
 ---
 
 ## Panning convention by band size
@@ -541,6 +789,45 @@ L-to-R by pitch gives the listener a clear directional cue: the drummer's
 fills move across the stereo image, not just amplitude-bouncing in the
 center. Combined with OH L/R at hard ±0.7, the kit feels "set up in front
 of you" rather than collapsed to a mono mid-band column.
+
+**Critical: spread toms for the fill-sweep effect, not just pan-by-physical-position.**
+
+If you have 3 toms (Rack 1, Rack 2, Floor), DO NOT pan Rack 1 and Rack 2
+both to the same side just because they sit on the drummer's left
+side physically. That makes a descending fill (R1 → R2 → Floor) go
+LEFT → LEFT → RIGHT — a "jumped" placement, not a sweep.
+
+For the **fill-sweep** effect, distribute toms across the full stereo
+field:
+
+| Tom | Audience-perspective pan | Drummer-perspective pan |
+|---|---|---|
+| RACK TOM 1 (highest) | **+0.65** (hard RIGHT) | -0.65 (hard LEFT) |
+| RACK TOM 2 (mid) | **0.00** (CENTER) | 0.00 (CENTER) |
+| FLOOR TOM (lowest) | **-0.65** (hard LEFT) | +0.65 (hard RIGHT) |
+
+A descending fill (R1 → R2 → Floor) now smoothly sweeps RIGHT → center → LEFT.
+A build-up fill (Floor → R2 → R1) sweeps LEFT → center → RIGHT.
+
+Each tom occupies a distinct location in the stereo image, maximising the
+"drum fill across the stereo field" perception. **Don't bunch toms on one
+side** even if they physically sit together — the mix decision overrides
+the physical position for spatial clarity.
+
+**Audience vs drummer perspective — pick one and stay consistent across all drum mics.**
+
+If you flip to audience perspective, the OH L/R close mic must ALSO flip:
+- OH AEA L (originally captured drummer's LEFT side) → pan to +0.85 (audience right)
+- OH AEA R (originally captured drummer's RIGHT side) → pan to -0.85 (audience left)
+
+Otherwise the OH stereo image and the close-mic stereo image fight each
+other (kick close panned 0, OH L panned right, kick component in OH R
+panned left — net asymmetric kick image). Mixing audience-perspective
+close mics with drummer-perspective OH = phase confusion + comb filtering.
+
+**Modern prog metal default = audience perspective.** Tool, A Perfect
+Circle, some classic prog use drummer perspective; Periphery, TesseracT,
+Karnivool, Leprous, Wheel, Haken — audience perspective is the standard.
 
 ### Industry LCR pan values (researched 2025)
 
@@ -723,6 +1010,39 @@ Presets live in `tools/presets/`. Apply with `apply_eq.py --preset NAME`.
 - Cut 280 Hz -3 dB (undefined low-mid buildup)
 - EQ before compression — never compress first (creates dark, muddy character)
 
+### Drum internal balance — shells vs cymbals
+
+The single most common drum-mix mistake: **cymbals too loud relative to
+shells**. Modern prog/metal industry standard (research synthesis from
+Develop Device, Nail The Mix, MetalRecording.net, Mastering.com):
+
+- **Kick, snare, toms** all hit the SAME level on meters (~-10 to -12 dBFS peak)
+- **Hi-hat, ride, crash close mics + overheads + room** sit SIGNIFICANTLY lower, ~-24 dBFS or even lower
+- **Differential: 10-12 dB between shells and cymbals/OH**
+
+In LUFS terms (post-EQ, post-comp file-level), the canonical relationship:
+
+| Category | Target effective LUFS | Notes |
+|---|---|---|
+| Kick / Snare / Tom | ~-22 to -27 LUFS | reference shells |
+| OH (ribbon or condenser) | ~-33 to -35 LUFS | ~10 dB below shells |
+| Close cymbal mics (hihat / ride / crash) | ~-32 to -35 LUFS | match OH so cymbal content is consistent across paths |
+
+**Why cymbal restraint matters:**
+- Cymbals come into the mix via TWO paths: close cymbal mics AND OH bleed
+- If close cymbal mic is at 0 dB volume_db while OH is at -3 dB, the cymbal hits get summed twice at near-equal level → cymbal energy is amplified 4-6 dB perceptually
+- This drives the spectral centroid up (>4500 Hz = bright side / ear-fatiguing)
+- And the 2-8 kHz crest factor drops as the master clipper has to soft-clip cymbal peaks
+
+**Field measurement (terido 2026-05-24):** initial v14b had HIHAT/RIDE/CRASH at vol_db 0, effective LUFS -28 (only 5 dB below kick). Industry target said -33 LUFS = 11 dB below kick. Fix: vol_db 0 → -5 on the three cymbal close mics. Result: cymbal effective LUFS landed at -33, matching OH level (-34). Spectral centroid dropped from 4250 to closer to 3900 Hz.
+
+**Diagnostic — "cymbals too prominent" perception:**
+1. Render premaster + stems
+2. Measure each drum track's file LUFS (run `analyze.py` on each)
+3. Compute effective LUFS = file LUFS + bus volume_db + per-track volume_db
+4. Group by category and average
+5. If cymbal/OH category is < 10 dB below shells category → cut cymbal volume_db
+
 ---
 
 ## True Peak vs Peak
@@ -804,6 +1124,32 @@ Optional `--sc-hp` and `--sc-lp` band-pass the sidechain trigger to
 isolate the kick beater click (e.g. `--sc-hp 60 --sc-lp 200`) — this
 prevents the bass from also triggering the ducking on kick-bass
 overlapping pieces.
+
+### Master bus reverb — subtle cohesion
+
+A modern (2024-2026) mastering technique: apply a very subtle reverb to
+the entire stereo mix at the mastering stage to add cohesion and a sense
+of "one room". The principle: **feel** the reverb, don't **hear** it.
+
+**Parameters that work:**
+- **Mode**: INSERT (dry + small wet, NOT send-only) — `--dry 1.0 --wet 0.04..0.08`
+- **Preset**: `hall_ambient` or `room_drums` (medium decay, not too long)
+- **HP @ 300 Hz**: critical — keeps reverb tail out of the bass body, no mud
+- **Pre-delay 60-80 ms**: pushes the verb tail behind the dry signal, preserves dry transient clarity
+- **Wet level cap**: 0.08 is the perceptual ceiling — above this it becomes audible-as-effect, defeating the "cohesion" purpose
+
+**Practical workflow:**
+1. Render the mix as premaster (peak -3 dBFS)
+2. Apply reverb: `apply_reverb premaster.wav --preset hall_ambient --pre-delay 60 --hp 300 --wet 0.07 --dry 1.0 -o <dir>`
+3. Master the reverb-treated premaster with `master_mix.py` — the LUFS norm + limiter will compensate for any slight level shift from the wet content
+4. Compare against the no-master-reverb master at the same -14 LUFS — the wet version should sound slightly more "glued" without obvious reverb tails
+
+**When master reverb backfires (terido v11 lesson):**
+If the mix has cumulative top-emphasis (e.g. side highshelf +3 dB @ 8k, guitar EQ +1.5 dB @ 3.5k, exciter mix 0.10), adding master reverb at wet 0.07 stacks 300 Hz+ content into the master clipper at +5-7 dB above threshold → audible "overdrive" perception. Fix: drop wet to 0.03-0.04 OR reduce the cumulative top emphasis upstream OR use the `modern_rock_spatial_dark` master preset (drops side highshelf +3 → +1, drops master EQ shelf +1 → +0.5, halves exciter mix).
+
+**Sources:**
+- [Music Guy Mixing — How to Use Reverb on the Master Bus](https://www.musicguymixing.com/reverb-on-master/)
+- [Mastering.com — Reverb Layering Strategies](https://mastering.com/reverb-layering-strategies-how-to-combine-different-reverb-types-to-create-a-cohesive-3d-space/)
 
 ---
 
@@ -1577,6 +1923,97 @@ The shipped profiles are calibrated against published streaming-mastering refere
 4. Bump the `version` (e.g. 1.1 → 1.2) and add a one-line note under `calibration_note`.
 
 The profiles are versioned and well-commented intentionally so that user-specific overrides remain readable.
+
+---
+
+## Modern Prog Metal Mixing Recipe — cookbook
+
+A consolidated recipe for prog metal mixing that pulls together the individual sections in this document. Use as a session-start template for prog metal projects (Tool, Karnivool, Periphery, TesseracT, Leprous, Wheel, Haken, Caligula's Horse direction).
+
+### Phase 0 — Session inspection
+1. Run `audit_session.py session.json` — flag duplicate clips that share source files (phase-coherent doubling risk)
+2. For each track with `clips_per_source ≥ 5 AND total_clips ≥ 20`: flag for `--source-mode continuous` (especially bass DI, sustained vocals/synths). Drums stay per-clip.
+3. Confirm which takes / mics / dups to keep — never carry over decisions from old `output/<session>/` runs
+
+### Phase 1 — Per-track processing
+**Bass DI (CLEAN + PEDAL via continuous mode):**
+- `apply_gain --per-clip --source-mode continuous --crossfade-ms 50 --interloper-head-ms 2000 --interloper-tail-ms 800`
+- `apply_eq --preset bass_di` (HP @ 30 / lowshelf @ 100 +1.5 / peak @ 320 -3)
+- `apply_compression --preset comp_bass_di_gentle` (preserves LRA for premaster)
+- Optional: `apply_octaver --octaves -1 --hp-hz 30 --lp-hz 90 --mix 0.18` for sub weight on small speakers (BT, phones)
+- **Bass split** (frequency separation, not parallel mics): LP @ 400 Hz on CLEAN, HP @ 200 Hz on PEDAL — they share frequency-domain not amplitude-domain. The CLEAN owns 50-400 Hz, PEDAL owns 200 Hz+
+
+**Drum kit (per-track foundation — NOT raw):**
+- KICK IN: `kick_in` EQ + `comp_kick_in` + `transient_kick_punch`
+- KICK OUT / SUB: comp + (optional align_phase to KICK IN)
+- SN TOP: `snare_top` EQ + `comp_snare_top` + `transient_snare_crack`
+- SN BOTTOM: comp + (optional align_phase)
+- TOMS (rack 1, rack 2, floor): `tom` EQ + `comp_tom` + `transient_tom_tight`
+- HIHAT / RIDE / CRASH: `hihat` / `cymbal` EQ only (no comp on cymbal close mics typically)
+- OH (ribbon): HP @ 400 Hz + air shelf @ 10 kHz +2 dB + `comp_overhead`. HP @ 80 from the built-in `overhead_ribbon` preset is TOO permissive for prog — it lets kick/snare body bleed which phase-fights with close mics
+- Skip room mics OR use them with aggressive HP @ 150 + `comp_room` heavy. Modern prog often uses controlled reverb sends INSTEAD of recorded room mics
+
+**Guitar (rhythm L + R hard-panned, ±0.85 modern_rock):**
+- Per-mic EQ + comp baked
+- Bus-level: HP @ 100-120 Hz (let bass own sub-100), peak @ 200-300 Hz -2 to -3 dB (carve out bass space), peak @ 3500 Hz +1.5 dB (presence, but careful — see ear fatigue)
+
+### Phase 2 — Bus + master
+**Drums bus:**
+- HP @ 60 Hz (give bass the sub alone)
+- `comp_drum_bus_minimal` or `comp_drum_bus_gentle` (preserve LRA)
+- `reverb_send: {preset: room_drums, wet: 0.15-0.20}` (controlled room replacement)
+- **Audience-perspective panning** with tom fill-sweep (Rack 1 +0.65 / Rack 2 0 / Floor -0.65)
+- **Internal balance**: shells ~-22 to -27 LUFS, cymbals + OH at ~-33 to -35 LUFS (10-12 dB differential). Cut HIHAT/RIDE/CRASH `volume_db` by -3 to -5 dB if they sit too prominent.
+
+**Bass bus:**
+- `volume_db -1` to -3 dB (Wheel-style "near guitars" presence — adjust by perceptual reference; bass-forward style use -1, balanced -3)
+- Bus-level EQ: subtle cut at masking band (e.g. -2 dB @ 127 Hz if `detect_masking` flags it vs guitar)
+
+**Guitar bus:**
+- `volume_db -1` (style-dependent — modern_rock style profile default is -3)
+- Mid-scoop EQ (handled per-bus)
+- Optional `reverb_send: {preset: guitar_room, wet: 0.05}` for subtle "lives in a room" feel
+
+**Shared reverb buses (replaces individual reverb sends per track):**
+```json
+"reverb_buses": {
+  "snare_plate": {"preset": "snare_plate", "wet": 1.0, "return_volume_db": -8, "return_pan": 0.0},
+  "guitar_hall": {"preset": "hall_ambient", "wet": 1.0, "return_volume_db": -14, "return_pan": 0.0}
+}
+```
+**HP all reverb sends** (built into the presets — verify if not). Mud kills prog clarity.
+
+**Master (modern_rock_spatial_v10 or _dark depending on top-emphasis budget):**
+- Sub-mono extension HP @ 200 Hz on side
+- Stereo width 1.05
+- See "Master spatial preset family" decision tree above
+
+### Phase 3 — Optional FX moves (effects that add space without losing clarity)
+
+- **Slapback delay on snare** (`delay_slapback_snare` preset) — adds "there-ness" without reverb wash
+- **Atmospheric ducked reverb track** on one sustained guitar layer — render via `apply_reverb --send --sidechain <kick_or_kick_snare_combined> --sc-depth 8 --sc-hp 60 --sc-lp 6000`, route as a new track to the guitar bus. The reverb tail "breathes" with the kick/snare hits.
+- **Subtle master bus reverb** (insert mode, wet 0.04-0.07, HP @ 300, pre-delay 60) — the 2025 trend for "one room" cohesion at mastering. See "Master bus reverb — subtle cohesion".
+
+### Phase 4 — Premaster + master + delivery
+1. Render premaster → must hit industry targets: peak -3 dBFS, TP <-3 dBTP, LUFS -18 to -20, LRA ≥6
+2. Run `mix_health.py` — if any RED on LUFS/TP/LRA: fix the MIX, not the master
+3. `master_mix --all-formats --master-preset modern_rock_spatial_v10` (or `_dark` if ear-fatigue / clipper-overdrive showing up)
+4. `master_health.py` per format
+
+### What this recipe deliberately AVOIDS
+- Heavy per-track comp (kills LRA → master can't recover) — gentle ratios 2:1-3:1, slow attacks
+- Wide stereo on rhythm gitár below 200 Hz (mono compat issues) — handled by master sub-mono
+- Recorded room mics (bleed-phase issues) — use controlled reverb sends instead
+- Cumulative top-end stacking (guitar EQ presence + master EQ shelf + side highshelf + exciter) — pick TWO, not all four
+- level_notes on continuous-mode bass (creates 5-6 Hz amplitude modulation that sounds like warble)
+- align_phase between same-instrument siblings (CLEAN + PEDAL bass) when using continuous mode (polarity-detector false positives)
+
+### Reference bands for "this sounds like prog metal" sanity check
+Use `style_check.py --style modern_rock` (closest to prog metal in the shipped profiles) or `tool_inspired` for darker variants:
+- Modern_rock spec @ -10 LUFS: sub_60 -26, low_60-250 -17, mid_250-2k -20.5, high_2-8k -24.5, air_8k+ -31.5
+- Tool_inspired @ -14 LUFS: sub_60 -27, low_60-250 -18, mid_250-2k -26 (more scooped), high_2-8k -26, air_8k+ -41 (darker top)
+
+A green `style_check` verdict + master_health green = delivery-ready.
 
 ---
 

@@ -148,6 +148,92 @@ MASTERING_PRESETS: dict[str, dict] = {
         "stereo_width": 1.0,
         "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
     },
+    "modern_rock_spatial": {
+        "description": "Modern rock + spatial moves: sub-mono <150 Hz, +2 dB air on side @ 8 kHz. For prog metal / wide stereo image deliveries.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],
+        "multiband": None,
+        "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
+        "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.10},
+        "ms": {
+            "side_eq": [
+                {"type": "highpass", "hz": 150, "order": 2},
+                {"type": "highshelf", "hz": 8000, "db": 2.0, "slope": 1.0}
+            ],
+            "mid_eq": [],
+            "side_gain_db": 0.0, "mid_gain_db": 0.0
+        },
+        "stereo_width": 1.0,
+        "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
+    },
+    "modern_rock_spatial_v9": {
+        "description": "modern_rock_spatial + extra air + slightly more present exciter. For Leprous/Wheel-style crisp clean top with cinematic depth.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 1.5, "slope": 1.0}],
+        "multiband": None,
+        "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
+        "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.12},
+        "ms": {
+            "side_eq": [
+                {"type": "highpass", "hz": 150, "order": 2},
+                {"type": "highshelf", "hz": 8000, "db": 2.0, "slope": 1.0}
+            ],
+            "mid_eq": [],
+            "side_gain_db": 0.0, "mid_gain_db": 0.0
+        },
+        "stereo_width": 1.0,
+        "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
+    },
+    "modern_rock_spatial_v10": {
+        "description": "v8/v10 spatial direction: sub-mono extended to 200 Hz, +3 dB air @ 8k side, +1 dB peak @ 2.5k side (widens guitar presence band), modest stereo_width bump. Per-band M/S widening for Leprous/TesseracT/Plini-style clinical-and-wide.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],
+        "multiband": None,
+        "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
+        "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.10},
+        "ms": {
+            "side_eq": [
+                {"type": "highpass", "hz": 200, "order": 2},
+                {"type": "peak", "hz": 2500, "q": 1.0, "db": 1.0},
+                {"type": "highshelf", "hz": 8000, "db": 3.0, "slope": 1.0}
+            ],
+            "mid_eq": [],
+            "side_gain_db": 0.0, "mid_gain_db": 0.0
+        },
+        "stereo_width": 1.05,
+        "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
+    },
+    "modern_rock_spatial_dark": {
+        "description": "v12: same spatial sub-mono benefit (HP@200 on side) but ALL top emphasis dialed back. For listeners reporting ear/head fatigue from cumulative 2-8 kHz boosts. Drops side @ 2.5k peak, drops side @ 8k from +3 to +1, drops master EQ shelf from +1 to +0.5, halves exciter mix. Preserves stereo width.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 0.5, "slope": 1.0}],
+        "multiband": None,
+        "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
+        "exciter": {"hp_hz": 200.0, "drive": 0.3, "mix": 0.05},
+        "ms": {
+            "side_eq": [
+                {"type": "highpass", "hz": 200, "order": 2},
+                {"type": "highshelf", "hz": 8000, "db": 1.0, "slope": 1.0}
+            ],
+            "mid_eq": [],
+            "side_gain_db": 0.0, "mid_gain_db": 0.0
+        },
+        "stereo_width": 1.05,
+        "clipper": {"threshold_db": -2.0, "knee_db": 1.5, "mode": "soft"},
+    },
+    "modern_rock_spatial_noclip": {
+        "description": "Same as modern_rock_spatial but with the clipper DISABLED. Diagnostic preset — use to check if the soft clipper is the distortion source on hot mixes.",
+        "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],
+        "multiband": None,
+        "comp": {"threshold_db": -10, "ratio": 2.0, "attack_ms": 20, "release_ms": 250, "makeup_db": 0.0},
+        "exciter": {"hp_hz": 200.0, "drive": 0.4, "mix": 0.10},
+        "ms": {
+            "side_eq": [
+                {"type": "highpass", "hz": 150, "order": 2},
+                {"type": "highshelf", "hz": 8000, "db": 2.0, "slope": 1.0}
+            ],
+            "mid_eq": [],
+            "side_gain_db": 0.0, "mid_gain_db": 0.0
+        },
+        "stereo_width": 1.0,
+        "clipper": None,
+    },
     "modern_rock_mb": {
         "description": "Modern rock with 3-band multiband — tight low, breathing mid/high. More controlled low end.",
         "eq": [{"type": "highshelf", "hz": 12000, "db": 1.0, "slope": 1.0}],

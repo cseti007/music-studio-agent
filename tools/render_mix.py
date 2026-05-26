@@ -483,6 +483,16 @@ def _compute_bus_auto_trims(
                 print(f"  Bus '{bus_name}': no audio  -> auto_trim_db = +0.0")
             continue
 
+        # Apply the bus's own pan BEFORE measuring LUFS so the calibration
+        # matches the post-pan state the renderer produces (the renderer
+        # applies eff_gain then bus_pan; gain and constant-power pan
+        # commute, so the LUFS landing point is identical). Without this,
+        # hard-panned buses lose ~3 dB LUFS at render that the calibration
+        # never sees, producing too much downstream attenuation.
+        bus_pan = float(cfg.get("pan", 0.0))
+        if bus_pan != 0.0:
+            buf = _pan(buf, bus_pan)
+
         try:
             lufs_in = float(meter.integrated_loudness(buf.T))
         except Exception:

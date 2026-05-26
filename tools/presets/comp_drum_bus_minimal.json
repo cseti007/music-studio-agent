@@ -1,0 +1,12 @@
+{
+  "name": "comp_drum_bus_minimal",
+  "description": "Drum bus glue — barely-there (preserves LRA aggressively for spacious mixes)",
+  "notes": "1.5:1 ratio with high threshold -12 dB and slow 30 ms attack. Target: < 0.5 dB GR, basically transparent. Use when the master phase needs full dynamic range to work cleanly (e.g. when industry premaster spec LRA ≥ 6 LU is the target). Trade-off: less bus-glue character — the kit feels like separate pieces rather than one fused sound. For prog-metal where each kit piece needs space, this is the right move.",
+  "settings": {
+    "threshold_db": -12,
+    "ratio": 1.5,
+    "attack_ms": 30,
+    "release_ms": 200,
+    "makeup_db": 0
+  }
+}

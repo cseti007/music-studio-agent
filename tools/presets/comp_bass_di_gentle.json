@@ -1,0 +1,12 @@
+{
+  "name": "comp_bass_di_gentle",
+  "description": "Bass DI gentle — preserves dynamics for premaster LRA",
+  "notes": "2:1 ratio (vs 3:1 in comp_bass_di) with slower attack (40 ms vs 25 ms) and longer release (150 ms). Target: 1-2 dB GR on average, peaks pass through more freely. Use when the mix needs LRA ≥ 6 LU at premaster handoff. The bass will sound more 'alive' but less 'glued' — the master chain (or the bus glue comp) takes over the consistency role. Pair with comp_drum_bus_minimal on the drum bus for a fully dynamics-preserving mix.",
+  "settings": {
+    "threshold_db": -18,
+    "ratio": 2,
+    "attack_ms": 40,
+    "release_ms": 150,
+    "makeup_db": null
+  }
+}
