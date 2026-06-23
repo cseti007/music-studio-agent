@@ -309,8 +309,6 @@ tests/               Smoke tests (pytest) for DSP + relevance-check logic
 config.toml          Pipeline configuration (LUFS targets, alignment settings)
 CLAUDE.md            Agent system prompt (auto-loaded by Claude Code; paste manually for other LLMs)
 output/              Generated during a session (excluded from git)
-BACKLOG.md           Deferred feature ideas
-CHANGELOG.md         Project history
 ```
 
 ---
@@ -321,7 +319,7 @@ A minimal pytest suite covers the load-bearing DSP and relevance-check logic.
 Run before committing changes that touch tools/:
 
 ```bash
-conda run -n music-studio-agent pytest tests/ -v
+conda run -n music-mix-agent pytest tests/ -v
 # or with venv:
 pytest tests/ -v
 ```

@@ -15,7 +15,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt, welch
+from scipy.signal import butter, sosfilt, welch
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import true_peak_dbfs as _true_peak_dbfs  # noqa: E402
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 
 _CONFIG_PATH = Path("config.toml")
 _FALLBACK_TARGET_LUFS = -18.0
@@ -35,17 +39,6 @@ DEFAULT_TARGET_LUFS = _config_target_lufs()
 def _rms_db(signal: np.ndarray) -> float:
     rms = np.sqrt(np.mean(signal ** 2))
     return float(20 * np.log10(max(rms, 1e-10)))
-
-
-def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
-    """ITU-R BS.1770-4 style true peak via polyphase upsampling.
-
-    Inter-sample peaks emerge after DAC reconstruction or codec encoding
-    (Ogg Vorbis, AAC). Oversampling reveals them before they cause clipping.
-    """
-    up = resample_poly(signal, oversample, 1)
-    peak = float(np.max(np.abs(up)))
-    return float(20 * np.log10(max(peak, 1e-10)))
 
 
 def _headroom_verdict(sample_peak_db: float, true_peak_db: float) -> str:
@@ -978,7 +971,9 @@ def analyze(
         integrated_lufs = -120.0
     lra = _lra(lufs_input, sr, meter)
     sample_peak = float(20 * np.log10(max(np.max(np.abs(mono)), 1e-10)))
-    true_peak = _true_peak_dbfs(mono)
+    # Worst individual channel, not the monosum — a hard-panned full-scale
+    # transient is ~6 dB quieter after .mean() and would under-report.
+    true_peak = worst_channel_true_peak_dbfs(data)
     crest_factor = _crest_factor_db(mono)
     noise_floor = round(_noise_floor_db(mono, sr), 1)
     dynamic_range = round(_dynamic_range_db(mono, sr), 1)

@@ -30,7 +30,10 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import resample_poly, welch
+from scipy.signal import welch
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 
 
 # Verdict thresholds (rock/pop modern target). Yellow = slightly off, red = needs work.
@@ -66,11 +69,6 @@ def _verdict(green: bool, yellow: bool) -> str:
 # ---------------------------------------------------------------------------
 # Measurements
 # ---------------------------------------------------------------------------
-
-def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
-    up = resample_poly(signal, oversample, 1)
-    return float(20.0 * np.log10(max(float(np.max(np.abs(up))), 1e-12)))
-
 
 def _stereo_metrics(data: np.ndarray, sr: int) -> dict:
     if data.shape[1] < 2:
@@ -220,7 +218,10 @@ def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
         lra = float(meter.loudness_range(data if data.shape[1] > 1 else mono))
     except Exception:
         lra = 0.0
-    tp = _true_peak_dbfs(mono)
+    # True peak on the worst individual channel, not the L+R monosum — a hard-
+    # panned full-scale transient is ~6 dB quieter after .mean() and would let
+    # an inter-sample-clipping mix pass the master gate as green.
+    tp = worst_channel_true_peak_dbfs(data)
 
     # Verdicts
     lufs_err = abs(lufs - lufs_target)

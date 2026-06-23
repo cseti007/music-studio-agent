@@ -18,7 +18,7 @@ import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
 from pedalboard import Compressor, Gain, Limiter, Pedalboard, Reverb
-from scipy.signal import butter as _butter, resample_poly as _resample_poly, sosfilt as _sosfilt, sosfiltfilt as _sosfiltfilt
+from scipy.signal import butter as _butter, sosfilt as _sosfilt, sosfiltfilt as _sosfiltfilt
 
 # Optional reverb support — loaded from apply_reverb in same directory
 try:
@@ -37,6 +37,7 @@ except ImportError:
     _HAS_EQ = False
 
 from _stages import STAGE_CANDIDATES as _STAGE_CANDIDATE_LISTS, STAGE_NAMES
+from _dsp import worst_channel_true_peak_dbfs as _worst_channel_true_peak_dbfs
 
 PRESETS_DIR = Path(__file__).parent / "presets"
 
@@ -843,10 +844,7 @@ def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4,
     sample_peak_db = 20.0 * np.log10(max(sample_peak, 1e-12))
     if sample_peak_db < fast_skip_db:
         return sample_peak_db + 0.5  # conservative TP approximation
-    up_l = _resample_poly(master[0], oversample, 1)
-    up_r = _resample_poly(master[1], oversample, 1)
-    tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
-    return 20.0 * np.log10(max(tp, 1e-12))
+    return _worst_channel_true_peak_dbfs(master, oversample)
 
 
 def _peak_db(buf: np.ndarray) -> float:
@@ -1444,10 +1442,13 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
         master_peaks["final_true_peak"] = round(tp_final, 2)
         # Verdict for a premaster: peak should be in the -6..-3 dBFS window
-        # (industry standard handoff). Use a relaxed verdict here.
-        if sample_peak_after > -1.0:
+        # (industry standard handoff). Use a relaxed verdict here. Take the
+        # worse of sample peak and true peak — a -3 dBFS sample-normalized
+        # buffer can still carry inter-sample peaks above the band.
+        worst_peak = max(sample_peak_after, tp_final)
+        if worst_peak > -1.0:
             verdict = "[CLIP]"
-        elif sample_peak_after > -2.0:
+        elif worst_peak > -2.0:
             verdict = "[WARN]"
         else:
             verdict = "[OK]"
@@ -1556,7 +1557,13 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     print(f"Report: {report_path}")
 
     if render_stems:
-        stems_dir = output_wav.parent.parent / "stems"
+        # Always derive from the session dir, not the output WAV's path depth.
+        # output_wav lives one level deeper under --stage (mixes/stages/) and
+        # can be anywhere under a custom --output, so parent.parent would land
+        # the stems in the wrong place. output_dir is <session>/mixes.
+        session_dir = config.get("session_dir") or str(
+            Path(config.get("output_dir", ".")).parent)
+        stems_dir = Path(session_dir) / "stems"
         stems_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nStems -> {stems_dir}/")
         for bus_name, buf in processed.items():

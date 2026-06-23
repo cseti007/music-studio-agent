@@ -312,7 +312,7 @@ def _assemble_track_with_clip_gain(
     out_path = stem_dir / "assembled.wav"
     sf.write(str(out_path), output, sr, subtype="PCM_24")
 
-    boundary_warnings = _check_clip_boundaries(output, sr, clips)
+    boundary_warnings = _check_clip_boundaries(output, sr, clips_sorted)
     for w in boundary_warnings:
         print(
             f"WARNING: {track_name}: level jump at clip boundary "

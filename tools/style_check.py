@@ -109,9 +109,16 @@ def _grade_value(measured: float, target: float, tolerance: float) -> tuple[str,
 
 
 def _grade_range(measured: float, target: float, range_min: float, range_max: float) -> tuple[str, float]:
-    """Inside [min, max] = green; just outside (±10% of range width) = yellow; further = red."""
+    """Inside [min, max] = green; just outside (±10% of range width) = yellow; further = red.
+
+    Inside the range, severity rises from 0.0 at the centre to 1.0 at either
+    edge (distance to the nearest edge) so the borderline flag (GREEN and
+    severity >= 0.7) can fire on a value sitting near a range boundary.
+    """
     if range_min <= measured <= range_max:
-        return ("GREEN", 0.0)
+        half = max((range_max - range_min) / 2.0, 0.1)
+        center = (range_min + range_max) / 2.0
+        return ("GREEN", abs(measured - center) / half)
     width = max(range_max - range_min, 0.1)
     if measured < range_min:
         delta = range_min - measured

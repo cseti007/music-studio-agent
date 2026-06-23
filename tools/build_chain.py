@@ -246,7 +246,11 @@ def _topo_sort_chain(steps: list[dict]) -> list[dict]:
     def _basename(p: str | None) -> str | None:
         if not p:
             return None
-        return Path(p).name if "/" in p or "\\" in p else None
+        # Path(p).name already returns the bare filename whether or not p has a
+        # separator (e.g. an --output-dir . report whose output is just
+        # "assembled_eq.wav"); without this such a step dropped out of the
+        # topo-sort join key and could land in the wrong order.
+        return Path(p).name
 
     by_output_name = {
         _basename(s["output"]): s

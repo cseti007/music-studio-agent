@@ -32,9 +32,10 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt, welch
+from scipy.signal import butter, sosfilt, welch
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 from master_mix import FORMAT_PRESETS  # noqa: E402
 
 GREEN = "[OK]"
@@ -180,10 +181,7 @@ def _codec_isp_estimate(stereo: np.ndarray, sr: int) -> float:
     the original by 0.5-1.5 dB on transient-rich material, and 8x sampling
     catches most of that.
     """
-    up_l = resample_poly(stereo[0], 8, 1)
-    up_r = resample_poly(stereo[1], 8, 1)
-    tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
-    return 20.0 * np.log10(max(tp, 1e-12))
+    return worst_channel_true_peak_dbfs(stereo, oversample=8)
 
 
 # ---------------------------------------------------------------------------
@@ -253,26 +251,16 @@ def _third_octave_psd_db(mono: np.ndarray, sr: int) -> dict:
 def _reference_deck_delta(mono: np.ndarray, sr: int, refs: list[Path]) -> dict:
     """Average the references' 1/3-octave PSDs, loudness-match, and compute
     per-band delta. Returns max delta, region averages, and verdict."""
-    meter = pyln.Meter(sr)
-    try:
-        tgt_lufs = float(meter.integrated_loudness(mono))
-    except Exception:
-        tgt_lufs = -120.0
     tgt_bands = _third_octave_psd_db(mono, sr)
 
     ref_bands_list: list[dict] = []
     for ref_path in refs:
         ref_data, ref_sr = sf.read(str(ref_path), always_2d=True)
         ref_mono = ref_data.mean(axis=1).astype(np.float64)
-        meter_r = pyln.Meter(ref_sr)
-        try:
-            ref_lufs = float(meter_r.integrated_loudness(ref_mono))
-        except Exception:
-            ref_lufs = -120.0
-        offset = ref_lufs - tgt_lufs if ref_lufs > -100 and tgt_lufs > -100 else 0.0
         bands = _third_octave_psd_db(ref_mono, ref_sr)
-        # Apply LUFS-match offset to target so reference bands are absolute
-        # (we'll compare matched target to raw reference)
+        # Reference bands are stored raw; the absolute level difference is
+        # cancelled further down by subtracting the mean delta, so we compare
+        # spectral shape rather than loudness here.
         ref_bands_list.append({hz: db for hz, db in bands.items()})
 
     # Average the references' PSDs at common bands
