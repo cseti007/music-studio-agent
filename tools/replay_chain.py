@@ -678,7 +678,7 @@ def _run_recorded(step):
     """
     data, _ = split_dependencies(step)
     for path, digest in data.items():
-        if not Path(path).is_file() or content_hash(path) != digest:
+        if not Path(path).exists() or content_hash(path) != digest:
             raise ValueError(f"Recall dependency changed or missing: {path}")
     function, kwargs = _recorded_callable(step)
     output = Path(step["output"])
@@ -750,7 +750,7 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
                 dependencies, _ = split_dependencies(step)
                 for path, digest in dependencies.items():
                     if str(Path(path).resolve()) not in outputs:
-                        if not Path(path).is_file() or content_hash(path) != digest:
+                        if not Path(path).exists() or content_hash(path) != digest:
                             raise ValueError(f"Recall dependency changed or missing: {path}")
                 engine_changed.update(_changed_engine(step, engine_cache))
             else:

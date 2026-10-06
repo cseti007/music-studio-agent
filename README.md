@@ -298,6 +298,10 @@ master_health        -- master scorecard: format conformance (LUFS, 4x/8x
                         coherence (sub mono check, top wide), M/S width
                         profile, punch index, compression-history detect,
                         reference-deck comparison. Run per exported format.
+apply_plugin         -- host an external VST3/AU plugin (pedalboard) with
+                        state, parameter snapshot and plugin hash recorded
+run_plan             -- run a JSON plan of tool steps (foreach, parallel,
+                        dry-run, run log) instead of ad-hoc driver scripts
 codec_roundtrip      -- ffmpeg encode/decode (AAC, Vorbis, Opus, MP3 as
                         available) + decoded peak/loudness measurement;
                         keeps decoded files for a codec listening review

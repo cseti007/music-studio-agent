@@ -42,7 +42,11 @@ CALLS = {
     "apply_haas": ("apply_haas",),
     "apply_exciter": ("apply_exciter",),
     "apply_multiband_comp": ("apply_multiband_comp",),
+    "apply_plugin": ("apply_plugin",),
 }
+
+# Plugin bundles are directories on macOS/Linux; they are hashed as a whole.
+PLUGIN_BUNDLE_SUFFIXES = {".vst3", ".component", ".vst"}
 
 
 def file_hash(path):
@@ -50,8 +54,20 @@ def file_hash(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def bundle_hash(path):
+    """Hash every file of a plugin bundle directory by relative path and content."""
+    digest = hashlib.sha256()
+    root = Path(path)
+    for item in sorted(p for p in root.rglob("*") if p.is_file()):
+        digest.update(str(item.relative_to(root)).encode())
+        digest.update(file_hash(item).encode())
+    return "bundle-sha256:" + digest.hexdigest()
+
+
 def content_hash(path):
     """Hash audio samples and format without container timestamps or tags."""
+    if Path(path).is_dir():
+        return bundle_hash(path)
     if Path(path).suffix.lower() not in {".wav", ".wave", ".aif", ".aiff", ".flac", ".ogg"}:
         return file_hash(path)
     import soundfile as sf
@@ -179,7 +195,10 @@ def record_operation(module, resolve=None):
                                      f"recorded for recall (non-finite or non-JSON value): {exc}") from None
             dependencies = {}
             for key in path_keys:
-                if key not in ("output_dir", "output_path") and Path(values[key]).is_file():
+                if key in ("output_dir", "output_path"):
+                    continue
+                path = Path(values[key])
+                if path.is_file() or (path.is_dir() and path.suffix.lower() in PLUGIN_BUNDLE_SUFFIXES):
                     dependencies[values[key]] = content_hash(values[key])
             # Presets may supply defaults inside the callable.
             preset = values.get("preset") or values.get("preset_name")
