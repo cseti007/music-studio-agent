@@ -298,6 +298,9 @@ master_health        -- master scorecard: format conformance (LUFS, 4x/8x
                         coherence (sub mono check, top wide), M/S width
                         profile, punch index, compression-history detect,
                         reference-deck comparison. Run per exported format.
+codec_roundtrip      -- ffmpeg encode/decode (AAC, Vorbis, Opus, MP3 as
+                        available) + decoded peak/loudness measurement;
+                        keeps decoded files for a codec listening review
 review_delivery      -- delivery gate: exact export properties plus scoped
                         human listening evidence tied to the file hash
 

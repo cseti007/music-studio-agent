@@ -1010,8 +1010,10 @@ any of them via a custom preset JSON:
 ### Waveform true peak and codec audition
 
 The health tool reports 4x and 8x oversampled waveform peaks. Neither is a codec
-simulation. Codec audition is unavailable in the current toolkit: perform an
-actual encode/decode/listen check separately when the delivery requires it.
+simulation. `codec_roundtrip.py` encodes with the local ffmpeg build, decodes,
+and measures the decoded peaks and loudness; listening to its decoded files is
+still a separate, human codec review. Overshoot confined to the first or last
+milliseconds usually comes from an abrupt full-scale file start or end.
 
 ### Punch index and phase diagnostics
 
@@ -1047,7 +1049,7 @@ deltas against your master. 3-5 references is the typical deck size.
 |---|---|---|
 | File format and peak ceiling | Technical check | Correct violations of the agreed delivery specification. |
 | Integrated loudness | Requirement only when contracted; otherwise advisory | Playback normalization is not rejection of the master. |
-| Codec behavior | Unavailable without encode/decode | Waveform oversampling cannot certify encoded playback. |
+| Codec behavior | Measured by `codec_roundtrip.py` on a local encoder build | Waveform oversampling cannot certify encoded playback; platform encoders differ from the local build. |
 | Phase, width and punch | Listening prompts | Investigate audible mono cancellation or transient loss; no universal threshold proves quality. |
 | Compression history | Hypothesis | Metrics cannot establish which processing happened upstream. |
 | Reference spectrum | Tonal guide | Arrangement, vocals, instrumentation and era can explain differences. |
