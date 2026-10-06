@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import librosa
 import numpy as np
 import soundfile as sf
+
+from _recall import record_operation
 
 try:
     import psola
@@ -109,7 +110,6 @@ def _quantise_to_scale(f0_hz: np.ndarray, scale_semis: list[int]) -> np.ndarray:
     f0_voiced = f0_hz[voiced_mask]
     midi = 69 + 12 * np.log2(f0_voiced / 440.0)
     midi_int = np.round(midi).astype(int)
-    midi_cents_offset = midi - midi_int  # fractional part in semitone units
 
     # For each midi note, find nearest semitone that's in the scale
     nearest_scale = np.zeros_like(midi_int)
@@ -149,6 +149,7 @@ def _blend_pitch(f0_orig: np.ndarray, f0_quantised: np.ndarray, strength: float)
     return out
 
 
+@record_operation("apply_pitch_correct")
 def apply_pitch_correct(
     input_path: Path,
     output_dir: Path,
@@ -162,7 +163,7 @@ def apply_pitch_correct(
     if not _HAS_PSOLA:
         raise ImportError(
             "psola package not available — pip install psola (or run "
-            "`conda run -n music-studio-agent pip install psola`)"
+            "`conda run -n music-mix-agent pip install psola`)"
         )
 
     data, sr = sf.read(str(input_path), always_2d=True)
@@ -202,7 +203,7 @@ def apply_pitch_correct(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / (input_path.stem + "_pitched.wav")
-    sf.write(str(output_path), out_audio, sr, subtype="PCM_24")
+    sf.write(str(output_path), out_audio, sr, subtype="FLOAT")
 
     # Stats
     voiced_orig = f0_orig[~np.isnan(f0_orig)]

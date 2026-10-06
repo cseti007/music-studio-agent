@@ -4,7 +4,7 @@ Distinct from mix_health.py:
   - mix_health scores a finished STEM mix (LUFS, M/S width avg, masking pairs,
     stem pumping)
   - master_health scores a finished STEREO MASTER (format conformance,
-    per-band phase coherence, M/S width profile, punch index, codec-ISP
+    per-band phase coherence, M/S width profile, punch index, oversampled true peak
     simulation, compression-history detection, optional reference-deck
     comparison)
 
@@ -32,9 +32,10 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt, welch
+from scipy.signal import butter, sosfilt, welch
 
 sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 from master_mix import FORMAT_PRESETS  # noqa: E402
 
 GREEN = "[OK]"
@@ -168,22 +169,12 @@ def _punch_index(mono: np.ndarray, sr: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Codec-ISP simulator (proxy via heavy oversampling)
+# Oversampled waveform true peak (no codec simulation)
 # ---------------------------------------------------------------------------
 
-def _codec_isp_estimate(stereo: np.ndarray, sr: int) -> float:
-    """Estimate the post-codec inter-sample peak.
-
-    A true codec-roundtrip simulator (Ogg Vorbis encode + decode + measure)
-    needs ffmpeg or similar; here we use a conservative proxy: 8x oversampled
-    true peak (vs. the 4x used elsewhere). Lossy encoding tends to overshoot
-    the original by 0.5-1.5 dB on transient-rich material, and 8x sampling
-    catches most of that.
-    """
-    up_l = resample_poly(stereo[0], 8, 1)
-    up_r = resample_poly(stereo[1], 8, 1)
-    tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
-    return 20.0 * np.log10(max(tp, 1e-12))
+def _oversampled_true_peak(stereo: np.ndarray) -> float:
+    """Measure 8x waveform true peak. This does not simulate a codec."""
+    return worst_channel_true_peak_dbfs(stereo, oversample=8)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +185,10 @@ def _compression_history(stereo: np.ndarray, sr: int, meter: pyln.Meter) -> dict
     """Try to tell whether the input has already been compressed/limited.
 
     BS.1770 measurements use the stereo signal (channel-weighted); crest is
-    computed on the loudest channel since clipping is per-channel.
+    computed on the loudest channel since clipping is per-channel. The peak
+    gate (> -2.5 dBFS) sits below common delivery ceilings (-1/-2 dBTP
+    masters peak around -1.1 to -2.3 dBFS) but above a -3 dBFS premaster
+    handoff, so limited masters can be flagged. Advisory only.
     """
     try:
         lra = float(meter.loudness_range(stereo.T))
@@ -212,20 +206,20 @@ def _compression_history(stereo: np.ndarray, sr: int, meter: pyln.Meter) -> dict
     crest = min(crests) if crests else 0.0
     peak_dbfs = max(peak_db_per_ch) if peak_db_per_ch else -120.0
 
-    likely_mastered = lra < 4.0 or crest < 10.0 or peak_dbfs > -0.5
+    likely_mastered = bool(crest < 10.0 and peak_dbfs > -2.5)
     reasons = []
-    if lra < 4.0:
-        reasons.append(f"LRA {lra:.1f} LU < 4")
+
     if crest < 10.0:
         reasons.append(f"crest {crest:.1f} dB < 10")
-    if peak_dbfs > -0.5:
-        reasons.append(f"sample peak {peak_dbfs:.1f} dBFS > -0.5")
+    if peak_dbfs > -2.5:
+        reasons.append(f"sample peak {peak_dbfs:.1f} dBFS > -2.5")
 
     return {
         "lra_lu": round(lra, 1),
         "crest_db": round(crest, 1),
         "sample_peak_dbfs": round(peak_dbfs, 1),
         "likely_already_mastered": likely_mastered,
+        "interpretation": "Heuristic only; waveform metrics cannot establish processing history",
         "reasons": reasons,
     }
 
@@ -253,26 +247,16 @@ def _third_octave_psd_db(mono: np.ndarray, sr: int) -> dict:
 def _reference_deck_delta(mono: np.ndarray, sr: int, refs: list[Path]) -> dict:
     """Average the references' 1/3-octave PSDs, loudness-match, and compute
     per-band delta. Returns max delta, region averages, and verdict."""
-    meter = pyln.Meter(sr)
-    try:
-        tgt_lufs = float(meter.integrated_loudness(mono))
-    except Exception:
-        tgt_lufs = -120.0
     tgt_bands = _third_octave_psd_db(mono, sr)
 
     ref_bands_list: list[dict] = []
     for ref_path in refs:
         ref_data, ref_sr = sf.read(str(ref_path), always_2d=True)
         ref_mono = ref_data.mean(axis=1).astype(np.float64)
-        meter_r = pyln.Meter(ref_sr)
-        try:
-            ref_lufs = float(meter_r.integrated_loudness(ref_mono))
-        except Exception:
-            ref_lufs = -120.0
-        offset = ref_lufs - tgt_lufs if ref_lufs > -100 and tgt_lufs > -100 else 0.0
         bands = _third_octave_psd_db(ref_mono, ref_sr)
-        # Apply LUFS-match offset to target so reference bands are absolute
-        # (we'll compare matched target to raw reference)
+        # Reference bands are stored raw; the absolute level difference is
+        # cancelled further down by subtracting the mean delta, so we compare
+        # spectral shape rather than loudness here.
         ref_bands_list.append({hz: db for hz, db in bands.items()})
 
     # Average the references' PSDs at common bands
@@ -318,8 +302,7 @@ def _reference_deck_delta(mono: np.ndarray, sr: int, refs: list[Path]) -> dict:
 # Section verdicts
 # ---------------------------------------------------------------------------
 
-def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
-                         format_preset: dict | None) -> dict:
+def _conformance_section(stereo: np.ndarray, sr: int, format_preset: dict | None) -> dict:
     meter = pyln.Meter(sr)
     # BS.1770: stereo LUFS measured on the (N, 2) signal — channel-weighted
     try:
@@ -330,19 +313,18 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
         lra = float(meter.loudness_range(stereo.T))
     except Exception:
         lra = 0.0
-    from analyze import _true_peak_dbfs
-    # True peak: worst of L/R, sample-summed peak after oversampling
-    tp = max(_true_peak_dbfs(stereo[0]), _true_peak_dbfs(stereo[1]))
-    tp_codec = _codec_isp_estimate(stereo, sr)
+    tp = worst_channel_true_peak_dbfs(stereo)
+    tp_8x = _oversampled_true_peak(stereo)
     sample_peak = 20.0 * np.log10(max(np.max(np.abs(stereo)), 1e-12))
 
     if format_preset is None:
         return {
             "format": None,
+            "codec_check": {"available": False, "note": "No codec encode/decode was performed"},
             "integrated_lufs": round(lufs, 2),
             "lra_lu": round(lra, 2),
             "true_peak_dbtp": round(tp, 2),
-            "codec_isp_estimate_dbtp": round(tp_codec, 2),
+            "true_peak_8x_dbtp": round(tp_8x, 2),
             "sample_peak_dbfs": round(sample_peak, 2),
             "verdict": YELLOW,
             "note": "no format specified — measurements only, no conformance check",
@@ -350,43 +332,38 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
 
     target_lufs = format_preset["target_lufs"]
     tp_ceiling = format_preset["tp_ceiling_dbtp"]
-    lufs_err = abs(lufs - target_lufs)
-    lufs_v = _verdict(green=lufs_err <= 0.5, yellow=lufs_err <= 1.5)
+    # Formats without a loudness target (vinyl_pre) are checked on peaks only.
+    lufs_err = None if target_lufs is None else abs(lufs - target_lufs)
+    lufs_v = GREEN if lufs_err is None else _verdict(green=lufs_err <= 0.5, yellow=lufs_err <= 1.5)
 
-    # Vinyl / no-limiter formats deliberately skip the limiter (cutter does
-    # its own limiting). A TP > ceiling is expected on the WAV — yellow at
-    # worst, never red, with a note that this is by design.
     skip_limiter = format_preset.get("skip_limiter", False)
-    if skip_limiter:
-        tp_v = YELLOW if tp > tp_ceiling + 3.0 else GREEN
-        tp_codec_v = YELLOW if tp_codec > tp_ceiling + 3.0 else GREEN
-        tp_note = "no-limiter format (vinyl/etc) — TP ceiling enforced downstream by the cutter / mastering plant"
-    else:
-        tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 1.0)
-        tp_codec_v = _verdict(green=tp_codec <= tp_ceiling + 0.5,
-                              yellow=tp_codec <= tp_ceiling + 1.5)
-        tp_note = None
-
-    overall = lufs_v
-    for v in (tp_v, tp_codec_v):
-        if v == RED:
+    tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 0.1)
+    tp_8x_v = _verdict(green=tp_8x <= tp_ceiling, yellow=tp_8x <= tp_ceiling + 0.1)
+    tp_note = "Peak safety applies even when limiting is disabled"
+    # Musical loudness is advisory unless a delivery contract requires it.
+    required_loudness = format_preset.get("loudness_policy") == "requirement"
+    overall = lufs_v if required_loudness else GREEN
+    for verdict in (tp_v, tp_8x_v):
+        if verdict == RED:
             overall = RED
-        elif v == YELLOW and overall == GREEN:
+        elif verdict == YELLOW and overall == GREEN:
             overall = YELLOW
 
     return {
         "format_target_lufs": target_lufs,
+        "loudness_policy": format_preset.get("loudness_policy", "preference"),
+        "codec_check": {"available": False, "note": "No codec encode/decode was performed"},
         "format_tp_ceiling_dbtp": tp_ceiling,
         "format_skip_limiter": skip_limiter,
         "integrated_lufs": round(lufs, 2),
-        "lufs_delta": round(lufs - target_lufs, 2),
+        "lufs_delta": None if target_lufs is None else round(lufs - target_lufs, 2),
         "lufs_verdict": lufs_v,
         "lra_lu": round(lra, 2),
         "true_peak_dbtp": round(tp, 2),
         "true_peak_verdict": tp_v,
         "true_peak_note": tp_note,
-        "codec_isp_estimate_dbtp": round(tp_codec, 2),
-        "codec_isp_verdict": tp_codec_v,
+        "true_peak_8x_dbtp": round(tp_8x, 2),
+        "true_peak_8x_verdict": tp_8x_v,
         "sample_peak_dbfs": round(sample_peak, 2),
         "verdict": overall,
     }
@@ -426,11 +403,11 @@ def _punch_section(mono: np.ndarray, sr: int) -> dict:
     if db is None:
         return {**p, "verdict": YELLOW}
     if db < 2.0:
-        verdict = RED
-        note = "squashed — transients are buried in the bed (typical of over-limited masters)"
+        verdict = YELLOW
+        note = "Low transient contrast; may be intentional. Compare matched listening excerpts."
     elif db < 4.0:
         verdict = YELLOW
-        note = "low punch — borderline; may sound fatiguing"
+        note = "Low envelope contrast under a project heuristic; audition before changing dynamics"
     return {**p, "note": note, "verdict": verdict}
 
 
@@ -462,19 +439,21 @@ def _render_text(report: dict) -> str:
     C = report["conformance"]
     lines.append("FORMAT CONFORMANCE")
     lines.append("-" * 60)
-    if C.get("format_target_lufs") is None:
+    if report.get("format") is None:
         lines.append("  (no format target supplied — measurements only)")
         lines.append(f"      LUFS                : {C['integrated_lufs']:+.2f}")
         lines.append(f"      LRA                 : {C['lra_lu']:.2f} LU")
         lines.append(f"      True peak (4x)      : {C['true_peak_dbtp']:+.2f} dBTP")
-        lines.append(f"      Codec-ISP est (8x)  : {C['codec_isp_estimate_dbtp']:+.2f} dBTP")
+        lines.append(f"      True peak (8x)  : {C['true_peak_8x_dbtp']:+.2f} dBTP")
     else:
-        lines.append(f"  Target: {report['format']}  ({C['format_target_lufs']} LUFS, "
+        target = "no LUFS target" if C["format_target_lufs"] is None else f"{C['format_target_lufs']} LUFS"
+        delta = "n/a" if C["lufs_delta"] is None else f"{C['lufs_delta']:+.2f}"
+        lines.append(f"  Target: {report['format']}  ({target}, "
                      f"{C['format_tp_ceiling_dbtp']} dBTP ceiling)")
         lines.append(f"  {C['lufs_verdict']} Integrated LUFS    : {C['integrated_lufs']:+.2f}  "
-                     f"(delta {C['lufs_delta']:+.2f})")
+                     f"(delta {delta})")
         lines.append(f"  {C['true_peak_verdict']} True peak          : {C['true_peak_dbtp']:+.2f} dBTP")
-        lines.append(f"  {C['codec_isp_verdict']} Codec-ISP estimate : {C['codec_isp_estimate_dbtp']:+.2f} dBTP  (8x oversampled)")
+        lines.append(f"  {C['true_peak_8x_verdict']} True peak (8x) : {C['true_peak_8x_dbtp']:+.2f} dBTP  (8x oversampled)")
         if C.get("true_peak_note"):
             lines.append(f"      note: {C['true_peak_note']}")
         lines.append(f"      LRA                : {C['lra_lu']:.2f} LU")
@@ -501,7 +480,7 @@ def _render_text(report: dict) -> str:
                      f"(short-window peak vs long-window bed)")
         if PUNCH.get("note"):
             lines.append(f"      {PUNCH['note']}")
-        lines.append("      reference values: limited pop ~3-5 dB, healthy rock ~6-9 dB, dynamic >10 dB")
+        lines.append("      Project heuristic only; compare the same passage before/after at matched loudness")
     else:
         lines.append(f"  (skipped — {PUNCH.get('note', 'unknown')})")
 
@@ -531,22 +510,21 @@ def _render_text(report: dict) -> str:
         lines.append(f"      max single-band     : {R['max_band_delta_db']:.1f} dB")
 
     # Overall
-    verdicts = [C["verdict"], P["verdict"], PUNCH["verdict"], H["verdict"]]
-    if R["available"]:
-        verdicts.append(R["verdict"])
+    verdicts = [C["verdict"]]
     n_green = verdicts.count(GREEN)
     n_yellow = verdicts.count(YELLOW)
     n_red = verdicts.count(RED)
-    overall = GREEN if n_red == 0 and n_yellow <= 1 else (YELLOW if n_red == 0 else RED)
+    overall = C["verdict"]
 
     lines += ["", "=" * 60,
-              f"OVERALL: {overall}  {n_green} green, {n_yellow} yellow, {n_red} red"]
+              f"TECHNICAL CONFORMANCE: {overall}  {n_green} green, {n_yellow} yellow, {n_red} red",
+              "LISTENING REVIEW: PENDING (this tool does not audition audio)"]
     if overall == GREEN:
-        lines.append("  Master is delivery-ready.")
+        lines.append("  Measured technical checks passed. Codec audition and listening approval remain required.")
     elif overall == YELLOW:
-        lines.append("  Master is close — address yellow items.")
+        lines.append("  Review technical warnings; musical diagnostics are advisory.")
     else:
-        lines.append("  Master needs work — red items must be fixed before delivery.")
+        lines.append("  Technical checks failed; correct the export before delivery.")
     return "\n".join(lines)
 
 
@@ -554,7 +532,7 @@ def _render_text(report: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
-_HEALTH_CACHE_VERSION = 1
+_HEALTH_CACHE_VERSION = 4
 
 
 def _health_cache_signature(master_path: Path, format_name: str | None,
@@ -573,6 +551,7 @@ def _health_cache_signature(master_path: Path, format_name: str | None,
             refs.append({"path": str(r), "mtime_ns": int(rs.st_mtime_ns), "size": int(rs.st_size)})
     return {
         "version": _HEALTH_CACHE_VERSION,
+        "master_path": str(master_path.resolve()),
         "master_mtime_ns": int(stat.st_mtime_ns),
         "master_size": int(stat.st_size),
         "format": format_name,
@@ -602,6 +581,8 @@ def master_health(master_path: Path, output_dir: Path,
     data, sr = sf.read(str(master_path), always_2d=True, dtype="float32")
     if data.shape[1] == 1:
         data = np.repeat(data, 2, axis=1)
+    if data.shape[1] != 2 or len(data) < int(sr * .4) or not np.isfinite(data).all():
+        raise ValueError("Health analysis requires at least 400 ms of finite mono/stereo audio")
     stereo = data.T.astype(np.float32)
     L, R = stereo[0], stereo[1]
     mono = (L + R) * 0.5
@@ -609,7 +590,13 @@ def master_health(master_path: Path, output_dir: Path,
     fmt = FORMAT_PRESETS.get(format_name) if format_name else None
 
     print("  [1/5] Format conformance...", flush=True)
-    conformance = _conformance_section(mono, stereo, sr, fmt)
+    conformance = _conformance_section(stereo, sr, fmt)
+    info = sf.info(str(master_path))
+    format_ok = fmt is None or (sr == fmt.get("sample_rate", sr)
+                               and info.subtype == f"PCM_{fmt['bit_depth']}")
+    conformance.update(sample_rate=sr, subtype=info.subtype, file_format_matches=bool(format_ok))
+    if not format_ok:
+        conformance["verdict"] = RED
     print("  [2/5] Per-band phase coherence and M/S width...", flush=True)
     phase = _phase_section(L, R, sr)
     print("  [3/5] Punch index...", flush=True)
@@ -621,6 +608,9 @@ def master_health(master_path: Path, output_dir: Path,
 
     report = {
         "master_file": str(master_path),
+        "delivery_ready": False,
+        "listening_review": {"status": "pending", "performed_by_tool": False},
+        "assessment_scope": "Technical conformance; musical diagnostics require listening",
         "format": format_name,
         "conformance": conformance,
         "phase": phase,

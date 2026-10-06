@@ -4,8 +4,8 @@
   "description": "Jazz / acoustic / singer-songwriter / folk. Highly dynamic, natural top end, gentle low end. Light or no limiting \u2014 LRA stays high to preserve performance dynamics.",
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Jazz / Vocal Jazz / Folk)",
-    "Streaming mastering guides 2025: jazz/acoustic target -16 to -20 LUFS typical",
-    "Calibrated: modern_rock baseline + jazz spectral shifts (sub -4, low -2, mid +1.5)"
+    "Unattributed streaming mastering guidance (2025), used as a project preference: jazz/acoustic target -16 to -20 LUFS typical",
+    "Project preference derived from the modern_rock profile + jazz spectral shifts (sub -4, low -2, mid +1.5) (assumed, not measured)"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS at integrated_target LUFS. Jazz / acoustic has reduced sub and emphasised instrument body in the mids.",
   "lufs": {
@@ -58,10 +58,13 @@
   "default_bus_pan": {
     "drums": 0.0,
     "bass": 0.0,
-    "gtr_1": -0.3,
-    "gtr_laci": 0.3,
     "gtr": 0.0,
     "vocal_lead": 0.0,
     "vocal_bg": 0.0
-  }
+  },
+  "guitar_player_pans": [
+    -0.3,
+    0.3,
+    0.0
+  ]
 }

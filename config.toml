@@ -4,10 +4,10 @@
 [gain]
 
 # Per-clip mode (apply_gain --per-clip):
-# Normalizes each clip to this LUFS level before assembling the stem.
-# -18 LUFS is the standard clip gain target for mixing — it provides
-# headroom for plugins while equalizing level differences between clips
-# recorded at different gain settings.
+# Clips keep their original levels by default. Only with --normalize is each
+# clip normalized to this LUFS level before assembly (use it to correct
+# identified accidental recording-level differences). The resolved value is
+# stored in the operation record, so replay does not depend on this file.
 per_clip_target_lufs = -18.0
 
 # Per-channel mode (apply_gain --per-channel):
@@ -25,6 +25,11 @@ max_delay_ms = 20.0
 # Length of the active audio segment used for cross-correlation.
 # 10 seconds is well above the minimum needed for reliable results.
 segment_duration_sec = 10.0
+
+# Minimum absolute peak correlation required before align_phase writes an
+# aligned stem (CLI: --min-correlation). Below it the delay estimate is
+# unreliable; distant room/overhead pairs commonly fall under it.
+min_correlation = 0.3
 
 
 [analyze]

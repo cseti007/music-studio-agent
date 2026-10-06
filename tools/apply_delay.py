@@ -11,7 +11,15 @@ Echo series is computed as an FIR approximation:
   tap n: gain = mix * feedback^(n-1),  at n * delay_ms
   (continued until tap gain < -80 dB below the first echo)
 
-This is mathematically equivalent to a recursive delay line but runs fully vectorized.
+This is equivalent to a recursive delay line without filtering inside the
+loop, and runs fully vectorized. --hp / --lp filter the summed wet signal
+once, so every repeat gets the same tone; repeats do NOT get progressively
+darker the way a tape echo's do.
+
+Insert mode outputs dry + wet. Send mode (--send) outputs wet only, so
+--send with --mix 1.0 and --feedback 0 is a pure delay of the input.
+Explicit CLI flags override preset values. Output is 32-bit float: peaks
+above 0 dBFS are kept and reported (output_exceeds_0dbfs), never rescaled.
 
 BPM-synced delay: use --bpm and --division instead of --delay-ms.
   divisions: whole, half, quarter, dotted-quarter, eighth, dotted-eighth, sixteenth
@@ -43,6 +51,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt
+
+from _recall import record_operation
 
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
@@ -110,6 +120,8 @@ def _echo_series(
 # Core
 # ---------------------------------------------------------------------------
 
+
+@record_operation("apply_delay")
 def apply_delay(
     input_path: Path,
     output_dir: Path,
@@ -161,7 +173,7 @@ def apply_delay(
         # Normal: same delay on all channels
         wet = _echo_series(data, delay_samples, max(feedback, 0.0), mix, n_samples)
 
-    # Filters on wet signal
+    # Filters on the summed wet signal (not inside the feedback path)
     wet = _apply_filters(wet, sr, hp_hz, lp_hz)
 
     if send:
@@ -169,21 +181,16 @@ def apply_delay(
     else:
         output_data = data + wet
 
-    # Clip guard
+    # Float output keeps overs; report them instead of rescaling the file.
     peak_linear = float(np.max(np.abs(output_data)))
-    clipped = peak_linear > 1.0
-    if clipped:
-        print(
-            f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS — "
-            "scaling down to prevent clipping",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak_linear
+    if peak_linear > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_delay_send" if send else "_delay"
     out_path = output_dir / (input_path.stem + suffix + ".wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     in_peak = float(20 * np.log10(max(float(np.max(np.abs(data))), 1e-10)))
     out_peak = float(20 * np.log10(max(float(np.max(np.abs(output_data))), 1e-10)))
@@ -204,8 +211,8 @@ def apply_delay(
             "division": division,
         },
         "input_peak_dbfs": round(in_peak, 1),
-        "output_peak_dbfs": round(out_peak, 1),
-        "clipping_prevented": clipped,
+        "output_peak_dbfs": round(out_peak, 2),
+        "output_exceeds_0dbfs": peak_linear > 1.0,
         "sample_rate": sr,
     }
     (output_dir / "delay_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -257,20 +264,20 @@ def main() -> None:
     parser.add_argument("file", type=Path, nargs="?", help="Input WAV file")
     parser.add_argument("--output-dir", type=Path, help="Output directory")
     parser.add_argument(
-        "--mode", choices=["normal", "pingpong"], default="normal",
-        help="Delay mode (default: normal)",
+        "--mode", choices=["normal", "pingpong"], default=None,
+        help="Delay mode (default: preset or normal)",
     )
     parser.add_argument("--delay-ms", type=float, metavar="MS", help="Delay time in milliseconds")
     parser.add_argument(
-        "--feedback", type=float, default=0.0, metavar="0-0.95",
-        help="Feedback amount 0.0-0.95 (default 0.0 = single echo)",
+        "--feedback", type=float, default=None, metavar="0-0.95",
+        help="Feedback amount 0.0-0.95 (default: preset or 0.0 = single echo)",
     )
     parser.add_argument(
-        "--mix", type=float, default=0.25, metavar="0-1",
-        help="Wet level relative to dry (default 0.25)",
+        "--mix", type=float, default=None, metavar="0-1",
+        help="Wet level relative to dry (default: preset or 0.25)",
     )
     parser.add_argument("--hp", type=float, metavar="HZ", help="High-pass wet signal at this Hz")
-    parser.add_argument("--lp", type=float, metavar="HZ", help="Low-pass wet signal at this Hz (darkens repeats)")
+    parser.add_argument("--lp", type=float, metavar="HZ", help="Low-pass the summed wet signal at this Hz (all repeats equally)")
     parser.add_argument("--send", action="store_true", help="Send mode: output wet-only signal")
     parser.add_argument("--preset", metavar="NAME", help="Delay preset (see --list-presets)")
     parser.add_argument("--list-presets", action="store_true", help="List delay presets and exit")
@@ -296,33 +303,29 @@ def main() -> None:
         print(json.dumps({"error": f"Not found: {args.file}"}), file=sys.stderr)
         sys.exit(1)
 
-    delay_ms = args.delay_ms
-    feedback = args.feedback
-    mix = args.mix
-    mode = args.mode
-    hp_hz = args.hp
-    lp_hz = args.lp
-    send = args.send
-    bpm = args.bpm
-    division = args.division
     preset_name = args.preset
-
+    s: dict = {}
     if args.preset:
         try:
-            pdata = _load_preset(args.preset)
+            s = _load_preset(args.preset).get("settings", {})
         except FileNotFoundError as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)
             sys.exit(1)
-        s = pdata.get("settings", {})
-        delay_ms = s.get("delay_ms", delay_ms)
-        feedback = s.get("feedback", feedback)
-        mix = s.get("mix", mix)
-        mode = s.get("mode", mode)
-        hp_hz = s.get("hp_hz", hp_hz)
-        lp_hz = s.get("lp_hz", lp_hz)
-        send = s.get("send", send)
-        bpm = s.get("bpm", bpm)
-        division = s.get("division", division)
+
+    # Explicit CLI flags win over the preset, which wins over the defaults.
+    def pick(value, key, default=None):
+        return value if value is not None else s.get(key, default)
+
+    feedback = pick(args.feedback, "feedback", 0.0)
+    mix = pick(args.mix, "mix", 0.25)
+    mode = pick(args.mode, "mode", "normal")
+    hp_hz = pick(args.hp, "hp_hz")
+    lp_hz = pick(args.lp, "lp_hz")
+    send = args.send or bool(s.get("send", False))
+    if args.delay_ms is not None or args.bpm is not None or args.division is not None:
+        delay_ms, bpm, division = args.delay_ms, args.bpm, args.division
+    else:
+        delay_ms, bpm, division = s.get("delay_ms"), s.get("bpm"), s.get("division")
 
     # BPM sync overrides delay_ms
     if bpm and division:

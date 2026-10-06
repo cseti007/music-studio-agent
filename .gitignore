@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
 *.egg-info/
 .venv/
 venv/
@@ -29,8 +31,11 @@ spectrograms/
 # and keep the synthetic IR pack — ships with the repo
 !tools/irs/*.wav
 
-# Claude Code local settings (machine-specific)
-.claude/settings.local.json
+# and keep test fixtures, if any are added
+!tests/**/*.json
+
+# Claude Code settings and local state (machine-specific)
+.claude/
 
 # Personal project trackers — kept locally, not published
 CHANGELOG.md

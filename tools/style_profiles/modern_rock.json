@@ -4,10 +4,10 @@
   "description": "Modern rock / alt-rock / post-rock streaming master. Loud, slightly compressed, scooped lower mids, prominent vocal presence around 2-4 kHz, controlled top.",
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Alt Rock / Indie Rock / Post Rock)",
-    "Streaming mastering guides 2025: rock target -10 to -13 LUFS integrated",
-    "Calibrated against real-world rock streaming masters at -10 LUFS-normalized wideband band-RMS"
+    "Unattributed streaming mastering guidance (2025), used as a project preference: rock target -10 to -13 LUFS integrated",
+    "Project preference: wideband band-RMS targets at -10 LUFS; the source measurements are not recorded"
   ],
-  "calibration_note": "Tonal balance targets are wideband band-RMS measured at the integrated_target LUFS, NOT iZotope-TBC PSD-curve values. Numbers come from professional rock streaming masters.",
+  "calibration_note": "Tonal balance targets are wideband band-RMS measured at the integrated_target LUFS, NOT iZotope-TBC PSD-curve values. The values are a project preference; the masters they were derived from are not recorded.",
   "lufs": {
     "integrated_target": -10.0,
     "tolerance_lu": 2.0
@@ -58,11 +58,13 @@
   "default_bus_pan": {
     "drums": 0.0,
     "bass": 0.0,
-    "gtr_1": -0.85,
-    "gtr_laci": 0.85,
-    "gtr_terka": 0.0,
     "gtr": 0.0,
     "vocal_lead": 0.0,
     "vocal_bg": 0.0
-  }
+  },
+  "guitar_player_pans": [
+    -0.85,
+    0.85,
+    0.0
+  ]
 }

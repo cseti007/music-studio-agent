@@ -4,8 +4,8 @@
   "description": "Modern hip-hop / trap. Massive sub-bass (808s), scooped lower mids, bright top for snare crack and hi-hat. Heavy limiting and saturation are part of the aesthetic.",
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Hip-Hop / Trap / Classic Hip-Hop)",
-    "Streaming mastering guides 2025: hip-hop target -8 LUFS integrated typical",
-    "Calibrated: modern_rock baseline + hip-hop spectral shifts (sub +4, mids -1.5, air +2.5)"
+    "Unattributed streaming mastering guidance (2025), used as a project preference: hip-hop target -8 LUFS integrated typical",
+    "Project preference derived from the modern_rock profile + hip-hop spectral shifts (sub +4, mids -1.5, air +2.5) (assumed, not measured)"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS at integrated_target LUFS. Hip-hop has dramatically more sub content and scooped mids vs rock.",
   "lufs": {
@@ -58,10 +58,13 @@
   "default_bus_pan": {
     "drums": 0.0,
     "bass": 0.0,
-    "gtr_1": 0.0,
-    "gtr_laci": 0.0,
     "gtr": 0.0,
     "vocal_lead": 0.0,
     "vocal_bg": 0.0
-  }
+  },
+  "guitar_player_pans": [
+    0.0,
+    0.0,
+    0.0
+  ]
 }

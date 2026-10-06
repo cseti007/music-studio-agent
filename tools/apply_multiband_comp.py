@@ -17,6 +17,9 @@ Relevance check:
     If everything is already squashed, multiband adds artifacts, not control.
   - Stem duration > 5 seconds (LRA/crest stats need enough material).
 
+Detection is stereo-linked per band: each band gets one gain curve driven by
+its louder channel, so a one-sided transient does not shift the image.
+
 Crossover: 4th-order Linkwitz-Riley (cascaded Butterworth) — flat sum,
 24 dB/oct slopes. Defaults: low/mid = 200 Hz, mid/high = 3000 Hz.
 
@@ -37,8 +40,11 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from pedalboard import Compressor, Gain, Pedalboard
+from pedalboard import Compressor
 from scipy.signal import butter, sosfilt
+
+from _dsp import linked_gain
+from _recall import record_operation
 
 
 PRESETS: dict[str, dict] = {
@@ -79,19 +85,19 @@ def _lr4_split(signal: np.ndarray, sr: int, lo_hz: float, hi_hz: float) -> tuple
     LR4 = two cascaded 2nd-order Butterworth filters. The crossover sum is
     flat (Linkwitz-Riley's defining property).
     """
-    nyq = sr / 2.0
-    # Low band: LR4 low-pass at lo_hz
-    sos_lp_low = butter(2, lo_hz / nyq, btype="low", output="sos")
-    low = sosfilt(sos_lp_low, signal)
-    low = sosfilt(sos_lp_low, low)
+    if not 0 < lo_hz < hi_hz < sr / 2:
+        raise ValueError("Crossovers must satisfy 0 < low < high < Nyquist")
 
-    # High band: LR4 high-pass at hi_hz
-    sos_hp_high = butter(2, hi_hz / nyq, btype="high", output="sos")
-    high = sosfilt(sos_hp_high, signal)
-    high = sosfilt(sos_hp_high, high)
+    def split(data, hz):
+        lp = butter(2, hz, fs=sr, btype="low", output="sos")
+        hp = butter(2, hz, fs=sr, btype="high", output="sos")
+        return sosfilt(lp, sosfilt(lp, data)), sosfilt(hp, sosfilt(hp, data))
 
-    # Mid band: signal - low - high (so the crossover sum stays flat)
-    mid = signal - low - high
+    low, upper = split(signal, lo_hz)
+    mid, high = split(upper, hi_hz)
+    # Match the second crossover's all-pass phase on the low branch.
+    low_lp, low_hp = split(low, hi_hz)
+    low = low_lp + low_hp
     return low, mid, high
 
 
@@ -120,7 +126,11 @@ def _relevance_check(signal: np.ndarray, sr: int, lo_hz: float, hi_hz: float) ->
         "mid_crest_db": round(_band_crest_db(mid), 1),
         "high_crest_db": round(_band_crest_db(high), 1),
     }
-    bands_with_dyn = sum(1 for v in crests.values() if v >= _MIN_BAND_CREST_DB)
+    total_rms = np.sqrt(np.mean(signal ** 2))
+    bands_with_dyn = int(sum(
+        crest >= _MIN_BAND_CREST_DB and np.sqrt(np.mean(band ** 2)) > total_rms * 0.03
+        for crest, band in zip(crests.values(), (low, mid, high))
+    ))
 
     issues = []
     if duration < _MIN_DURATION_SEC:
@@ -146,18 +156,23 @@ def _relevance_check(signal: np.ndarray, sr: int, lo_hz: float, hi_hz: float) ->
 # ---------------------------------------------------------------------------
 
 def _compress_band(band: np.ndarray, sr: int, params: dict) -> np.ndarray:
-    board = Pedalboard([
-        Compressor(
-            threshold_db=float(params["threshold_db"]),
-            ratio=float(params["ratio"]),
-            attack_ms=float(params["attack_ms"]),
-            release_ms=float(params["release_ms"]),
-        ),
-        Gain(gain_db=float(params.get("makeup_db", 0.0))),
-    ])
-    return board(band.astype(np.float32), sr).astype(np.float64)
+    """Compress one band; band is (samples,) or (channels, samples).
+
+    All channels share one linked gain curve driven by the louder channel.
+    """
+    comp = Compressor(
+        threshold_db=float(params["threshold_db"]),
+        ratio=float(params["ratio"]),
+        attack_ms=float(params["attack_ms"]),
+        release_ms=float(params["release_ms"]),
+    )
+    band = np.asarray(band, dtype=np.float64)
+    gain = linked_gain(np.atleast_2d(band), comp, sr)
+    return band * gain * 10.0 ** (float(params.get("makeup_db", 0.0)) / 20.0)
 
 
+
+@record_operation("apply_multiband_comp")
 def apply_multiband_comp(
     input_path: Path,
     output_dir: Path,
@@ -189,25 +204,23 @@ def apply_multiband_comp(
         (output_dir / "multiband_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         return report
 
-    out_channels = []
-    for ch in range(data.shape[1]):
-        signal = data[:, ch].astype(np.float64)
-        low, mid, high = _lr4_split(signal, sr, low_high_hz, mid_high_hz)
-        low_c = _compress_band(low, sr, low_params)
-        mid_c = _compress_band(mid, sr, mid_params)
-        high_c = _compress_band(high, sr, high_params)
-        out_channels.append(low_c + mid_c + high_c)
+    # Split every channel, then compress each band with one linked gain.
+    splits = [_lr4_split(data[:, ch].astype(np.float64), sr, low_high_hz, mid_high_hz)
+              for ch in range(data.shape[1])]
+    output_data = sum(
+        _compress_band(np.stack([split[i] for split in splits]), sr, params)
+        for i, params in enumerate((low_params, mid_params, high_params))
+    ).T
 
-    output_data = np.stack(out_channels, axis=1)
-
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output_data)))
     if peak > 1.0:
-        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS — scaling down", file=sys.stderr)
-        output_data = output_data / peak
+        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_mbcomp.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),
@@ -222,6 +235,8 @@ def apply_multiband_comp(
         },
         "relevance_check": rel,
         "applied": True,
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
     }
     (output_dir / "multiband_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

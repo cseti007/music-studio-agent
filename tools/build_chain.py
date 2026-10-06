@@ -7,6 +7,11 @@ through `tools/replay_chain.py` rebuilds the full mix from scratch.
 This tool is **non-invasive**: it only reads existing reports. The
 existing apply_*.py tools are not modified.
 
+Reports without an operation record (legacy runs, or tools whose reports
+cannot be mapped) are kept as unverified steps with a warning; the chain is
+then marked "verified_operations": false and replay rejects or best-efforts
+those steps instead of silently dropping them.
+
 Usage:
   python tools/build_chain.py output/<session>
   # Writes: output/<session>/mix_chain.json
@@ -38,6 +43,12 @@ def _step_from_gain_per_clip(rpt: dict) -> dict:
             "target_lufs": rpt.get("clip_gain_target_lufs"),
             "peak_ceiling_db": rpt.get("peak_ceiling_db", -1.0),
             "normalize": rpt.get("mode") != "per-clip-no-normalize",
+            "source_mode": "continuous" if rpt.get("mode") == "continuous" else "per-clip",
+            "crossfade_ms": rpt.get("crossfade_ms", rpt.get("default_crossfade_ms", 5.0)),
+            "interloper_head_ms": rpt.get("interloper_head_ms"),
+            "interloper_tail_ms": rpt.get("interloper_tail_ms"),
+            "normalize_per_source": rpt.get("normalize_per_source", False),
+            "source_target_lufs": rpt.get("source_target_lufs", -18.0),
         },
     }
 
@@ -79,10 +90,7 @@ def _step_from_eq(rpt: dict) -> dict:
     args: dict = {
         "phase": rpt.get("phase", "minimum"),
     }
-    if rpt.get("preset_used"):
-        args["preset"] = rpt["preset_used"]
-    else:
-        args["filters"] = rpt.get("filters_applied", [])
+    args["filters"] = rpt.get("filters_applied", [])
     return {
         "step": "eq",
         "input": rpt.get("input"),
@@ -246,27 +254,39 @@ def _topo_sort_chain(steps: list[dict]) -> list[dict]:
     def _basename(p: str | None) -> str | None:
         if not p:
             return None
-        return Path(p).name if "/" in p or "\\" in p else None
+        # Path(p).name already returns the bare filename whether or not p has a
+        # separator (e.g. an --output-dir . report whose output is just
+        # "assembled_eq.wav"); without this such a step dropped out of the
+        # topo-sort join key and could land in the wrong order.
+        return Path(p).name
 
     by_output_name = {
         _basename(s["output"]): s
         for s in steps
         if s.get("output") and _basename(s["output"])
     }
+    by_output_path = {str(Path(s["output"]).resolve()): s for s in steps if s.get("output")}
 
     ordered: list[dict] = []
     seen: set[int] = set()
+    visiting: set[int] = set()
 
     def visit(step: dict) -> None:
         sid = id(step)
+        if sid in visiting:
+            raise ValueError("Processing chain contains a cycle")
         if sid in seen:
             return
-        seen.add(sid)
-        inp_name = _basename(step.get("input"))
-        if inp_name and inp_name in by_output_name:
-            predecessor = by_output_name[inp_name]
+        visiting.add(sid)
+        if step.get("step") == "recorded_call":
+            predecessor = by_output_path.get(str(Path(step["input"]).resolve())) if step.get("input") else None
+        else:
+            predecessor = by_output_name.get(_basename(step.get("input")))
+        if predecessor is not None:
             if predecessor is not step:
                 visit(predecessor)
+        visiting.remove(sid)
+        seen.add(sid)
         ordered.append(step)
 
     for step in steps:
@@ -274,22 +294,34 @@ def _topo_sort_chain(steps: list[dict]) -> list[dict]:
     return ordered
 
 
-def build_stem_chain(track_dir: Path) -> list[dict]:
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid recall file: {path}: {exc}") from exc
+
+
+def build_stem_chain(track_dir: Path, warnings: list[str] | None = None) -> list[dict]:
     """Collect every *_report.json in a stem directory, map to chain steps,
-    return them topologically ordered."""
-    steps: list[dict] = []
-    for report_path in track_dir.glob("*_report.json"):
+    return them topologically ordered. Reports lacking an operation record
+    are appended to `warnings` and kept as unverified steps."""
+    steps = [_read_json(p) for p in sorted(track_dir.glob("*.operation.json"))]
+    recorded_outputs = {str(Path(step["output"]).resolve()) for step in steps}
+    for report_path in sorted(track_dir.glob("*_report.json")):
+        rpt = _read_json(report_path)
+        if not rpt.get("output") or str(Path(rpt["output"]).resolve()) in recorded_outputs:
+            continue
         mapper = _REPORT_TO_MAPPER.get(report_path.name)
         if mapper is None:
-            continue
-        try:
-            rpt = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(f"  WARNING: could not read {report_path}: {exc}", file=sys.stderr)
-            continue
-        step = mapper(rpt)
-        if step.get("output"):
-            steps.append(step)
+            step = {"step": "unrecorded", "report": str(report_path),
+                    "input": rpt.get("input"), "output": rpt["output"], "args": {}}
+            note = "no operation record and no legacy mapping; replay cannot rebuild it"
+        else:
+            step = mapper(rpt)
+            note = "legacy report without operation record; replay needs --allow-legacy"
+        if warnings is not None:
+            warnings.append(f"{report_path}: {note}")
+        steps.append(step)
     return _topo_sort_chain(steps)
 
 
@@ -308,14 +340,15 @@ def build_chain(session_dir: Path) -> dict:
             cfg = json.loads(mix_config.read_text(encoding="utf-8"))
             for track in cfg.get("tracks", []):
                 active[track.get("name", "")] = bool(track.get("active", True))
-        except (OSError, json.JSONDecodeError):
-            pass  # config absent or broken — default everything to active
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid mix config: {mix_config}") from exc
 
     stems: list[dict] = []
+    warnings: list[str] = []
     for stem_dir in sorted(tracks_root.iterdir()):
         if not stem_dir.is_dir():
             continue
-        chain = build_stem_chain(stem_dir)
+        chain = build_stem_chain(stem_dir, warnings)
         if not chain:
             continue
         stems.append({
@@ -328,7 +361,9 @@ def build_chain(session_dir: Path) -> dict:
         "session_dir": str(session_dir),
         "session_json": str(session_dir / "session.json"),
         "mix_config": str(session_dir / "mix_config.json"),
+        "verified_operations": all(step["step"] == "recorded_call" for stem in stems for step in stem["chain"]),
         "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "warnings": warnings,
         "stems": stems,
     }
 
@@ -343,13 +378,20 @@ def main() -> None:
                         help="Where to write mix_chain.json (default: <session_dir>/mix_chain.json)")
     args = parser.parse_args()
 
-    chain = build_chain(args.session_dir)
-    out_path = args.output or (args.session_dir / "mix_chain.json")
-    out_path.write_text(json.dumps(chain, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        chain = build_chain(args.session_dir)
+        out_path = args.output or (args.session_dir / "mix_chain.json")
+        out_path.write_text(json.dumps(chain, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"build_chain: error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
+    for warning in chain["warnings"]:
+        print(f"WARNING: {warning}", file=sys.stderr)
     n_stems = len(chain["stems"])
     n_steps = sum(len(s["chain"]) for s in chain["stems"])
-    print(f"Wrote {out_path} — {n_stems} stems, {n_steps} chain steps total")
+    verified = "verified" if chain["verified_operations"] else "NOT verified (see warnings)"
+    print(f"Wrote {out_path} — {n_stems} stems, {n_steps} chain steps total, operations {verified}")
 
 
 if __name__ == "__main__":

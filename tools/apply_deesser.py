@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt
+
+from _recall import record_operation
+from apply_compression import _sidechain_gain_envelope as _envelope_follower
 
 
 PRESETS_DIR = Path(__file__).parent / "presets"
@@ -88,53 +90,6 @@ def _band_pass(signal: np.ndarray, sr: int, low_hz: float, high_hz: float) -> np
     return sosfilt(sos, signal)
 
 
-def _envelope_follower(
-    sc_band: np.ndarray,
-    sr: int,
-    threshold_db: float,
-    ratio: float,
-    attack_ms: float,
-    release_ms: float,
-) -> np.ndarray:
-    """Block-based peak detection + exponential ballistics. Returns per-sample
-    gain multiplier [0..1] — exactly the shape compatible with sosfilt-style
-    sample-by-sample application.
-
-    Block size = 1 ms (sr/1000) for responsive but stable detection.
-    """
-    n = len(sc_band)
-    block_n = max(1, sr // 1000)
-    n_blocks = (n + block_n - 1) // block_n
-
-    alpha_a = np.exp(-1.0 / max(1.0, attack_ms * 0.001 * sr / block_n))
-    alpha_r = np.exp(-1.0 / max(1.0, release_ms * 0.001 * sr / block_n))
-
-    threshold_lin = 10.0 ** (threshold_db / 20.0)
-    inv_ratio = 1.0 / ratio
-
-    gr_blocks = np.ones(n_blocks)
-    env = 0.0
-
-    for i in range(n_blocks):
-        start = i * block_n
-        end = min(start + block_n, n)
-        level = float(np.max(np.abs(sc_band[start:end])))
-
-        if level > env:
-            env = alpha_a * env + (1.0 - alpha_a) * level
-        else:
-            env = alpha_r * env + (1.0 - alpha_r) * level
-
-        if env > threshold_lin:
-            env_db = 20.0 * np.log10(max(env, 1e-10))
-            gr_db = (threshold_db + (env_db - threshold_db) * inv_ratio) - env_db
-            gr_blocks[i] = 10.0 ** (gr_db / 20.0)
-
-    block_centers = np.arange(n_blocks) * block_n + block_n // 2
-    gain = np.interp(np.arange(n), block_centers, gr_blocks)
-    return gain.astype(np.float64)
-
-
 def _load_preset(name: str) -> dict:
     if name in PRESETS:
         return PRESETS[name]
@@ -165,6 +120,7 @@ def _relevance_check(signal: np.ndarray, sr: int, detect_low_hz: float, detect_h
     }
 
 
+@record_operation("apply_deesser")
 def apply_deesser(
     input_path: Path,
     output_dir: Path,
@@ -222,7 +178,7 @@ def apply_deesser(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / (input_path.stem + "_deessed.wav")
-    sf.write(str(output_path), out, sr, subtype="PCM_24")
+    sf.write(str(output_path), out, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

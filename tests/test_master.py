@@ -60,7 +60,8 @@ class TestFormatPresets:
         for name, p in FORMAT_PRESETS.items():
             missing = required - set(p)
             assert not missing, f"format {name} missing {missing}"
-            assert isinstance(p["target_lufs"], (int, float))
+            # vinyl_pre has no loudness target (peak-normalized pre-master)
+            assert p["target_lufs"] is None or isinstance(p["target_lufs"], (int, float))
             assert isinstance(p["bit_depth"], int)
 
     def test_streaming_presets_target_minus14_or_minus16(self):

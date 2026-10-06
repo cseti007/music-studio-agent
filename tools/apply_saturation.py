@@ -1,10 +1,12 @@
 """Apply harmonic saturation to a stem.
 
 Three saturation modes:
-  tape     Symmetric tanh soft clipping — even + odd harmonics, tape-like warmth.
+  tape     Symmetric tanh soft clipping — odd harmonics for a symmetric input.
            Gentle on transients. Good for bus glue, drums, guitars.
-  tube     Asymmetric tanh — positive half clips harder (triode model).
-           Generates even-order harmonics (2nd, 4th) — warm without sounding harsh.
+  tube     Asymmetric tanh — positive half clips harder.
+           Can generate even-order harmonics; not a physical tube model.
+           The DC offset the asymmetry creates is removed by a 10 Hz
+           first-order high-pass after shaping.
            --asymmetry controls how asymmetric the clipping is.
   clipper  Cubic soft clipper — hard ceiling at ±1.0 with smooth knee.
            Generates odd-order harmonics (3rd, 5th) — brightness, presence, aggression.
@@ -12,6 +14,8 @@ Three saturation modes:
 
 All modes RMS-normalize the saturated output to input level: harmonics are added, not gain.
 Use --mix for parallel saturation (dry signal blended with RMS-matched saturated copy).
+Explicit CLI flags override preset values. Output is 32-bit float: peaks above
+0 dBFS are kept and reported (output_exceeds_0dbfs), never rescaled.
 
 Usage:
   python apply_saturation.py assembled.wav --output-dir output/session/TRACK \\
@@ -33,6 +37,9 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+from scipy.signal import butter, resample_poly, sosfilt
+
+from _recall import record_operation
 
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
@@ -42,7 +49,7 @@ _PRESETS_DIR = Path(__file__).parent / "presets"
 # ---------------------------------------------------------------------------
 
 def _saturate_tape(data: np.ndarray, drive: float) -> np.ndarray:
-    """Symmetric tanh — warm, tape-like, even + odd harmonics."""
+    """Symmetric tanh waveshaper; odd symmetry does not create even harmonics."""
     in_rms = np.sqrt(np.mean(data ** 2) + 1e-12)
     x = data * (1.0 + drive * 4.0)
     out = np.tanh(x)
@@ -53,9 +60,9 @@ def _saturate_tape(data: np.ndarray, drive: float) -> np.ndarray:
 
 
 def _saturate_tube(data: np.ndarray, drive: float, asymmetry: float) -> np.ndarray:
-    """Asymmetric tanh — positive half clips harder (triode model).
+    """Asymmetric tanh — positive half clips harder.
 
-    Even-order harmonics (2nd, 4th) dominate — perceptually warm, not harsh.
+    Can introduce even-order harmonics and DC; no physical tube model is implied.
     asymmetry=0: symmetric (same as tape). asymmetry=1: maximum asymmetry.
     """
     in_rms = np.sqrt(np.mean(data ** 2) + 1e-12)
@@ -93,11 +100,45 @@ def _saturate_clipper(data: np.ndarray, drive: float) -> np.ndarray:
     return out
 
 
+def _dc_block(data: np.ndarray, sr: int) -> np.ndarray:
+    """Remove the DC offset an asymmetric curve creates (10 Hz first-order HP),
+    then restore the pre-filter RMS so the wet level stays matched."""
+    before = np.sqrt(np.mean(data ** 2))
+    out = sosfilt(butter(1, 10.0, btype="highpass", fs=sr, output="sos"), data, axis=0)
+    after = np.sqrt(np.mean(out ** 2))
+    return out * (before / after) if after > 0 else out
+
+
 _SATURATORS = {
     "tape": _saturate_tape,
     "tube": _saturate_tube,
     "clipper": _saturate_clipper,
 }
+
+
+def _oversampled(data, mode, drive, asymmetry, factor, input_gain_db):
+    """Process overlapping blocks, then apply one stereo-linked RMS match."""
+    result = np.empty_like(data)
+    gain = 10 ** (input_gain_db / 20) * (1 + drive * 4)
+    block, guard = 65536, 64
+    for start in range(0, len(data), block):
+        end = min(start + block, len(data))
+        left, right = max(0, start - guard), min(len(data), end + guard)
+        x = resample_poly(data[left:right], factor, 1, axis=0) * gain
+        if mode == "tape":
+            shaped = np.tanh(x)
+        elif mode == "tube":
+            shaped = np.where(x >= 0, np.tanh(x * (1 + asymmetry)) / (1 + asymmetry), np.tanh(x))
+        else:
+            bounded = np.clip(x, -1, 1)
+            shaped = 1.5 * (bounded - bounded ** 3 / 3)
+        down = resample_poly(shaped, 1, factor, axis=0)
+        result[start:end] = down[start - left:end - left]
+    before = np.sqrt(np.mean(data ** 2))
+    after = np.sqrt(np.mean(result ** 2))
+    if after > 0:
+        result *= before / after
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +173,8 @@ def list_presets() -> None:
 # Core
 # ---------------------------------------------------------------------------
 
+
+@record_operation("apply_saturation")
 def apply_saturation(
     input_path: Path,
     output_dir: Path,
@@ -140,17 +183,32 @@ def apply_saturation(
     asymmetry: float = 0.5,
     mix: float = 1.0,
     preset_name: str | None = None,
+    oversample: int = 1,
+    input_gain_db: float = 0.0,
 ) -> dict:
     if mode not in _SATURATORS:
         raise ValueError(f"Unknown mode {mode!r}. Choose from: {', '.join(_SATURATORS)}")
 
+    if (not all(np.isfinite(v) for v in (drive, asymmetry, mix, input_gain_db))
+            or not 0 <= drive <= 1 or not 0 <= asymmetry <= 1 or not 0 <= mix <= 1
+            or oversample not in (1, 2, 4, 8) or not -36 <= input_gain_db <= 36):
+        raise ValueError("Invalid saturation drive, blend, oversampling, or input gain")
     data, sr = sf.read(str(input_path), always_2d=True)
+    if not data.size or data.shape[1] not in (1, 2) or not np.isfinite(data).all():
+        raise ValueError("Expected finite nonempty mono/stereo audio")
 
     saturator = _SATURATORS[mode]
-    if mode == "tube":
-        saturated = saturator(data, drive, asymmetry)
+    if mix == 0:
+        saturated = data
+    elif oversample > 1:
+        saturated = _oversampled(data, mode, drive, asymmetry, oversample, input_gain_db)
     else:
-        saturated = saturator(data, drive)
+        gain = 10 ** (input_gain_db / 20)
+        driven = data * gain
+        saturated = (saturator(driven, drive, asymmetry) if mode == "tube"
+                     else saturator(driven, drive)) / gain
+    if mode == "tube" and mix > 0:
+        saturated = _dc_block(saturated, sr)
 
     # Parallel blend
     if mix < 0.999:
@@ -158,20 +216,15 @@ def apply_saturation(
     else:
         output_data = saturated
 
-    # Clip guard
+    # Float output keeps overs; report them instead of rescaling the file.
     peak_linear = float(np.max(np.abs(output_data)))
-    clipped = peak_linear > 1.0
-    if clipped:
-        print(
-            f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS — "
-            "scaling down to prevent clipping",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak_linear
+    if peak_linear > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_sat.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     in_rms = float(np.sqrt(np.mean(data ** 2) + 1e-12))
     out_rms = float(np.sqrt(np.mean(output_data ** 2) + 1e-12))
@@ -188,11 +241,13 @@ def apply_saturation(
             "drive": drive,
             "asymmetry": asymmetry if mode == "tube" else None,
             "mix": mix,
+            "oversample": oversample,
+            "input_gain_db": input_gain_db,
         },
         "input_peak_dbfs": round(in_peak, 1),
-        "output_peak_dbfs": round(out_peak, 1),
+        "output_peak_dbfs": round(out_peak, 2),
+        "output_exceeds_0dbfs": peak_linear > 1.0,
         "rms_change_db": round(rms_change, 2),
-        "clipping_prevented": clipped,
         "sample_rate": sr,
     }
     (output_dir / "sat_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -212,22 +267,25 @@ def main() -> None:
     parser.add_argument("file", type=Path, nargs="?", help="Input WAV file")
     parser.add_argument("--output-dir", type=Path, help="Output directory")
     parser.add_argument(
-        "--mode", choices=["tape", "tube", "clipper"], default="tape",
-        help="Saturation algorithm (default: tape)",
+        "--mode", choices=["tape", "tube", "clipper"], default=None,
+        help="Saturation algorithm (default: preset or tape)",
     )
     parser.add_argument(
-        "--drive", type=float, default=0.3, metavar="0-1",
-        help="Drive amount 0.0-1.0 (default 0.3)",
+        "--drive", type=float, default=None, metavar="0-1",
+        help="Drive amount 0.0-1.0 (default: preset or 0.3)",
     )
     parser.add_argument(
-        "--asymmetry", type=float, default=0.5, metavar="0-1",
-        help="Tube mode: asymmetry amount 0.0-1.0 (default 0.5)",
+        "--asymmetry", type=float, default=None, metavar="0-1",
+        help="Tube mode: asymmetry amount 0.0-1.0 (default: preset or 0.5)",
     )
     parser.add_argument(
-        "--mix", type=float, default=1.0, metavar="0-1",
-        help="Wet/dry blend: 1.0=serial, <1.0=parallel (default 1.0)",
+        "--mix", type=float, default=None, metavar="0-1",
+        help="Wet/dry blend: 1.0=serial, <1.0=parallel (default: preset or 1.0)",
     )
     parser.add_argument("--preset", metavar="NAME", help="Saturation preset (see --list-presets)")
+    parser.add_argument("--oversample", type=int, choices=[1, 2, 4, 8], default=1)
+    parser.add_argument("--input-gain-db", type=float, default=0.0,
+                        help="Drive trim before shaping; wet output is RMS matched to original input")
     parser.add_argument("--list-presets", action="store_true", help="List saturation presets and exit")
     args = parser.parse_args()
 
@@ -242,23 +300,22 @@ def main() -> None:
         print(json.dumps({"error": f"Not found: {args.file}"}), file=sys.stderr)
         sys.exit(1)
 
-    mode = args.mode
-    drive = args.drive
-    asymmetry = args.asymmetry
-    mix = args.mix
     preset_name = args.preset
-
+    s: dict = {}
     if args.preset:
         try:
-            pdata = _load_preset(args.preset)
+            s = _load_preset(args.preset).get("settings", {})
         except FileNotFoundError as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)
             sys.exit(1)
-        s = pdata.get("settings", {})
-        mode = s.get("mode", mode)
-        drive = s.get("drive", drive)
-        asymmetry = s.get("asymmetry", asymmetry)
-        mix = s.get("mix", mix)
+
+    # Explicit CLI flags win over the preset, which wins over the defaults.
+    defaults = {"mode": "tape", "drive": 0.3, "asymmetry": 0.5, "mix": 1.0}
+    mode, drive, asymmetry, mix = (
+        getattr(args, key) if getattr(args, key) is not None else s.get(key, default)
+        for key, default in defaults.items()
+    )
+    if args.preset:
         print(
             f"Loaded preset {args.preset!r}: mode={mode} drive={drive} "
             f"asymmetry={asymmetry} mix={mix}",
@@ -269,6 +326,7 @@ def main() -> None:
         args.file, args.output_dir,
         mode=mode, drive=drive, asymmetry=asymmetry, mix=mix,
         preset_name=preset_name,
+        oversample=args.oversample, input_gain_db=args.input_gain_db,
     )
 
 

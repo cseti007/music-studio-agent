@@ -1,10 +1,11 @@
 """Spectral exciter — generate high-frequency harmonics to add "air" and
 "presence" without raising overall level.
 
-Aphex Aural Exciter-style: high-pass the signal, run it through soft
-saturation to generate harmonic content above the cutoff, mix the harmonics
-back into the dry signal at low level. The dry signal is unchanged; only
-the harmonic content is new.
+Exciter-style processing: high-pass the signal, run it through symmetric
+tanh soft saturation (4x oversampled, so harmonics above Nyquist do not
+alias back down) to generate odd-order harmonics above the cutoff, then mix
+them back into the dry signal at low level. The dry signal is unchanged;
+only the harmonic content is new.
 
 Why this is different from just shelving up the highs:
   - Shelving boosts what's already there. If the source rolls off at 8 kHz,
@@ -29,7 +30,9 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, sosfilt, welch
+from scipy.signal import butter, resample_poly, sosfilt, welch
+
+from _recall import record_operation
 
 
 PRESETS: dict[str, dict] = {
@@ -120,19 +123,25 @@ def _relevance_check(mono: np.ndarray, sr: int) -> dict:
 # Core processing
 # ---------------------------------------------------------------------------
 
+_OVERSAMPLE = 4
+
+
 def _excite(signal: np.ndarray, sr: int, hp_hz: float, drive: float) -> np.ndarray:
     """High-pass, then saturate to generate harmonics in the HF region."""
     nyq = sr / 2.0
     sos_hp = butter(4, hp_hz / nyq, btype="high", output="sos")
     hp = sosfilt(sos_hp, signal)
-    # Asymmetric tanh — generates even+odd harmonics. Subtle drive so we don't
-    # buzz the top end into noise.
-    saturated = np.tanh(hp * drive)
-    # Re-filter so we keep only the new HF content (saturation generates
-    # subharmonics too, which we don't want stacking on the dry).
+    # Symmetric tanh — odd harmonics only. Run at 4x the sample rate so the
+    # 3rd/5th harmonics of high partials are removed by the decimation filter
+    # instead of folding back as inharmonic aliases.
+    up = resample_poly(hp, _OVERSAMPLE, 1)
+    saturated = resample_poly(np.tanh(up * drive), 1, _OVERSAMPLE)[:len(hp)]
+    # Re-filter so we keep only the new HF content (intermodulation between
+    # partials also lands below the cutoff, which we don't want on the dry).
     return sosfilt(sos_hp, saturated)
 
 
+@record_operation("apply_exciter")
 def apply_exciter(
     input_path: Path,
     output_dir: Path,
@@ -170,14 +179,15 @@ def apply_exciter(
 
     output_data = np.stack(out_channels, axis=1)
 
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output_data)))
     if peak > 1.0:
-        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS — scaling down", file=sys.stderr)
-        output_data = output_data / peak
+        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_exciter.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),
@@ -186,6 +196,8 @@ def apply_exciter(
         "settings": {"hp_hz": hp_hz, "drive": drive, "mix": mix},
         "relevance_check": rel,
         "applied": True,
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
     }
     (output_dir / "exciter_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

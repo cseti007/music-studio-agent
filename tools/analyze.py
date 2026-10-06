@@ -15,9 +15,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import butter, resample_poly, sosfilt, welch
+from scipy.ndimage import uniform_filter1d
+from scipy.signal import butter, sosfilt, welch
 
-_CONFIG_PATH = Path("config.toml")
+sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
+
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 _FALLBACK_TARGET_LUFS = -18.0
 
 
@@ -35,17 +39,6 @@ DEFAULT_TARGET_LUFS = _config_target_lufs()
 def _rms_db(signal: np.ndarray) -> float:
     rms = np.sqrt(np.mean(signal ** 2))
     return float(20 * np.log10(max(rms, 1e-10)))
-
-
-def _true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
-    """ITU-R BS.1770-4 style true peak via polyphase upsampling.
-
-    Inter-sample peaks emerge after DAC reconstruction or codec encoding
-    (Ogg Vorbis, AAC). Oversampling reveals them before they cause clipping.
-    """
-    up = resample_poly(signal, oversample, 1)
-    peak = float(np.max(np.abs(up)))
-    return float(20 * np.log10(max(peak, 1e-10)))
 
 
 def _headroom_verdict(sample_peak_db: float, true_peak_db: float) -> str:
@@ -122,58 +115,70 @@ def _dynamic_range_db(signal: np.ndarray, sr: int, frame_sec: float = 0.1) -> fl
     return float(20 * np.log10((p95 + 1e-10) / (p10 + 1e-10)))
 
 
+_HUM_BLOCK_SEC = 0.5      # integer number of 50 and 60 Hz cycles: hum phase stays continuous
+_HUM_SEGMENT_SEC = 4.0    # Welch segment -> 0.25 Hz bins
+_HUM_TOLERANCE_HZ = 0.5   # line must lie within this distance of n * mains
+_HUM_FLANK_HZ = (0.75, 3.0)
+_HUM_MIN_HARMONICS = 2
+
+
 def _detect_hum(signal: np.ndarray, sr: int, prominence_threshold_db: float = 12.0) -> dict:
-    """Detect mains hum (50/60 Hz and harmonics) via Welch PSD narrow-band peak analysis.
+    """Detect mains hum (50/60 Hz and harmonics) as narrow, persistent spectral lines.
 
-    A frequency is flagged as hum if its peak is >= prominence_threshold_db above the
-    local median of surrounding bins (±40 Hz window, excluding ±3 Hz around the peak).
-    Only non-silent frames are analysed to avoid false negatives from silence gaps.
+    Method:
+      1. Split into 0.5 s blocks, drop digital silence, and keep the quietest
+         quarter of the blocks (at least 8 s): hum is constant, music is not.
+      2. Median-averaged Welch PSD with 4 s segments (0.25 Hz bins). The median
+         across segments only keeps lines present in most of the quiet audio.
+      3. A harmonic n * mains counts when the strongest bin within +-0.5 Hz of it
+         exceeds the strongest bin 0.75-3 Hz away on either side by
+         prominence_threshold_db. A musical note 1 Hz or more away (e.g. G1 at
+         49 Hz) dominates its own flank and is rejected.
+      4. Hum requires at least two harmonics of the same mains series.
+    Only notch filters are recommended; a high-pass would remove musical bass.
     """
-    # Analyse only non-silent frames to avoid silence diluting hum peaks
-    frame_len = 4096
-    chunks = [
-        signal[i : i + frame_len]
-        for i in range(0, len(signal) - frame_len, frame_len)
-        if np.sqrt(np.mean(signal[i : i + frame_len] ** 2)) > 1e-5
-    ]
-    if not chunks:
-        return {"hum_detected": False, "dominant_mains_hz": None, "harmonics": {}, "recommendation": "No audio content"}
+    block = int(_HUM_BLOCK_SEC * sr)
+    n_blocks = len(signal) // block
+    need_blocks = int(np.ceil(2 * _HUM_SEGMENT_SEC / _HUM_BLOCK_SEC))
+    blocks = signal[: n_blocks * block].reshape(n_blocks, block) if n_blocks else np.zeros((0, block))
+    rms = np.sqrt(np.mean(blocks.astype(np.float64) ** 2, axis=1)) if n_blocks else np.zeros(0)
+    candidates = np.where(rms > 1e-6)[0]
+    if len(candidates) < need_blocks:
+        return {"hum_detected": False, "dominant_mains_hz": None, "harmonics": {},
+                "recommendation": "Not analysed: less than 8 s of non-silent audio"}
 
-    audio = np.concatenate(chunks)
+    order = candidates[np.argsort(rms[candidates], kind="stable")]
+    n_quiet = max(need_blocks, int(round(0.25 * len(candidates))))
+    audio = blocks[np.sort(order[:n_quiet])].ravel()
 
-    # Welch PSD — nperseg tuned for ~1.5 Hz/bin resolution
-    nperseg = min(len(audio), 32768)
-    freqs, psd = welch(audio, fs=sr, nperseg=nperseg, average="median")
-    psd_db = 10.0 * np.log10(psd + 1e-20)
-    bin_hz = freqs[1] - freqs[0]
+    freqs, psd = welch(audio, fs=sr, nperseg=int(_HUM_SEGMENT_SEC * sr), average="median")
+    psd_db = 10.0 * np.log10(psd + 1e-30)
 
-    def _peak_prominence(target_hz: float) -> float | None:
-        idx = int(round(target_hz / bin_hz))
-        if idx >= len(psd_db):
+    def _line_prominence(target_hz: float) -> float | None:
+        near = np.abs(freqs - target_hz) <= _HUM_TOLERANCE_HZ
+        if not near.any():
             return None
-        peak_db = psd_db[idx]
-        surround = int(round(40.0 / bin_hz))
-        exclude = max(1, int(round(3.0 / bin_hz)))
-        lo, hi = max(0, idx - surround), min(len(psd_db), idx + surround + 1)
-        mask = np.ones(hi - lo, dtype=bool)
-        c = idx - lo
-        mask[max(0, c - exclude) : c + exclude + 1] = False
-        neighbours = psd_db[lo:hi][mask]
-        if len(neighbours) == 0:
-            return None
-        return float(peak_db - np.median(neighbours))
+        idx = np.flatnonzero(near)[int(np.argmax(psd_db[near]))]
+        dist = freqs - freqs[idx]
+        flanks = []
+        for side in (-1, 1):
+            mask = (side * dist >= _HUM_FLANK_HZ[0]) & (side * dist <= _HUM_FLANK_HZ[1])
+            if not mask.any():
+                return None
+            flanks.append(float(np.max(psd_db[mask])))
+        return float(psd_db[idx] - max(flanks))
 
     detected: dict[str, list] = {}
     for mains_hz in (50, 60):
         harmonics = []
         for n in range(1, 7):
             target = mains_hz * n
-            if target >= sr / 2:
+            if target + _HUM_FLANK_HZ[1] >= sr / 2:
                 break
-            prominence = _peak_prominence(float(target))
+            prominence = _line_prominence(float(target))
             if prominence is not None and prominence >= prominence_threshold_db:
                 harmonics.append({"frequency_hz": target, "prominence_db": round(prominence, 1)})
-        if harmonics:
+        if len(harmonics) >= _HUM_MIN_HARMONICS:
             detected[f"{mains_hz}hz"] = harmonics
 
     hum_detected = bool(detected)
@@ -188,7 +193,9 @@ def _detect_hum(signal: np.ndarray, sr: int, prominence_threshold_db: float = 12
         dominant = 60
 
     if hum_detected:
-        rec = f"High-pass filter at {dominant - 10} Hz, or notch at {dominant} Hz and harmonics"
+        lines = ", ".join(f"{h['frequency_hz']} Hz" for h in detected[f"{dominant}hz"])
+        rec = (f"Candidate narrow notch filters at {lines}; audition against the "
+               f"unfiltered stem (narrow mains lines do not justify a broad low cut)")
     else:
         rec = "No hum detected"
 
@@ -328,12 +335,12 @@ def _freq_response_text(freq_response: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _lra(data: np.ndarray, sr: int, meter: pyln.Meter) -> float:
-    """EBU R128 Loudness Range (LRA) in LU. Returns 0.0 if too short for measurement."""
+def _lra(data: np.ndarray, sr: int, meter: pyln.Meter) -> float | None:
+    """EBU R128 Loudness Range (LRA) in LU. None if not measurable (too short or silent)."""
     try:
-        return round(float(meter.loudness_range(data)), 1)
+        return _finite_round(meter.loudness_range(data))
     except Exception:
-        return 0.0
+        return None
 
 
 def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
@@ -369,8 +376,7 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
     env_sr = sr / hop  # ~100 Hz
 
     # Remove DC and very slow drift (< 0.5 Hz). Rate detection uses this.
-    from scipy.signal import butter as _butter_local
-    sos_hp = _butter_local(2, 0.5 / (env_sr / 2.0), btype="high", output="sos")
+    sos_hp = butter(2, 0.5 / (env_sr / 2.0), btype="high", output="sos")
     env_hp = sosfilt(sos_hp, env)
 
     # Spectrum of the envelope (full timeline — pumping rate detection wants
@@ -422,7 +428,15 @@ def _detect_pumping(signal: np.ndarray, sr: int) -> dict:
 
 
 def _crest_factor_db(signal: np.ndarray) -> float:
-    """Peak-to-RMS ratio in dB. High = dynamic material, low = compressed."""
+    """Peak-to-RMS ratio in dB. High = dynamic material, low = compressed.
+
+    For multichannel (N, C) input, peak and RMS come from the same channel:
+    the one with the highest sample peak. A mono downmix would understate a
+    hard-panned peak by 6 dB and mix RMS from different channels.
+    """
+    if signal.ndim == 2:
+        signal = signal[:, int(np.argmax(np.max(np.abs(signal), axis=0)))]
+    signal = signal.astype(np.float64)
     rms = np.sqrt(np.mean(signal ** 2))
     peak = np.max(np.abs(signal))
     if rms < 1e-10:
@@ -430,17 +444,27 @@ def _crest_factor_db(signal: np.ndarray) -> float:
     return round(float(20 * np.log10(peak / rms)), 1)
 
 
+# Channels with RMS below this (-90 dBFS) are treated as silent for stereo metrics.
+_STEREO_SILENT_RMS = 10.0 ** (-90.0 / 20.0)
+
+
 def _stereo_metrics(data: np.ndarray) -> dict:
-    """L/R balance, LR correlation, and M/S width from a (N, 2) array."""
+    """L/R balance, LR correlation, and M/S width from a (N, 2) array.
+
+    balance_db and lr_correlation are None when either channel is silent
+    (below -90 dBFS RMS): a level ratio against silence and a correlation
+    with a constant are undefined.
+    """
     L = data[:, 0].astype(np.float64)
     R = data[:, 1].astype(np.float64)
     rms_L = np.sqrt(np.mean(L ** 2))
     rms_R = np.sqrt(np.mean(R ** 2))
-    balance_db = round(float(20 * np.log10((rms_L + 1e-10) / (rms_R + 1e-10))), 1)
-    if rms_L > 1e-10 and rms_R > 1e-10:
+    if rms_L > _STEREO_SILENT_RMS and rms_R > _STEREO_SILENT_RMS:
+        balance_db = round(float(20 * np.log10(rms_L / rms_R)), 1)
         correlation = round(float(np.corrcoef(L, R)[0, 1]), 3)
     else:
-        correlation = 1.0
+        balance_db = None
+        correlation = None
     M = L + R
     S = L - R
     rms_M = np.sqrt(np.mean(M ** 2))
@@ -474,7 +498,7 @@ def _spectral_centroid_hz(signal: np.ndarray, sr: int) -> float:
     return round(float(np.mean(centroid)), 0)
 
 
-def _transient_profile(signal: np.ndarray, sr: int) -> dict:
+def _transient_profile(signal: np.ndarray, sr: int, onset_env: np.ndarray | None = None) -> dict:
     """Per-onset attack prominence and decay time — indicates whether transient shaping is needed.
 
     prominence_db: attack peak (first 5ms after onset) vs sustain RMS (5-150ms), in dB.
@@ -482,7 +506,9 @@ def _transient_profile(signal: np.ndarray, sr: int) -> dict:
     decay_time_ms: ms from the peak sample until signal drops -20 dB below peak.
       Short = tight; long = boomy/washy.
     """
-    onset_frames = librosa.onset.onset_detect(y=signal.astype(np.float32), sr=sr)
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
     onset_samples = librosa.frames_to_samples(onset_frames)
 
     attack_end = int(0.005 * sr)   # 5 ms
@@ -539,19 +565,23 @@ def _transient_profile(signal: np.ndarray, sr: int) -> dict:
     }
 
 
-def _onsets_sec(signal: np.ndarray, sr: int) -> list[float]:
+def _onsets_sec(signal: np.ndarray, sr: int, onset_env: np.ndarray | None = None) -> list[float]:
     """Onset times in seconds — same detector as _transient_density, exposed as raw list."""
-    frames = librosa.onset.onset_detect(y=signal.astype(np.float32), sr=sr)
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
+    frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
     times = librosa.frames_to_time(frames, sr=sr)
     return [round(float(t), 3) for t in times]
 
 
-def _tempo_bpm(signal: np.ndarray, sr: int) -> float | None:
+def _tempo_bpm(signal: np.ndarray, sr: int, onset_env: np.ndarray | None = None) -> float | None:
     """Estimated tempo in BPM. Returns None for short signals or unstable estimates."""
     if len(signal) / sr < 4.0:
         return None
     try:
-        tempo, _ = librosa.beat.beat_track(y=signal.astype(np.float32), sr=sr)
+        if onset_env is None:
+            onset_env = librosa.onset.onset_strength(y=signal.astype(np.float32), sr=sr)
+        tempo, _ = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
         bpm = float(np.atleast_1d(tempo)[0])
         if not np.isfinite(bpm) or bpm < 30.0 or bpm > 300.0:
             return None
@@ -647,8 +677,9 @@ def _estimated_key(signal: np.ndarray, sr: int) -> dict:
 
     Correlates the mean chroma vector against all 24 rotated major/minor
     Krumhansl profiles. The best-matching rotation is the key; confidence is
-    the correlation coefficient. Tonal stems give clean answers; non-tonal
-    stems (drums, noise) give low confidence (<0.5).
+    the Pearson correlation coefficient (both vectors mean-subtracted, -1..1).
+    Plain cosine similarity of non-negative vectors is near 1 even for white
+    noise. Tonal stems give high values; noise and drums stay low.
     """
     if len(signal) / sr < 4.0:
         return {"key": None, "mode": None, "confidence": 0.0}
@@ -664,9 +695,13 @@ def _estimated_key(signal: np.ndarray, sr: int) -> dict:
     if profile.sum() < 1e-6:
         return {"key": None, "mode": None, "confidence": 0.0}
 
-    profile = profile / (np.linalg.norm(profile) + 1e-12)
-    maj_n = _KRUMHANSL_MAJOR / np.linalg.norm(_KRUMHANSL_MAJOR)
-    min_n = _KRUMHANSL_MINOR / np.linalg.norm(_KRUMHANSL_MINOR)
+    def _unit(v: np.ndarray) -> np.ndarray:
+        v = v - np.mean(v)
+        return v / (np.linalg.norm(v) + 1e-12)
+
+    profile = _unit(profile)
+    maj_n = _unit(_KRUMHANSL_MAJOR)
+    min_n = _unit(_KRUMHANSL_MINOR)
 
     best_score = -1.0
     best_key = 0
@@ -714,6 +749,133 @@ def _looks_vocal(file_name: str) -> bool:
     return True
 
 
+_PYIN_HOP = 512                 # pyin frame hop (librosa default for frame_length 2048)
+_NOTE_SPLIT_CENTS = 80.0        # frame-to-frame jump that starts a new note
+_PITCH_SMOOTH_SEC = 0.2         # ~one vibrato cycle; removes vibrato and tracker jitter
+_VIBRATO_MIN_NOTE_SEC = 0.5
+_PLOSIVE_WINDOW_SEC = 0.02
+_PLOSIVE_REL_DB = -12.0         # LF burst within 12 dB of the stem's loud level
+_PLOSIVE_REFRACTORY_SEC = 0.15
+
+
+def _note_segments(f0: np.ndarray, min_frames: int = 1) -> list[np.ndarray]:
+    """Cents (re A440) of each note: voiced runs split at large pitch jumps."""
+    voiced = np.isfinite(f0) & (f0 > 0)
+    edges = np.diff(np.concatenate(([0], voiced.astype(np.int8), [0])))
+    notes = []
+    for start, end in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+        cents = 1200.0 * np.log2(f0[start:end] / 440.0)
+        cuts = np.flatnonzero(np.abs(np.diff(cents)) > _NOTE_SPLIT_CENTS) + 1
+        notes.extend(n for n in np.split(cents, cuts) if len(n) >= min_frames)
+    return notes
+
+
+def _pitch_stats(f0: np.ndarray, frame_rate: float) -> dict:
+    """Intonation of voiced frames relative to per-note semitone targets.
+
+    1. Global tuning offset = circular mean of the cents (re A440) modulo 100;
+       it is removed first, so a consistently sharp/flat but internally
+       consistent performance is not penalised (the offset is reported).
+    2. Notes = voiced runs split at frame-to-frame jumps > 80 cents. Each note
+       is smoothed over 200 ms (removes vibrato and tracker jitter) and its
+       target is the semitone nearest to the note's median pitch.
+    3. Deviation = smoothed pitch - note target; not wrapped, so drifts and
+       scoops larger than 50 cents count in full.
+
+    cents_std is the RMS deviation in cents (field name kept for
+    compatibility). Note-centre errors alone cannot exceed 50 cents (a note
+    50 cents off is closer to the neighbouring semitone), so values near 29
+    are what uniformly random note centres would give; well-intoned singing
+    is typically well below 15.
+    """
+    voiced = np.isfinite(f0) & (f0 > 0)
+    if not voiced.any():
+        return {}
+    phase = np.exp(2j * np.pi * (1200.0 * np.log2(f0[voiced] / 440.0)) / 100.0)
+    offset = float(np.angle(np.mean(phase)) * 100.0 / (2.0 * np.pi))
+    window = max(1, int(round(_PITCH_SMOOTH_SEC * frame_rate)))
+    deviations = []
+    notes = _note_segments(f0)
+    for cents in notes:
+        cents = cents - offset
+        smooth = uniform_filter1d(cents, min(window, len(cents)), mode="nearest")
+        deviations.append(smooth - np.round(np.median(cents) / 100.0) * 100.0)
+    dev = np.abs(np.concatenate(deviations))
+    return {
+        "cents_std": round(float(np.sqrt(np.mean(dev ** 2))), 1),
+        "cents_mad": round(float(np.median(dev)), 1),
+        "fraction_over_25_cents": round(float(np.mean(dev > 25.0)), 3),
+        "tuning_offset_cents": round(offset, 1),
+        "note_count": len(notes),
+    }
+
+
+def _vibrato_stats(f0: np.ndarray, frame_rate: float) -> dict:
+    """Vibrato rate and semi-extent from notes lasting at least 0.5 s.
+
+    Each note's cents curve is linearly detrended, Hann-windowed and
+    zero-padded to 0.05 Hz resolution; the strongest 4-7 Hz component gives
+    the rate (Hz) and its sinusoidal amplitude, the semi-extent (+-cents).
+    Medians across notes are reported. A semi-extent below ~10 cents means
+    no meaningful vibrato.
+    """
+    rates, extents = [], []
+    for cents in _note_segments(f0, int(np.ceil(_VIBRATO_MIN_NOTE_SEC * frame_rate))):
+        x = np.arange(len(cents))
+        cents = cents - np.polyval(np.polyfit(x, cents, 1), x)
+        win = np.hanning(len(cents))
+        n_fft = max(len(cents), int(frame_rate / 0.05))
+        spec = np.abs(np.fft.rfft(cents * win, n=n_fft))
+        freqs = np.fft.rfftfreq(n_fft, 1.0 / frame_rate)
+        band = np.flatnonzero((freqs >= 4.0) & (freqs <= 7.0))
+        if len(band) == 0:
+            continue
+        k = band[int(np.argmax(spec[band]))]
+        rates.append(float(freqs[k]))
+        extents.append(float(2.0 * spec[k] / np.sum(win)))
+    if not rates:
+        return {}
+    return {
+        "rate_hz": round(float(np.median(rates)), 2),
+        "extent_cents": round(float(np.median(extents)), 1),
+        "notes_analyzed": len(rates),
+    }
+
+
+def _plosive_stats(signal: np.ndarray, sr: int) -> dict:
+    """Low-frequency (< 100 Hz) bursts, counted on a smoothed envelope.
+
+    Envelope = 20 ms moving RMS of the 100 Hz low-passed signal. An event
+    starts when it rises above a level 12 dB below the stem's loud level
+    (95th percentile of the full-band 20 ms RMS over frames above -60 dBFS);
+    rises within 150 ms of the previous event are merged into it.
+    """
+    win = max(1, int(_PLOSIVE_WINDOW_SEC * sr))
+    kernel = np.ones(win) / win
+    lf = sosfilt(butter(4, 100.0, btype="low", fs=sr, output="sos"), signal.astype(np.float64))
+    lf_env = np.sqrt(np.maximum(np.convolve(lf ** 2, kernel, mode="same"), 0.0))
+    full_env = np.sqrt(np.maximum(np.convolve(signal.astype(np.float64) ** 2, kernel, mode="same"), 0.0))
+    minutes = len(signal) / sr / 60.0
+    peak = float(np.max(np.abs(lf))) if len(lf) else 0.0
+    peak_db = round(20.0 * np.log10(peak), 1) if peak > 1e-6 else None
+    active = full_env > 10.0 ** (-60.0 / 20.0)
+    if not active.any() or minutes <= 0:
+        return {"events_count": 0, "events_per_minute": 0.0, "peak_db": peak_db}
+    threshold = float(np.percentile(full_env[active], 95)) * 10.0 ** (_PLOSIVE_REL_DB / 20.0)
+    above = np.concatenate(([0], (lf_env > threshold).astype(np.int8)))
+    refractory = int(_PLOSIVE_REFRACTORY_SEC * sr)
+    events, last = 0, -refractory
+    for i in np.flatnonzero(np.diff(above) > 0):
+        if i - last >= refractory:
+            events += 1
+        last = i
+    return {
+        "events_count": events,
+        "events_per_minute": round(events / minutes, 2),
+        "peak_db": peak_db,
+    }
+
+
 def _vocal_metrics(signal: np.ndarray, sr: int, run_pitch: bool = True) -> dict:
     """Vocal-specific metrics: sibilance, plosive, pitch stats, vibrato, breath.
 
@@ -724,6 +886,11 @@ def _vocal_metrics(signal: np.ndarray, sr: int, run_pitch: bool = True) -> dict:
     `run_pitch=False` skips the librosa.pyin + viterbi block (the slow part).
     Sibilance / plosive / breath still compute — they're cheap band-filter +
     envelope work and are sometimes informative on non-vocal sources too.
+
+    plosive.events_count is a total over the stem; plosive.events_per_minute
+    normalises it by duration (see _plosive_stats). pitch.cents_std is an RMS
+    deviation from per-note targets (see _pitch_stats); vibrato.extent_cents
+    is a semi-extent in cents (see _vibrato_stats).
     """
     out: dict = {
         "sibilance": {},
@@ -749,66 +916,31 @@ def _vocal_metrics(signal: np.ndarray, sr: int, run_pitch: bool = True) -> dict:
         duration = len(signal) / sr
         out["sibilance"]["density_per_sec"] = round(n_events / max(duration, 0.01), 2)
 
-    # Plosives: sub-100 Hz transient bursts (lopassed signal + envelope onsets)
-    plo_sos = butter(4, 100.0, btype="low", fs=sr, output="sos")
-    plo_band = sosfilt(plo_sos, signal)
-    plo_env = np.abs(plo_band)
-    plo_threshold = float(np.max(plo_env)) * 0.7  # 70% of peak — only real bursts
-    if plo_threshold > 1e-6:
-        crossings = np.diff((plo_env > plo_threshold).astype(int))
-        out["plosive"]["events_count"] = int(np.sum(crossings > 0))
-        out["plosive"]["peak_db"] = round(20.0 * np.log10(max(float(np.max(plo_env)), 1e-10)), 1)
-    else:
-        out["plosive"]["events_count"] = 0
-        out["plosive"]["peak_db"] = None
+    out["plosive"] = _plosive_stats(signal, sr)
 
     # Pitch tracking — librosa.pyin (probabilistic YIN). The single biggest
     # hotspot in analyze.py (~15-25s on a 7-min stem due to viterbi). Skipped
     # entirely when run_pitch=False (typical for non-vocal stems).
-    voiced_f0 = np.array([])
     duration_sec = len(signal) / sr
     if run_pitch and duration_sec >= 2.0:
         try:
-            f0, voiced_flag, _ = librosa.pyin(
-                signal.astype(np.float32), fmin=80, fmax=600, sr=sr,
+            f0, _, _ = librosa.pyin(
+                signal.astype(np.float32), fmin=80, fmax=600, sr=sr, hop_length=_PYIN_HOP,
             )
             voiced_f0 = f0[~np.isnan(f0)]
             if len(voiced_f0) > 0:
+                frame_rate = sr / _PYIN_HOP
                 out["pitch"]["mean_hz"] = round(float(np.mean(voiced_f0)), 1)
                 out["pitch"]["median_hz"] = round(float(np.median(voiced_f0)), 1)
-                # Intonation stability: std of cents-deviation from nearest semitone
-                cents = 1200 * np.log2(voiced_f0 / 440.0)
-                nearest_semi = np.round(cents / 100) * 100
-                cents_dev = cents - nearest_semi
-                out["pitch"]["cents_std"] = round(float(np.std(cents_dev)), 1)
-                # Voiced fraction
+                out["pitch"].update(_pitch_stats(f0, frame_rate))
                 out["pitch"]["voiced_ratio"] = round(float(len(voiced_f0)) / len(f0), 2)
+                out["vibrato"] = _vibrato_stats(f0, frame_rate)
             else:
                 out["pitch"]["mean_hz"] = None
         except Exception:
             out["pitch"]["mean_hz"] = None
     elif not run_pitch:
         out["pitch"]["skipped_reason"] = "non-vocal stem (filename heuristic)"
-
-    # Vibrato: 4-7 Hz periodic modulation in the pitch curve
-    if out["pitch"].get("mean_hz") and len(voiced_f0) > sr // 4:
-        try:
-            voiced_f0_norm = voiced_f0 - np.mean(voiced_f0)
-            # frame rate of pyin is approx sr / hop_length (default hop = 512)
-            frame_rate = sr / 512.0
-            n_pad = 1024
-            spec = np.abs(np.fft.rfft(voiced_f0_norm, n=n_pad))
-            freqs = np.fft.rfftfreq(n_pad, d=1.0 / frame_rate)
-            # Look in 4-7 Hz band
-            mask = (freqs >= 4.0) & (freqs <= 7.0)
-            if np.any(mask):
-                peak_idx = np.argmax(spec[mask])
-                vibrato_rate = float(freqs[mask][peak_idx])
-                out["vibrato"]["rate_hz"] = round(vibrato_rate, 2)
-                # Extent: peak amplitude of the vibrato in cents
-                out["vibrato"]["extent_cents"] = round(float(spec[mask][peak_idx]) * 100 / n_pad, 1)
-        except Exception:
-            pass
 
     # Breath / silence ratio (frames below -45 dBFS)
     frame_n = max(1, int(0.05 * sr))  # 50 ms frames
@@ -827,9 +959,10 @@ def _vocal_metrics(signal: np.ndarray, sr: int, run_pitch: bool = True) -> dict:
 def _stats_summary_text(stats: dict) -> str:
     lines = ["", "STATS SUMMARY", "-" * 54]
     loud = stats.get("loudness", {})
-    lufs = loud.get("integrated_lufs", "n/a")
-    lra = loud.get("loudness_range_lu", "n/a")
-    crest = loud.get("crest_factor_db", "n/a")
+    lufs = loud.get("integrated_lufs")
+    lra = loud.get("loudness_range_lu")
+    crest = loud.get("crest_factor_db")
+    lufs, lra, crest = ("n/a" if v is None else v for v in (lufs, lra, crest))
     lines.append(f"  LUFS: {lufs} LUFS  |  LRA: {lra} LU  |  Crest factor: {crest} dB")
     sample_peak = loud.get("sample_peak_dbfs")
     true_peak = loud.get("true_peak_dbfs")
@@ -857,16 +990,20 @@ def _stats_summary_text(stats: dict) -> str:
         lines.append(f"  Transient profile: prominence {prom} dB (±{prom_std})  |  decay {decay} ms (±{decay_std})")
     stereo = stats.get("stereo")
     if stereo:
-        bal = stereo.get("balance_db", 0)
-        side = "L>R" if bal > 0 else ("R>L" if bal < 0 else "balanced")
-        corr = stereo.get("lr_correlation", "n/a")
+        bal = stereo.get("balance_db")
+        corr = stereo.get("lr_correlation")
         width = stereo.get("ms_width_ratio", "n/a")
-        lines.append(f"  Stereo: balance {abs(bal):.1f} dB ({side})  |  LR corr {corr}  |  M/S width {width}")
+        if bal is None:
+            bal_str, corr = "n/a (one channel silent)", "n/a"
+        else:
+            side = "L>R" if bal > 0 else ("R>L" if bal < 0 else "balanced")
+            bal_str = f"{abs(bal):.1f} dB ({side})"
+        lines.append(f"  Stereo: balance {bal_str}  |  LR corr {corr}  |  M/S width {width}")
     pump = stats.get("pumping")
     if pump and pump.get("pumping_detected"):
         rate = pump.get("pump_rate_hz", "n/a")
         depth = pump.get("modulation_depth_db", "n/a")
-        lines.append(f"  [!] Pumping: {rate} Hz, depth {depth} dB — likely over-compressed")
+        lines.append(f"  [!] Pumping: {rate} Hz, depth {depth} dB — candidate: compressor artifact or musical pulse; compare before/after by ear")
     return "\n".join(lines)
 
 
@@ -900,11 +1037,28 @@ def _save_outputs(
             "spectrogram_txt": str(txt_path),
         },
     }
-    json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+    json_path.write_text(json.dumps(result, indent=2, allow_nan=False), encoding="utf-8")
     return result
 
 
-_CACHE_VERSION = 2  # bump when the analysis schema changes
+def _json_safe(value):
+    """Recursively replace non-finite floats (NaN, +-inf) with None for strict JSON."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    return value
+
+
+def _finite_round(value: float | None, ndigits: int = 1) -> float | None:
+    if value is None or not np.isfinite(value):
+        return None
+    return round(float(value), ndigits)
+
+
+_CACHE_VERSION = 3  # bump when the analysis schema changes
 
 
 def _cache_signature(file_path: Path, target_lufs: float, force_vocal_metrics: bool) -> dict:
@@ -963,6 +1117,9 @@ def analyze(
             return cached
 
     data, sr = sf.read(str(file_path), always_2d=True, dtype="float32")
+    if not np.isfinite(data).all():
+        raise ValueError(f"{file_path}: audio contains non-finite samples (NaN/Inf); "
+                         "repair or re-export the file before analysis")
     mono = data.mean(axis=1).astype(np.float32)
     channels = data.shape[1]
     duration = len(mono) / sr
@@ -972,19 +1129,25 @@ def analyze(
     print("  [1/9] Loudness metrics (LUFS, LRA, crest factor)...", flush=True)
     meter = pyln.Meter(sr)
     lufs_input = data if channels > 1 else mono
+    # Silent or too-short input: pyloudnorm returns -inf or raises -> None.
     try:
-        integrated_lufs = float(meter.integrated_loudness(lufs_input))
+        integrated_lufs = _finite_round(meter.integrated_loudness(lufs_input))
     except Exception:
-        integrated_lufs = -120.0
+        integrated_lufs = None
     lra = _lra(lufs_input, sr, meter)
-    sample_peak = float(20 * np.log10(max(np.max(np.abs(mono)), 1e-10)))
-    true_peak = _true_peak_dbfs(mono)
-    crest_factor = _crest_factor_db(mono)
+    # Worst individual channel, not the monosum — a hard-panned full-scale
+    # peak is ~6 dB quieter after .mean() and would under-report.
+    sample_peak = float(20 * np.log10(max(float(np.max(np.abs(data))), 1e-10)))
+    true_peak = worst_channel_true_peak_dbfs(data)
+    crest_factor = _crest_factor_db(data)
     noise_floor = round(_noise_floor_db(mono, sr), 1)
     dynamic_range = round(_dynamic_range_db(mono, sr), 1)
-    recommended_gain = round(target_lufs - integrated_lufs, 1) if integrated_lufs > -100 else 0.0
+    recommended_gain = round(target_lufs - integrated_lufs, 1) if integrated_lufs is not None else None
     stereo = _stereo_metrics(data) if channels >= 2 else None
 
+    # Band RMS / band crest are measured on the mono downmix (L+R)/2: a
+    # hard-panned source reads 6 dB lower and anti-phase content cancels.
+    # Peaks and the overall crest factor above use individual channels.
     freq_bands = {
         "sub_60hz":     (0,    60),
         "low_60_250hz": (60,   250),
@@ -1015,14 +1178,14 @@ def analyze(
     onset_env_shared = librosa.onset.onset_strength(y=mono.astype(np.float32), sr=sr)
     transient_density = _transient_density(mono, sr, onset_env=onset_env_shared)
     spec_centroid = _spectral_centroid_hz(mono, sr)
-    transient_prof = _transient_profile(mono, sr)
-    onsets = _onsets_sec(mono, sr)
+    transient_prof = _transient_profile(mono, sr, onset_env=onset_env_shared)
+    onsets = _onsets_sec(mono, sr, onset_env=onset_env_shared)
 
     print("  [6/9] Pumping / over-compression detection...", flush=True)
     pumping = _detect_pumping(mono, sr)
 
     print("  [7/9] Tempo + key estimation...", flush=True)
-    tempo_bpm = _tempo_bpm(mono, sr)
+    tempo_bpm = _tempo_bpm(mono, sr, onset_env=onset_env_shared)
     estimated_key = _estimated_key(mono, sr)
 
     print("  [8/9] Envelopes (RMS dB, LUFS short-term, spectral flux)...", flush=True)
@@ -1031,7 +1194,7 @@ def analyze(
     spec_flux = _spectral_flux_per_sec(mono, sr, onset_env=onset_env_shared)
 
     # Use parent dir name too — assembled.wav files live under per-track dirs like
-    # `output/terido/tracks/KICK IN.05/assembled.wav`, and the meaningful identifier
+    # `output/<session>/tracks/KICK IN.05/assembled.wav`, and the meaningful identifier
     # is in the parent dir name, not the basename.
     stem_hint = f"{file_path.parent.name} {file_path.name}"
     run_pitch = force_vocal_metrics or _looks_vocal(stem_hint)
@@ -1045,7 +1208,7 @@ def analyze(
         "sample_rate": sr,
         "channels": channels,
         "loudness": {
-            "integrated_lufs": round(integrated_lufs, 1),
+            "integrated_lufs": integrated_lufs,
             "loudness_range_lu": lra,
             "true_peak_dbfs": round(true_peak, 1),
             "sample_peak_dbfs": round(sample_peak, 1),
@@ -1080,6 +1243,7 @@ def analyze(
     # Cache key so the next analyze() call can short-circuit if WAV is unchanged
     stats["_cache"] = _cache_signature(file_path, target_lufs, force_vocal_metrics)
 
+    stats = _json_safe(stats)
     result = _save_outputs(stats, text_spec, freq_response, mono, sr, file_path.stem, output_dir)
     print(f"  Done -> {output_dir / 'analysis.json'}", flush=True)
     return result
@@ -1119,13 +1283,17 @@ def main() -> None:
         print(json.dumps({"error": f"File not found: {args.file}"}), file=sys.stderr)
         sys.exit(1)
 
-    result = analyze(
-        args.file,
-        output_dir=args.output_dir,
-        target_lufs=args.target_lufs,
-        force_vocal_metrics=args.force_vocal_metrics,
-        use_cache=not args.no_cache,
-    )
+    try:
+        result = analyze(
+            args.file,
+            output_dir=args.output_dir,
+            target_lufs=args.target_lufs,
+            force_vocal_metrics=args.force_vocal_metrics,
+            use_cache=not args.no_cache,
+        )
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(result, indent=2))
 
 

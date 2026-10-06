@@ -1,8 +1,9 @@
-"""Apply tube amp simulation and cabinet EQ to a bass DI stem.
+"""Apply tube-style saturation and cabinet EQ to a bass DI stem.
 
-Tube saturation: asymmetric soft clipping — positive half clips harder,
-matching triode anode current saturation. Produces even-order harmonics
-(2nd, 4th) that add warmth without sounding distorted at low drive levels.
+Saturation: asymmetric tanh soft clipping — positive half clips harder
+(shared with apply_saturation's tube mode, 4x oversampled, DC removed).
+The asymmetry adds even-order harmonics (2nd, 4th); it is a waveshaper
+loosely inspired by tube behaviour, not a circuit model.
 
 Cabinet EQ: parametric chain modelling the Ampeg SVT 8x10 response:
   HP  @ 40 Hz        — removes inaudible sub-rumble, tightens low end
@@ -36,11 +37,14 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfilt
 
+from _recall import record_operation
+from apply_saturation import _dc_block, _oversampled
+
 
 PRESETS: dict[str, dict] = {
     "ampeg_svt": {
         "description": "Ampeg SVT-CL — warm tube character, 8x10 cabinet, moderate drive",
-        "notes": "Drive=0.35 adds tube warmth without obvious distortion. HP@40Hz removes sub-rumble, low shelf +3dB@120Hz is the signature SVT cabinet body, 800Hz peak adds grind that cuts through guitars, LP@5kHz matches SVT-810E speaker rolloff (-3dB@5kHz per Ampeg spec). Asymmetry=0.3 tilts saturation toward even harmonics (2nd harmonic = octave below, adds warmth).",
+        "notes": "Drive=0.35 adds tube warmth without obvious distortion. HP@40Hz removes sub-rumble, low shelf +3dB@120Hz is the signature SVT cabinet body, 800Hz peak adds grind that cuts through guitars, LP@5kHz matches SVT-810E speaker rolloff (-3dB@5kHz per Ampeg spec). Asymmetry=0.3 adds even harmonics (2nd harmonic = one octave above the note).",
         "drive": 0.35,
         "asymmetry": 0.30,
         "hp_hz": 40.0,
@@ -106,37 +110,16 @@ PRESETS: dict[str, dict] = {
 }
 
 
-def _tube_saturate(data: np.ndarray, drive: float, asymmetry: float) -> np.ndarray:
-    """Asymmetric soft clipping — positive half clips harder (triode model).
+def _tube_saturate(data: np.ndarray, drive: float, asymmetry: float, sr: int) -> np.ndarray:
+    """Asymmetric tanh waveshaper — positive half clips harder.
 
-    Positive half: tanh(x * (1+asymmetry)) / (1+asymmetry)
-    Negative half: tanh(x)
-
-    The asymmetry generates even-order harmonics (2nd, 4th) — perceptually warm.
-    Output is RMS-normalized to input level: harmonics are added, not volume.
+    Reuses apply_saturation's 4x-oversampled tube curve (less aliasing) and
+    its DC blocker. The asymmetry produces even-order harmonics; this is a
+    waveshaper, not a physical tube model. Output is RMS-matched to input.
     """
     if drive == 0.0:
         return data
-
-    in_rms = np.sqrt(np.mean(data ** 2) + 1e-12)
-
-    # Scale into saturation stage (drive=0 → no gain, drive=1 → 5x)
-    x = data * (1.0 + drive * 4.0)
-
-    pos_factor = 1.0 + asymmetry
-    pos_mask = x >= 0
-    neg_mask = ~pos_mask
-
-    out = np.zeros_like(x)
-    out[pos_mask] = np.tanh(x[pos_mask] * pos_factor) / pos_factor
-    out[neg_mask] = np.tanh(x[neg_mask])
-
-    # Normalize to input RMS — preserve level, only change spectrum
-    out_rms = np.sqrt(np.mean(out ** 2) + 1e-12)
-    if out_rms > 1e-10:
-        out = out * (in_rms / out_rms)
-
-    return out
+    return _dc_block(_oversampled(data, "tube", drive, asymmetry, 4, 0.0), sr)
 
 
 def _hp(data: np.ndarray, sr: int, hz: float) -> np.ndarray:
@@ -188,6 +171,7 @@ def _peak(data: np.ndarray, sr: int, hz: float, gain_db: float, q: float) -> np.
     return sosfilt(sos, data, axis=0)
 
 
+@record_operation("apply_amp")
 def apply_amp(
     file_path: Path,
     output_dir: Path,
@@ -205,7 +189,7 @@ def apply_amp(
     data, sr = sf.read(str(file_path), always_2d=True)
 
     # Stage 1: tube saturation
-    out = _tube_saturate(data, drive, asymmetry)
+    out = _tube_saturate(data, drive, asymmetry, sr)
 
     # Stage 2: cabinet EQ
     if hp_hz is not None and hp_hz > 0:
@@ -217,17 +201,15 @@ def apply_amp(
     if lp_hz is not None and lp_hz > 0:
         out = _lp(out, sr, lp_hz)
 
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(out)))
     if peak > 1.0:
-        print(
-            f"WARNING: clipping by {20 * np.log10(peak):.1f} dB — reducing gain",
-            file=sys.stderr,
-        )
-        out = out / peak
+        print(f"WARNING: output peak {20 * np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (file_path.stem + "_amp.wav")
-    sf.write(str(out_path), out, sr, subtype="PCM_24")
+    sf.write(str(out_path), out, sr, subtype="FLOAT")
 
     result = {
         "input": str(file_path),
@@ -242,6 +224,8 @@ def apply_amp(
         "mid_hz": mid_hz,
         "mid_db": mid_db,
         "mid_q": mid_q,
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
     }
 
@@ -252,7 +236,7 @@ def apply_amp(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Tube amp simulation and cabinet EQ for bass DI stems.",
+        description="Tube-style saturation and cabinet EQ for bass DI stems.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Available presets: " + ", ".join(PRESETS),
     )

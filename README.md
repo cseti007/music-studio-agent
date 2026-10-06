@@ -7,12 +7,20 @@ the agent proposes, you approve.
 
 Works with any LLM: Claude, ChatGPT, Gemini, local models via Ollama, etc.
 
+Rendered audio starts as a draft. Agents must disclose whether they can directly
+audition it, compare changes at matched loudness, and preserve the scope of user
+feedback. Health checks and style scores never certify musical quality.
+`prepare_audition.py` creates comparison excerpts; `review_delivery.py` checks
+the current file and its recorded human listening approval before delivery.
+Shared instructions are in `CLAUDE.md`, with `AGENTS.md` as the agent entry point.
+
 ---
 
 ## Requirements
 
 - Python 3.11+
-- All dependencies in `requirements.txt` (includes `pedalboard`, which requires a C++ compiler on Linux/macOS)
+- All dependencies in `requirements.txt` (`pedalboard>=0.9.25` provides the true-peak brickwall limiter; `psola` is needed only by `apply_pitch_correct.py`)
+- Optional system tools: `ptftool` for Pro Tools `.ptx` parsing (path via `PTFTOOL_PATH`, default `/tmp/ptformat/ptftool`); `ffmpeg` for codec round-trip checks
 
 ## Installation
 
@@ -57,9 +65,9 @@ and ground rules. The agent should take it from there.
 
 ## Preparing your recording session
 
-The pipeline reads a DAW session file directly — no stem-bouncing required.
-But a few things need to be set right *before* you hand the session to the
-agent so it can do its job.
+Consolidated, time-aligned stems are the most reliable input. The DAW parser
+extracts a limited audio clip layout; it does not reproduce plugins, automation,
+or complete session playback. Check the parsed layout before assembly.
 
 ### DO before handoff
 
@@ -114,13 +122,13 @@ sees absolute paths that won't resolve on the target machine.
 
 | Don't | Why |
 |---|---|
-| **Pre-apply EQ on tracks** | The agent runs `apply_eq` with instrument-specific presets (`kick_in`, `snare_top`, `bass_di`, etc.). Pre-EQ stacks invisibly and can't be undone. |
-| **Pre-apply compression / limiting / gating** | The agent runs `apply_compression`, `apply_gate` with reasoning. Pre-comped tracks have damaged crest factor and trigger false pumping alarms. |
-| **Pre-apply reverb / delay / saturation** | The agent runs `apply_reverb`, `apply_delay`, `apply_saturation`. Wet signal isn't reversible. |
-| **Normalize tracks or apply gain rides** | The agent's `apply_gain --per-clip` normalises each clip to a consistent LUFS target. Pre-normalised material defeats this. |
-| **Apply master-bus EQ / limiting** | The agent's `master_mix.py` handles format-specific mastering (Spotify, Apple, CD, etc.). |
-| **Apply pitch correction / Melodyne / Auto-Tune** | Vocal toolkit is on the backlog — when shipped, the agent will handle this. Manual edits constrain its choices. |
-| **Enable Ableton's auto-warp on a fixed-tempo recording** | Turn warp off on tracks that were recorded to click. Warp markers can misalign multi-mic drum takes by milliseconds. |
+| **Pre-apply corrective EQ on tracks** | EQ in the pipeline is an optional, recorded intervention with a stated reason. Pre-EQ stacks invisibly and can't be undone. Intentional sound-design processing is fine if you say so. |
+| **Pre-apply compression / limiting / gating** | Dynamics in the pipeline are optional and auditioned. Pre-comped tracks have reduced crest factor and confuse the pumping detector. |
+| **Pre-apply reverb / delay / saturation** | Unless it is part of the sound you want, keep it out: wet signal isn't reversible. |
+| **Normalize tracks** | `apply_gain --per-clip` assembles clips at their original levels by default and levels clips only on request (`--normalize`). Pre-normalised material hides the real level relationships. |
+| **Apply master-bus EQ / limiting** | `master_mix.py` handles mastering to the requested delivery profile. |
+| **Apply pitch correction / Melodyne / Auto-Tune** (unless that is the intended sound) | `apply_pitch_correct.py` exists but tuning is the artist's choice; manual edits constrain later choices. |
+| **Enable Ableton's auto-warp on a fixed-tempo recording** | Turn warp off on tracks that were recorded to click. The parser accepts warped clips only when the warp is tempo-neutral and rejects tempo automation it cannot reproduce. |
 
 ### Special cases
 
@@ -130,15 +138,14 @@ The agent will set `active: false` on it during the render — otherwise
 a click track that extends past the song's end will lengthen the mix
 with silence.
 
-**Drum mics with bleed**: leave the bleed in. The agent's `apply_gate`
-handles drum bleed control with instrument-specific presets, and the
-`align_phase` step phase-aligns multi-mic captures sub-sample. Manual
-fade-outs between hits defeat both.
+**Drum mics with bleed**: leave the bleed in. Gating (`apply_gate`) and
+alignment (`align_phase`) are optional, auditioned choices; acoustic arrival
+delays between mics are preserved by default. Manual fade-outs between hits
+remove information the mix may need.
 
-**Vocal recordings**: out of scope for now (no vocal toolkit yet —
-backlog item #4). You can still hand the session to the agent; it will
-detect vocal tracks, deactivate them in `mix_config`, and ship the
-instrumental.
+**Vocal recordings**: vocal tools exist (de-esser, pitch correction, vocal
+presets, shared reverb buses). Whether vocals are in scope is decided per
+project; tell the agent if the deliverable is an instrumental.
 
 ### Folder layout to hand off
 
@@ -167,15 +174,16 @@ rsync — whatever's convenient). Then tell the agent:
 Before the pipeline runs, the agent will ask 2-3 things you should be
 ready for:
 
-1. **Genre / style** — for `--style modern_rock` (or `classic_rock`,
-   `pop`, `hip_hop`, `jazz_acoustic`). Sets genre-appropriate bus
-   volume defaults.
+1. **Genre / style and references** — optional `--style` starting points
+   (`classic_rock`, `hip_hop`, `jazz_acoustic`, `modern_rock`, `pop`,
+   `punchy_modern_rock`, `tool_inspired`) set initial bus volumes/pans.
+   They are project preferences, not genre standards; your references
+   and listening decide.
 2. **Which takes/mics to keep** if there are duplicate-source-file
    groups (the `audit_session.py` flag) or alternate takes on separate
    tracks.
-3. **Goal** — streaming delivery, demo, mix-health gate against the
-   reference track, etc. Determines target LUFS and which masters get
-   rendered.
+3. **Goal** — streaming delivery, demo, vinyl, broadcast, etc. Determines
+   which masters get rendered and any contractual loudness or peak limits.
 
 You don't have to know these answers in advance — the agent shows what
 it sees and explains the trade-offs.
@@ -199,22 +207,29 @@ stems (WAV files)
     |
     v
 parse_session        -- parse DAW session (.ptx / .als) into session.json
-audit_session        -- detect tracks sharing identical source files
-                        (phase-coherent duplicates) at session start
-apply_gain --per-clip -- normalize clips + assemble full-length stems
+audit_session        -- flag tracks sharing identical source files / clip
+                        layouts (duplicate candidates to review)
+apply_gain --per-clip -- assemble full-length stems at original levels
+                        (--normalize and continuous take reconstruction
+                        are opt-in editorial choices)
 analyze              -- LUFS, LRA, crest, transients, spectrum, stereo,
-                        hum, pumping, per-band crest, true peak (4x
-                        oversampled), onsets[], tempo_bpm, estimated_key,
+                        hum (narrow mains lines in quiet passages), pumping
+                        candidates, per-band crest, per-channel sample and
+                        true peak, onsets[], tempo_bpm, estimated_key,
                         envelopes (RMS / LUFS short-term / spectral flux)
 batch_analyze        -- parallel multiprocessing wrapper around analyze
                         (5-6x faster than the serial loop on 8 cores)
 level_notes          -- per-note volume leveling on a target time range
                         (opt-in: fixes uneven slap/finger bass takes)
-detect_masking       -- find frequency conflicts between stems (time-gated)
-align_phase          -- phase-align drum mics to kick reference (sub-sample)
-apply_eq             -- notch hum, carve frequencies, instrument presets
-                        (minimum-phase by default, zero-phase for mastering)
-apply_compression    -- dynamics control, parallel + sidechain options
+detect_masking       -- candidate frequency overlap between stems (band
+                        power, co-activity gated; audition before cutting)
+align_phase          -- optional delay/polarity alignment for a supported
+                        hypothesis; refuses low-confidence estimates
+apply_eq             -- notches, carving, instrument presets
+                        (minimum-phase by default, zero-phase optional)
+apply_dynamic_eq     -- bounded bell cut under a detector (self or sidechain)
+apply_automation     -- explicit linked gain rides from a curve file
+apply_compression    -- stereo-linked dynamics, parallel + sidechain options
 apply_gate           -- drum bleed control
 apply_transient      -- attack/sustain shaping for percussive stems
 apply_amp            -- tube amp + cabinet sim for bass DI
@@ -237,62 +252,82 @@ vocal pipeline       -- vocal-stem-aware chain (best-practice order):
                         strength blends original→quantised.
   (vocal EQ / comp / reverb presets are part of the standard preset library)
 
-make-it-hit tools    -- guarded by data-driven relevance_check (won't fire
-                        if the input doesn't justify the trade-off):
-  apply_subharm      -- sub-bass harmonic synthesizer (small-speaker translation)
-  apply_haas         -- Haas stereo widener (mono mic-pair detection)
-  apply_exciter      -- HF harmonic generator (Aphex-style, refuses on bass/kick)
-  apply_multiband_comp -- 3-band Linkwitz-Riley split + per-band compressor
+optional creative tools -- guarded by conservative relevance_check
+                        safeguards; audition required either way:
+  apply_subharm      -- 2nd/3rd harmonic synthesis of the sub fundamental
+  apply_haas         -- Haas stereo widener (mono-compatibility caveat)
+  apply_exciter      -- oversampled HF harmonic generator
+  apply_multiband_comp -- 3-band Linkwitz-Riley split, linked per band
 
-compare_reference    -- spectral + LUFS comparison against a reference track,
-                        optional --apply for auto inverse-delta EQ chain
-render_mix           -- sum to stereo, bus routing, master chain
-                        (master.clipper / master.ms / parallel_sat — all guarded)
-bus_balance          -- per-bus LUFS contribution report (opt-in
-                        diagnostic — "is bass too loud vs drums?" objectively)
-mix_health           -- green/yellow/red scorecard. REQUIRED before mastering.
+compare_reference    -- spectral + loudness comparison against a reference;
+                        optional --apply bakes a merged, capped inverse EQ
+                        (a hypothesis to audition, never automatic)
+render_mix           -- sum to stereo, bus routing; premaster mode (default)
+                        writes a float, peak-normalized mix.wav with no
+                        limiter (legacy mode adds clipper / M/S / limiter)
+bus_balance          -- per-bus LUFS/peak of the rendered stems (diagnostic)
+mix_health           -- technical peak gate + advisory loudness, phase,
+                        masking and dynamics measurements. Run before
+                        mastering; listening review stays separate.
+prepare_audition     -- loudness-matched before/after excerpts with hashes
+find_clicks          -- click forensic: sweep the mix, or trace one
+                        timestamp from source files through every stage
 
   ── mix phase ends here ── master phase begins ──
 
-master_mix           -- stereo mix → mastered.wav per delivery format.
+master_mix           -- stereo mix → master per requested delivery format.
+                        True-peak brickwall limiter with an 8x-verified
+                        ceiling (-1 dBTP, -2 dBTP above -14 LUFS).
                         7 format presets (spotify -14, apple -16, youtube,
-                        tidal, cd 16-bit, vinyl_pre, broadcast -23) and 11
+                        tidal, cd 16-bit, vinyl_pre (no LUFS target, peak
+                        -3 dBTP), broadcast -23) and 11
                         chain presets — base (gentle, modern_rock,
                         modern_rock_mb, pop, hip_hop, transparent) + spatial
                         family (modern_rock_spatial, _v9, _v10, _dark,
                         _noclip — sub-mono + side-band emphasis tuned for
                         modern prog metal; _dark drops top emphasis for
                         ear-fatigue cases; _noclip is a clipper-bypass
-                        diagnostic). --all-formats batch. modern_rock_mb
+                        diagnostic). --all-formats only when several
+                        deliverables were requested. modern_rock_mb
                         adds 3-band multiband + M/S; pop adds bright EQ +
-                        width 1.1; transparent does only LUFS norm + ISP
-                        limit (use on refmatched mixes to avoid tonal
-                        compounding).
-master_health        -- master scorecard: format conformance (LUFS, true
-                        peak, 8x codec-ISP estimate), per-band phase
+                        width 1.1; transparent does only LUFS norm + the
+                        true-peak limiter.
+master_health        -- master scorecard: format conformance (LUFS, 4x/8x
+                        waveform true-peak estimates; not a codec
+                        simulation), per-band phase
                         coherence (sub mono check, top wide), M/S width
                         profile, punch index, compression-history detect,
-                        reference-deck comparison. REQUIRED per format.
+                        reference-deck comparison. Run per exported format.
+apply_plugin         -- host an external VST3/AU plugin (pedalboard) with
+                        state, parameter snapshot and plugin hash recorded
+run_plan             -- run a JSON plan of tool steps (foreach, parallel,
+                        dry-run, run log) instead of ad-hoc driver scripts
+codec_roundtrip      -- ffmpeg encode/decode (AAC, Vorbis, Opus, MP3 as
+                        available) + decoded peak/loudness measurement;
+                        keeps decoded files for a codec listening review
+review_delivery      -- delivery gate: exact export properties plus scoped
+                        human listening evidence tied to the file hash
 
-  ── reference-free style grading (optional, no ref track needed) ──
+  ── reference-free style similarity (optional) ──
 
-style_check          -- grade a mix against one of 5 built-in genre
-                        profiles (modern_rock, classic_rock, pop,
-                        hip_hop, jazz_acoustic). 0-100 score, traffic-
-                        light verdict, EQ recommendations.
+style_check          -- similarity to one of 7 project style profiles.
+                        Measures, never grades quality; loudness checks
+                        are N/A on premaster input.
 
-  ── reproducibility (run after the session is done) ──
+  ── reproducibility ──
 
-build_chain          -- aggregate every per-stem *_report.json into
-                        a single mix_chain.json recall sheet
-replay_chain         -- re-run every step from a mix_chain.json,
-                        rebuilds the entire mix from scratch
+build_chain          -- collect per-output .operation.json records (and
+                        flag unrecorded legacy reports) into mix_chain.json
+replay_chain         -- validate and re-run recorded operations; replaces
+                        outputs only when the content hash matches
+generate_irs         -- regenerate the synthetic IR pack (deterministic)
 ```
 
 All tools are standalone CLI scripts — run them in any order, re-run individual steps,
-or skip stages that are not needed for your session. Make-it-hit tools are
-gated by `relevance_check`: each one analyses its input first and refuses
-to write audio when the input data doesn't justify the processing.
+or skip stages that are not needed for your session. The optional creative tools
+run a `relevance_check` first and refuse to write audio (unless `--force`) when the
+input clearly doesn't suit the processing; passing the check is not evidence the
+effect improves the music.
 
 ---
 
@@ -303,27 +338,29 @@ tools/               CLI processing tools (one file per processor)
 tools/presets/       Instrument-specific EQ / comp / amp / etc. preset JSONs
 tools/style_profiles/ Genre profiles consumed by style_check.py
 tools/irs/           Synthetic impulse-response pack for convolution reverb
-docs/knowledge.md    Domain knowledge base (LUFS targets, instrument guidelines,
-                     make-it-hit philosophy, pumping disambiguation)
-tests/               Smoke tests (pytest) for DSP + relevance-check logic
-config.toml          Pipeline configuration (LUFS targets, alignment settings)
-CLAUDE.md            Agent system prompt (auto-loaded by Claude Code; paste manually for other LLMs)
+docs/knowledge.md    Domain knowledge base with evidence levels (delivery specs,
+                     instrument heuristics, pumping disambiguation)
+tests/               pytest suite: DSP behavior, regressions, recall, workflow
+config.toml          Pipeline configuration (read from the project root)
+CLAUDE.md            Agent instructions (auto-loaded by Claude Code; paste manually for other LLMs)
+AGENTS.md            Short entry point for other agent hosts
+ruff.toml            Lint config (pyflakes-level checks, run in CI)
 output/              Generated during a session (excluded from git)
-BACKLOG.md           Deferred feature ideas
-CHANGELOG.md         Project history
 ```
 
 ---
 
 ## Tests
 
-A minimal pytest suite covers the load-bearing DSP and relevance-check logic.
-Run before committing changes that touch tools/:
+The pytest suite verifies software behavior (DSP math, regressions, recall,
+listening-evidence workflow), not musical quality. Run before committing changes
+that touch tools/:
 
 ```bash
-conda run -n music-studio-agent pytest tests/ -v
+conda run -n music-mix-agent pytest tests/ -v   # conda env name: music-mix-agent
 # or with venv:
 pytest tests/ -v
+ruff check tools tests
 ```
 
 ---
@@ -334,12 +371,20 @@ Edit `config.toml` to adjust global defaults:
 
 ```toml
 [gain]
-per_clip_target_lufs = -18.0     # clip gain normalization target
-per_channel_preset = "stem"      # default delivery preset
+per_clip_target_lufs = -18.0     # used only with apply_gain --normalize
+per_channel_preset = "stem"      # default apply_gain --per-channel preset
 
 [align]
-max_delay_ms = 20.0              # phase alignment search range
+max_delay_ms = 20.0              # alignment search range
+segment_duration_sec = 10.0      # correlation window
+min_correlation = 0.3            # refuse low-confidence alignment
+
+[analyze]
+default_target_lufs = -18.0      # reference for recommended_gain_db
 ```
+
+Tools read `config.toml` from the project root regardless of the working
+directory, and record the resolved values in each operation record.
 
 ---
 

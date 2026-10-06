@@ -8,11 +8,12 @@ dynamics swing wildly between accented and unaccented notes.
 
 Envelope is intentionally short (~95 ms with 5 ms pre-fade, 30 ms hold,
 60 ms fade-out) so it covers only the attack window and decays back to
-unity before the next onset — avoids overlapping boosts that would push
-the cumulative signal above 0 dBFS.
+unity before the next onset — avoids overlapping boosts.
 
-Safety scale only applies to the modified segment, never to material
-outside the target range.
+No safety rescale is applied: the output is 32-bit float, so a boosted
+note above 0 dBFS is kept and reported (output_peak_dbfs,
+output_exceeds_0dbfs). Material outside the boosted note windows is
+bit-identical to the input.
 
 Usage:
     python tools/level_notes.py <input.wav> --output <output.wav> \\
@@ -22,10 +23,14 @@ Usage:
 """
 
 import argparse
-import sys
-import soundfile as sf
+import json
+from pathlib import Path
+
 import numpy as np
 import scipy.signal as sig
+import soundfile as sf
+
+from _recall import record_operation
 
 
 def level_notes(
@@ -92,20 +97,8 @@ def level_notes(
         gain_env[note_start:note_end] = np.maximum(gain_env[note_start:note_end], local)
         boosts.append(boost_db)
 
-    seg_data = audio_2d[fix_start:fix_end].copy()
-    for ch in range(seg_data.shape[1]):
-        seg_data[:, ch] *= gain_env
-
-    # Safety: scale only the modified segment if it overshoots
-    seg_peak = float(np.max(np.abs(seg_data)))
-    safety_scale_db = 0.0
-    if seg_peak > 0.95:
-        scale = 0.95 / seg_peak
-        seg_data *= scale
-        safety_scale_db = 20 * np.log10(scale)
-
     new_audio = audio_2d.copy()
-    new_audio[fix_start:fix_end] = seg_data
+    new_audio[fix_start:fix_end] *= gain_env[:, None]
 
     file_peak = float(np.max(np.abs(new_audio)))
     report = {
@@ -114,8 +107,8 @@ def level_notes(
         "boost_mean_db": float(np.mean(boosts)) if boosts else 0.0,
         "boost_max_db": float(np.max(boosts)) if boosts else 0.0,
         "boost_min_db": float(np.min(boosts)) if boosts else 0.0,
-        "segment_safety_scale_db": safety_scale_db,
-        "file_peak_dbfs": 20 * np.log10(max(file_peak, 1e-12)),
+        "output_peak_dbfs": 20 * np.log10(max(file_peak, 1e-12)),
+        "output_exceeds_0dbfs": file_peak > 1.0,
         "range_sec": (start_sec, end_sec),
         "params": {
             "target_peak_db": target_peak_db,
@@ -126,6 +119,23 @@ def level_notes(
     }
 
     return (new_audio[:, 0] if is_mono else new_audio), report
+
+
+@record_operation("level_notes")
+def level_notes_file(input_path: Path, output_path: Path, start_sec: float,
+                     end_sec: float, target_peak_db: float = -4.0,
+                     quiet_threshold_db: float = -6.0, max_boost_db: float = 15.0,
+                     prominence_db: float = 4.0) -> dict:
+    data, sr = sf.read(input_path, always_2d=True)
+    if not 0 <= start_sec < end_sec <= len(data) / sr:
+        raise ValueError("Note-leveling range must lie within the input audio")
+    output, report = level_notes(data, sr, start_sec, end_sec, target_peak_db,
+                                 quiet_threshold_db, max_boost_db, prominence_db)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(output_path, output, sr, subtype="FLOAT")
+    report.update(input=str(input_path), output=str(output_path))
+    output_path.with_suffix(".report.json").write_text(json.dumps(report, indent=2))
+    return report
 
 
 def main() -> None:
@@ -142,24 +152,17 @@ def main() -> None:
                     help="Onset detector prominence in dB")
     args = ap.parse_args()
 
-    data, sr = sf.read(args.input, always_2d=True)
-    out, report = level_notes(
-        data, sr,
-        start_sec=args.start,
-        end_sec=args.end,
-        target_peak_db=args.target_peak_db,
-        quiet_threshold_db=args.quiet_threshold_db,
-        max_boost_db=args.max_boost_db,
-        prominence_db=args.prominence_db,
-    )
-    sf.write(args.output, out, sr, subtype="PCM_24")
+    report = level_notes_file(Path(args.input), Path(args.output),
+                              args.start, args.end, args.target_peak_db,
+                              args.quiet_threshold_db, args.max_boost_db,
+                              args.prominence_db)
 
     print(f"Onsets detected:        {report['onsets_total']}")
     print(f"Notes boosted:          {report['notes_boosted']}")
     if report["notes_boosted"]:
         print(f"Boost mean / max / min: {report['boost_mean_db']:+.1f} / {report['boost_max_db']:+.1f} / {report['boost_min_db']:+.1f} dB")
-    print(f"Segment safety scale:   {report['segment_safety_scale_db']:+.2f} dB")
-    print(f"File peak after:        {report['file_peak_dbfs']:+.2f} dBFS")
+    print(f"File peak after:        {report['output_peak_dbfs']:+.2f} dBFS"
+          + ("  (above 0 dBFS, kept in float)" if report["output_exceeds_0dbfs"] else ""))
     print(f"Output:                 {args.output}")
 
 

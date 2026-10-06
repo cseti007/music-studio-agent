@@ -42,6 +42,8 @@ import numpy as np
 import soundfile as sf
 from scipy.ndimage import uniform_filter1d
 
+from _recall import record_operation
+
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
 # State constants
@@ -174,8 +176,9 @@ def _gate_gain_envelope(
             t = min(counter / release_blocks, 1.0)
             g = 1.0 - (1.0 - range_lin) * t
             if e >= open_lin:
+                # Resume the attack ramp from the current gain (no dip).
                 state = _ATTACK
-                counter = 0
+                counter = int(round((g - range_lin) / (1.0 - range_lin) * attack_blocks))
             elif counter >= release_blocks:
                 g = range_lin
                 state = _CLOSED
@@ -198,6 +201,8 @@ def _gate_gain_envelope(
 # Core processing
 # ---------------------------------------------------------------------------
 
+
+@record_operation("apply_gate")
 def apply_gate(
     input_path: Path,
     output_dir: Path,
@@ -211,7 +216,6 @@ def apply_gate(
     preset_name: str | None = None,
 ) -> dict:
     data, sr = sf.read(str(input_path), always_2d=True)
-    n_channels = data.shape[1]
 
     mono = data.mean(axis=1)
     gain = _gate_gain_envelope(
@@ -228,20 +232,15 @@ def apply_gate(
     # Apply gain to all channels
     output_data = data * gain[:, np.newaxis]
 
-    # Clip guard
+    # Float output keeps overs; report them instead of rescaling the file.
     peak_linear = float(np.max(np.abs(output_data)))
-    clipped = peak_linear > 1.0
-    if clipped:
-        print(
-            f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS — "
-            "scaling down to prevent clipping",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak_linear
+    if peak_linear > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_gate.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     # Report statistics
     open_fraction = float(np.mean(gain > (10.0 ** (range_db / 20.0) * 2)))
@@ -266,7 +265,8 @@ def apply_gate(
         "gate_open_pct": round(open_fraction * 100, 1),
         "gate_openings_count": n_openings,
         "input_peak_dbfs": round(in_peak_db, 1),
-        "output_peak_dbfs": round(out_peak_db, 1),
+        "output_peak_dbfs": round(out_peak_db, 2),
+        "output_exceeds_0dbfs": peak_linear > 1.0,
         "sample_rate": sr,
     }
     (output_dir / "gate_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")

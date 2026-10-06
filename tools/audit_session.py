@@ -6,9 +6,9 @@ on the bus and add +6 dB to that mic's frequency band. The user hears it
 as "the drummer played that part twice" — but it's not the drummer, it's
 the session editor accidentally cloning a track.
 
-This tool groups tracks by the **set of source files their clips
-reference**. Any group with more than one track is a duplicate candidate:
-identical audio routed to two (or more) mix_config entries.
+This tool groups tracks by resolved source paths and complete clip metadata.
+A group with more than one track is a duplicate candidate. Confirm intended
+routing and playback before deactivating tracks.
 
 Output:
   audit_report.json — full groupings + recommendations
@@ -31,31 +31,38 @@ from pathlib import Path
 
 
 def find_duplicates(session_path: Path) -> dict:
-    """Return groups of tracks that share the exact same set of source files."""
+    """Return tracks with identical source paths and clip metadata."""
     data = json.loads(session_path.read_text(encoding="utf-8"))
     tracks = data.get("tracks", [])
 
-    track_sources: dict[str, set] = {}
-    for t in tracks:
+    signatures: dict[str, tuple] = {}
+    source_sets: dict[str, tuple] = {}
+    for track in tracks:
+        clips = []
         sources = set()
-        for c in t.get("clips", []):
-            src = c.get("source_file", "")
-            if src:
-                # Use basename only — full paths may differ but the actual
-                # audio file is what matters
-                sources.add(Path(src).name)
-        track_sources[t["name"]] = sources
+        for clip in track.get("clips", []):
+            source = clip.get("source_file")
+            if not source:
+                continue
+            path = Path(source)
+            if not path.is_absolute():
+                path = session_path.parent / path
+            resolved = str(path.resolve())
+            sources.add(resolved)
+            # Include timing, offsets, length, channel mapping, gain and any
+            # other clip metadata. Shared source files alone are not duplicates.
+            clips.append(json.dumps({**clip, "source_file": resolved}, sort_keys=True))
+        signatures[track["name"]] = tuple(sorted(clips))
+        source_sets[track["name"]] = tuple(sorted(sources))
 
-    # Group tracks by their source-file set
     sources_to_tracks: dict = defaultdict(list)
-    for name, srcs in track_sources.items():
-        if not srcs:
-            continue
-        key = tuple(sorted(srcs))
-        sources_to_tracks[key].append(name)
+    for name, signature in signatures.items():
+        if signature:
+            sources_to_tracks[signature].append(name)
 
     groups = []
-    for srcs, names in sorted(sources_to_tracks.items()):
+    for signature, names in sorted(sources_to_tracks.items()):
+        srcs = source_sets[names[0]]
         if len(names) > 1:
             # Suggest a primary (shortest name — usually the original,
             # before .dup1.XX suffix was added) and recommend deactivating
@@ -90,7 +97,7 @@ def render_text(report: dict) -> str:
     s = report["summary"]
     if s["n_groups"] == 0:
         lines.append("[OK] No duplicate source-file groups found.")
-        lines.append("     Every track references a unique set of audio files.")
+        lines.append("     No identical source-path and clip-layout groups found.")
         return "\n".join(lines)
 
     lines.append(f"[!] {s['n_groups']} duplicate group(s) — "

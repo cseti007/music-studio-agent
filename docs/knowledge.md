@@ -1,15 +1,105 @@
-# Domain Knowledge — Audio Mixing & Gain Staging
+# Domain Knowledge - Audio Mixing and Mastering
 
-Reference material for tool decisions and recommendations. Update when new research is done.
+Policy revision: 2026-09-09. This document separates measurements, delivery
+requirements, engineering heuristics, and personal taste. Session recipes below
+are historical examples unless explicitly labeled otherwise. They must not be
+promoted to universal rules or used to override the user's listening decisions.
 
----
+## Evidence and research policy
+
+Use local knowledge first. Research when a delivery specification is stale, a
+technique is unfamiliar, or sources conflict. Prefer standards bodies and the
+platform's own delivery documentation. Record the source URL, revision, date
+verified, scope, confidence, and whether the claim is a requirement,
+recommendation, heuristic, preference, or session observation. Save the evidence
+used with the session so future research does not silently change a recall.
+
+| Topic | Classification | Verified source and scope |
+|---|---|---|
+| Integrated loudness and true peak | Measurement specification | [ITU-R BS.1770-5 (2023)](https://www.itu.int/rec/R-REC-BS.1770-5-202311-I/en), verified 2026-09-09 |
+| EBU R128 programme loudness | Broadcast recommendation / requirement when contracted | [EBU R128 (2023)](https://tech.ebu.ch/publications/r128), -23 LUFS; does not define musical quality, verified 2026-09-09 |
+| Spotify playback and mastering | Platform recommendation | [Spotify](https://support.spotify.com/us/artists/article/loudness-normalization/): normal playback -14 LUFS; recommended maximum -1 dBTP, or below -2 dBTP for masters louder than -14 LUFS; verified 2026-09-09 |
+| Apple stereo assets | Delivery requirements | [Apple asset guide](https://help.apple.com/itc/videoaudioassetguide/en.lproj/static.html): source resolution and format rules; -16 LUFS is not a universal stereo acceptance condition; verified 2026-09-09 |
+| Reference matching | Engineering technique | [iZotope](https://www.izotope.com/en/learn/13-tips-for-using-references-while-mixing): level-match references for listening comparisons; verified 2026-09-09 |
+
+The repo's polyphase true-peak meter is an estimate; passing synthetic regressions
+is not a certification. Validate against the [EBU test set](https://tech.ebu.ch/publications/ebu_loudness_test_set)
+before claiming standards conformance. Oversampling the waveform does not simulate
+AAC, Vorbis, or any other codec. Actual codec audition remains a separate step.
+
+## Listening evidence and review policy
+
+Classification: project workflow policy, revised 2026-09-09. This is a safeguard
+against unsupported conclusions, not an industry delivery specification.
+
+Declare whether the agent can actually audition audio. Distinguish direct
+listening, externally supplied human feedback, and numerical inference. A
+playback widget, spectral plot, or successful decoder does not establish hearing.
+Without direct audition, create matched excerpts and use focused human feedback;
+continue objective work while leaving subjective judgments provisional.
+
+First renders are drafts. Preserve approval scope and file identity: approving
+vocal balance in one passage does not approve the full mix or a later master.
+A criticism reopens the relevant decision. Store actual feedback, source, person,
+scope, decision, and reviewed audio hash. Never manufacture listening records.
+`tools/review_delivery.py` validates these records against the current export;
+its readiness result covers only the supplied specification and human approval.
+It cannot authenticate a reviewer or certify professional quality.
+
+`tools/prepare_audition.py` matches excerpts with linear gain only. Both receive
+any additional attenuation needed for peak headroom. Use the same section and
+explicit source offsets, especially after trimming or changing the arrangement.
+Do not compare a loud chorus with a quiet verse, or treat a louder option as an
+improvement without checking at matched loudness.
+
+For every consequential creative change, retain the intended improvement,
+timestamp, hypothesis, parameters, measurements, comparison, human/direct
+listening evidence, and decision. Review intro, quiet and dense sections, key
+transitions, exposed vocals, solos, and ending. Preserve useful contrasts instead
+of minimizing every metric difference. No amount of green scoring or passing
+software tests establishes commercial success or artist equivalence.
+
+## Knowledge maintenance
+
+Use this curated repository guidance for stable concepts and repeatable review
+procedures. Search primary sources for unfamiliar techniques, conflicting claims,
+and current delivery rules. Reverify time-sensitive requirements for each new
+delivery brief. Record URL, publication/revision, verification date, claim type,
+scope, confidence, and exceptions. Vendor tutorials describe techniques and may
+promote products; they do not establish universal targets.
+
+Keep session observations and numerical recipes labeled as historical. An old
+song's settings are not evidence that another performance needs those settings.
+New research informs a proposed comparison; it must not silently change an
+approved mix, a saved preference, or an earlier recall.
+
+## Decision policy
+
+- Preserve original edits, channel relationships, artistic processing and levels.
+  Per-clip normalization and equal-LUFS bus auto-trim are opt-in choices.
+- Propose a specific audible improvement; retain it only after measurement and
+  level-matched audition. A treatment that raises a score may still sound worse.
+- LUFS measures programme loudness. LRA measures longer-term loudness variation;
+  low LRA does not prove overcompression and high LRA does not prove good punch.
+- Stereo width and tonal targets depend on arrangement, references and taste.
+  Spectral overlap is a masking hypothesis, not a mandate to cut EQ.
+- A green report means only that the stated measured checks passed. Listening
+  approval, required formats and any contractual delivery checks remain separate.
+- Use floating-point intermediates. Quantize at export; read back the resulting
+  WAV and measure its actual loudness and true peak. Peak safety takes precedence
+  when a requested loudness is unattainable without unwanted processing.
+- A -3 dBFS premaster peak is this project's default, not a universal standard.
+  No fixed premaster LUFS or minimum LRA is required for good mastering.
+- Continuous source reconstruction changes timing and can restore edited-out
+  material. Treat it as an explicit editorial alternative; never auto-select it
+  solely from clip counts or instrument names.
 
 ## Stem Assembly and Clip Gain
 
 **Rule: clip gain and assembly are done together as the first step, before any further processing.**
 
-`apply_gain --per-clip` reads the session.json clip layout, normalizes each clip to a consistent
-LUFS level (clip gain), and assembles the full-length stem in a single pass.
+`apply_gain --per-clip` reads the session.json clip layout and assembles the full-length
+stem at original levels. Add `--normalize` only for intentional per-clip leveling.
 
 The correct order is:
 ```
@@ -22,120 +112,38 @@ The correct order is:
 
 ### Clip gain vs per-channel gain staging
 
-**Clip gain** (`--per-clip`) normalizes each recorded clip to a consistent LUFS level before
-assembly. This is the standard DAW practice (Pro Tools, Logic, etc. all have a dedicated
-"Clip Gain" control). It operates before any plugins and fixes level differences caused by
-different recording gain settings across sessions.
+Assembly defaults to original recording levels. `--normalize` opts into equal
+per-clip LUFS to correct identified accidental gain differences. The existence
+of a DAW clip-gain control does not imply a standard -18 LUFS normalization rule.
+Per-channel gain applies one gain to an entire stem and preserves its internal
+level relationships. Use it when needed for balance or processor operating level.
 
-**Per-channel gain staging** (`--per-channel`) applies a single gain to the whole assembled stem
-to reach a delivery target (Spotify, Apple Music, etc.). This is optional after a correct
-per-clip pass — the stem is already at mix-ready levels.
+### Intentional dynamics and clip boundaries
 
-### When NOT to use per-clip normalization
+Preserve clip levels unless their differences are unwanted. Instrument names and
+clip counts do not establish whether takes share recording gain. Independently
+normalizing related microphones can change the balance and stereo image.
 
-Per-clip normalizes each clip independently to the same LUFS target. This removes intentional
-dynamic contrast between clips — a soft verse and a loud chorus recorded in the same session
-at the same gain setting would be brought to identical levels.
+Assembly applies no crossfade by default. `--crossfade-ms 5` opts into an
+equal-power crossfade near adjacent clip boundaries. Audition the join: correlated
+material can gain level during an equal-power overlap. This is a new edit and
+does not reconstruct the DAW's original fades. Prefer consolidated stems when
+those fades, automation, plugins, or channel mappings matter.
 
-Use `--per-clip` when: clips were recorded in different sessions with different interface/preamp
-gain settings (accidental level inconsistencies).
+### Continuous source mode - editorial alternative
 
-Do NOT use `--per-clip` when: the level differences between clips are intentional performance
-dynamics (the bassist plays softer in the verse and louder in the chorus by design).
+Continuous reconstruction can remove source jumps but also reverses timing
+edits and restores material the editor removed. Clip count alone does not prove
+an audible defect or justify this mode. Preserve the DAW clip layout by default.
 
-**Rule: drums are NEVER per-clip normalized.** A drummer records the whole song in one
-continuous take. Any editorial clip cuts in the session are the editor's work (repairs, region
-splits), not different gain-staged recordings. Per-clip normalization on drums treats these cuts
-as independent recordings and creates audible level jumps at edit boundaries — the result sounds
-like a stereo-to-mono collapse at the cut point because the overhead mics (which provide stereo
-width) get normalized to different levels on each side of the cut.
+If a seam sounds wrong, compare the source, original assembly, and a local repair
+at the same timestamp. Try a small fade only where needed and listen for changes
+to attacks and sustained tones. Crossfade artifacts depend on source phase,
+length, and level; there is no universal warble rate derived from clip counts.
 
-For drums: run `apply_gain --per-clip` only to assemble the stem (it handles region placement
-and silence), then immediately run `apply_gain --per-channel` on the assembled result to apply
-a single uniform gain. This preserves the natural dynamics of the performance across the whole
-take and avoids artificial level steps at edit boundaries.
-
-**The same rule applies to bass DI tracks** — the bassist plays one continuous take, the studio
-splits it into many clips for editorial slip-edits (small rhythmic adjustments where chunks of
-the take get nudged ±10-50 ms relative to the click), and per-clip LUFS normalisation would
-amplify those tiny edits into audible level jumps. Bass workflow: `apply_gain --per-clip
---no-normalize` (assemble at source levels with crossfades at boundaries), then `apply_gain
---per-channel --target-lufs -22` for uniform gain. The -22 LUFS target gives the downstream
-comp 4 dB of headroom so the +5 dB auto makeup doesn't push the post-comp peak into the
-ceiling — pass `--makeup 0` on `apply_compression` if the comp's auto-makeup still pushes to
-0 dBFS (autotrim compensates the lost level at the bus output).
-
-### Clip-boundary crossfades (apply_gain --per-clip)
-
-`apply_gain --per-clip` applies a default **5 ms equal-power crossfade at every butt-up clip
-boundary**. This matches Pro Tools / Logic / Reaper default behaviour and is REQUIRED — without
-it, engineer slip-edits (where the studio shifted a clip by a few ms to lock it to the click)
-leave a sample-level source-discontinuity at the cut point, which the ear hears as a tick or
-"reccsenés". The crossfade smooths the join over 5 ms without moving the clip's rhythmic
-position (the engineer's edit timing is preserved).
-
-Override with `--crossfade-ms 0` to disable, or set a longer time (e.g. `--crossfade-ms 10`)
-if 5 ms is not enough on a particular session. The crossfade tolerance allows up to ±1 ms of
-overlap or gap between adjacent clips to still be treated as a butt-up boundary — many DAWs
-write clip endpoints with sub-millisecond rounding.
-
-### Continuous source mode — `apply_gain --source-mode continuous`
-
-The 5 ms crossfade is the right move for OCCASIONAL slip-edits (few dozen per
-track). But for **heavily slip-edited sustained instruments** (bass DI,
-sustained vocals, sustained synth pads) where one source file is sliced into
-100s of clips with 10-40 ms source jumps at every boundary, the 5 ms crossfade
-creates a continuous **5-6 Hz amplitude/comb-filter warble** — audibly heard
-as "vibrato on the bass" or "phasing on the synth".
-
-**The physics:**
-- 100s of slip-edit boundaries each separated by ~1.7 s
-- Each boundary sums two source positions that are 10-40 ms apart
-- For 10-40 ms source jump on a bass note at 80-120 Hz, comb-filter notches land at 25, 75, 125, 175 Hz (right in the bass-fundamental range)
-- Multiplied by 100s of boundaries = continuous notch sweep = perceived warble
-
-**Detection at session-start:**
-```python
-# In session-start checklist, after parse_session.py
-for t in session['tracks']:
-    n_clips = len(t['clips'])
-    if n_clips < 20:
-        continue
-    sources = {c['source_file'] for c in t['clips']}
-    ratio = n_clips / max(len(sources), 1)
-    if ratio >= 5.0:
-        print(f"⚠ {t['name']}: {n_clips} clips / {len(sources)} sources "
-              f"(ratio {ratio:.1f}) — likely slip-edited, use --source-mode continuous")
-```
-
-**Threshold: `clips_per_source ≥ 5 AND total_clips ≥ 20` → heavy slip-editing.**
-
-**Continuous mode algorithm:**
-1. Group clips by source_file
-2. Within each source, cluster by timeline proximity (gap > 1.0 s = new cluster)
-3. Each cluster gets ONE placement at the cluster's median timeline anchor, playing source from `min(source_offset)` to `max(source_offset + length)` continuously (adaptive small pad based on clip count)
-4. Place clusters on the timeline; sort by effective start position
-5. **Interloper detection**: if a cluster's timeline range is fully INSIDE another's range, it's an interloper (short doubler dropped on top of a longer placement)
-6. Interlopers use wider asymmetric crossfades (e.g., `--interloper-head-ms 2000`, `--interloper-tail-ms 800`) to mask the take-to-take seam
-7. REPLACE (not sum) the buffer in the interloper's range — prevents doubled-bass mid-range
-
-**When to use:**
-- Bass DI (slip-edited tracks) → continuous mode
-- Sustained vocals → continuous mode
-- Sustained synth pads → continuous mode
-- **Drums → per-clip mode (default)** — each drum clip cut is editorial intent, NOT a slip-edit
-
-**Do NOT auto-apply level_notes on continuous-mode bass:**
-Continuous mode produces a much cleaner bass take → `librosa.onset_detect`
-finds significantly more transient onsets (terido: 151 in first 26 s vs 105
-in the per-clip leveled chain). With ~95 ms boost envelopes and dense
-onsets (>4-5 per second), the boosts pack into ~5-6 Hz amplitude modulation
-across the whole region — audibly identical to the slip-edit warble the
-continuous mode was supposed to fix.
-
-**Do NOT auto-apply align_phase between siblings of the same instrument** (e.g. CLEAN + PEDAL DI of the same bass take). With continuous mode the two takes naturally sum constructively without alignment; the polarity-detector can false-positive (correlation_score: -0.62 from frequency-dependent phase differences, NOT polarity) and the flip makes it WORSE.
-
-**Trade-off:** continuous mode plays the bass as the player NATURALLY performed it (not the editor's slip-edit corrections). Player timing might drift ±10-40 ms from the click in some passages. For most sessions this is preferable to the warble; if the drift is too audible, use `apply_quantize.py` (TBD tool) or fall back to per-clip with a longer `--crossfade-ms`.
+Use `--source-mode continuous` only when the editorial change is explicitly
+wanted. It groups source placements and blends overlaps; it is not exact DAW
+playback. Check timing and boundaries against the intended arrangement.
 
 ### Per-source normalize (`--normalize-per-source`)
 
@@ -147,7 +155,7 @@ The `--normalize-per-source --source-target-lufs -18` flag combination normalize
 
 Comparison:
 
-| Dimension | Per-clip `--per-clip` (default normalize) | Per-source `--source-mode continuous --normalize-per-source` |
+| Dimension | Per-clip `--per-clip --normalize` (opt-in) | Per-source `--source-mode continuous --normalize-per-source` |
 |---|---|---|
 | Normalization points (100 clips / 5 sources) | 100 | 5 |
 | Inter-section consistency | Max (every clip level) | Good (every source level) |
@@ -155,7 +163,7 @@ Comparison:
 | Boundary warble risk | yes (100+ × 5ms ≈ 500ms warble) | low (5-15 boundaries × 50ms ≈ 250-750ms blend) |
 | Best for | unstable player amplitude needing brutal leveling | natural performance dynamics + engineer section-gain fixes |
 
-**Field measurement — horgonyt 2026-05-25 (10 continuous-mode tracks: 2 bass + 8 guitars):**
+**Field measurement — session B, 2026-05-25 (10 continuous-mode tracks: 2 bass + 8 guitars):**
 
 | Metric | v3 (no per-source norm) | v4 (per-source norm) |
 |---|---|---|
@@ -167,47 +175,35 @@ Comparison:
 
 The per-source norm raised quiet sections without touching loud sections — natural compression without dynamic flattening within a take.
 
-**Use as default for slip-edited sustained instruments.** For drums (per-clip mode), the flag is ignored. For tracks with a single source-file referenced by many clips (e.g., bass with 100 clips / 1 source), the flag is a no-op (only 1 placement to normalize).
+**Use only when this editorial change is explicitly wanted.** For drums (per-clip mode), the flag is ignored. For tracks with a single source-file referenced by many clips (e.g., bass with 100 clips / 1 source), the flag is a no-op (only 1 placement to normalize).
 
 **Workflow command:**
 
 ```bash
 apply_gain --per-clip session.json --track "BASS DI CLEAN" --track "BASS DI PEDAL" \
   --track "GTR 1 FENDER" --track "GTR 1 ORANGE" \
-  --track "GTR LACI FENDER.01" --track "GTR LACI ORANGE.01" \
+  --track "GTR B FENDER.01" --track "GTR B ORANGE.01" \
   --output-dir output/<session>/tracks \
   --source-mode continuous --crossfade-ms 50 \
   --interloper-head-ms 2000 --interloper-tail-ms 800 \
   --normalize-per-source --source-target-lufs -18
 ```
 
-This is the modern default for any heavily slip-edited sustained instrument.
+This is an optional reconstruction recipe, not a default.
 
-### Polarity flip on bass DI PEDAL chains
+### Polarity and timing in bass microphone/DI blends
 
-Many bass pedal chains (overdrive, fuzz, DI-box outputs, especially anything that re-amps
-through a transformer) **invert the polarity** of the signal relative to the clean DI. If
-both the clean DI and the pedal-output DI are recorded in parallel into the interface, they
-end up anti-phase. When mixed together their fundamentals **cancel destructively**: bass body
-disappears, what's left is the high-frequency *difference* between the two takes, which
-sounds bright and clicky.
+Parallel paths can have different polarity, delay, frequency response, or
+processing. Strong negative correlation can identify an inverted duplicate,
+but does not prescribe which path to mute or shift. Inspect simultaneous active
+sections, compare the combined tone in mono and stereo, and preserve the
+intended performance timing.
 
-How to detect: load both bass tracks (clean DI + pedal DI) into the same bus. After per-clip
-gain + EQ + comp, measure the correlation between them. A correlation near **-1.0** indicates
-polarity inversion. (For non-inverted signals expect correlation near +0.5..+0.9 because the
-pedal chain changes the tone but the fundamentals still align.)
-
-Fix: add `"polarity_flip": true` to the PEDAL track in mix_config.json. Render reads this
-field per-track and inverts the signal before summing.
-
-**Known limitation of `align_phase.py`**: its polarity detector compares correlation peak
-SIGN, but does this on a short cross-correlation window (10 s by default). When the two
-signals have heavily different tone (pedal-chain compression / EQ + clean DI), the
-correlation peak is weak (e.g. correlation_score ~0.15) and the polarity check can return
-False even when the underlying signals are anti-phase. Until the detector is upgraded to
-include a separate low-frequency-only polarity test at lag=0, **manually set
-`polarity_flip: true` in mix_config.json** when the bus dry-sum LUFS is mysteriously low
-(20+ dB below the per-track LUFS — the autotrim recompute output will show this).
+`polarity_flip` in the track configuration inverts a path before summing.
+`align_phase.py` estimates a time/polarity alternative. Audition either against
+the original blend; do not flip or align from the instrument name or one global
+correlation number. If only one path is retained, investigate whether another
+path contributes useful tone before adding a substitute effect.
 
 ### Identifying clips that belong together
 
@@ -245,7 +241,7 @@ continuous audio file with silence in the gaps.
 and `GTR 1 DI.dup2.09_26.wav`). The PTX tells you exactly which file was actually used and where.
 Do NOT assume all files on disk are used — many are discarded takes.
 
-#### Naming convention in Pro Tools exports (observed in Terido session, 2022):
+#### Naming convention in Pro Tools exports (observed in session A, 2022):
 
 File format: `INSTRUMENT_NAME.XX_YY.wav`
 - `XX` = internal clip/region start index in the session
@@ -349,46 +345,23 @@ This canonical session.json is the input for `apply_gain --per-clip`.
 
 ## Gain Staging
 
-### LUFS targets by use case
+### Targets and presets
 
-| Context | Integrated LUFS | True Peak | Notes |
-|---|---|---|---|
-| Stem in mix | -18 LUFS | -3 dBTP | headroom for bus processing |
-| Pre-master mix bus | -18 to -14 LUFS | -3 to -6 dBFS peak | leave room for mastering chain |
-| Spotify delivery | -14 LUFS | -2 dBTP | platform default (Normal mode) |
-| Apple Music delivery | -16 LUFS | -2 dBTP | Sound Check normalization |
-| YouTube delivery | -13 / -14 LUFS | -2 dBTP | |
-| Amazon Music delivery | -14 LUFS | -2 dBTP | Amazon requires -2 dBTP explicitly |
-| Broadcast (EBU R128) | -23 LUFS | -2 dBTP | TV/radio standard, too quiet for music |
-| Dolby Atmos (Apple Music) | -18 LUFS | -1 dBTP | ADM BWF 48kHz/24-bit + stereo fallback required |
+`tools/master_mix.py` contains delivery presets. Streaming LUFS defaults and the
+CD loudness value is a creative starting point, not an acceptance test (the
+Red Book has no loudness specification). `vinyl_pre` has no LUFS target: it is
+peak-normalized to -3 dBTP with no limiter, and sub-mono is opt-in
+(`--vinyl-elliptical`), because the cutting engineer decides those. Broadcast
+uses the selected EBU loudness requirement. Its -2 dBTP ceiling is a
+conservative project choice within the EBU R128 -1 dBTP maximum. When a master
+target is louder than -14 LUFS, the default ceiling drops to -2 dBTP
+(Spotify/SoundCloud guidance for loud masters).
+CD export is 44.1 kHz/16-bit; Apple stereo export preserves supported native
+sample rates. Verify destination-specific requirements before delivery.
 
-**Key rule:** -23 LUFS is broadcast standard, NOT a music mixing target. Use -18 for stems.
-
-### apply_gain.py modes and presets
-
-**Two modes:**
-
-`--per-clip session.json` — clip gain + assembly. Normalizes each clip to
-`per_clip_target_lufs` (default -18 LUFS, set in config.toml). This is the PRIMARY
-gain-staging step. Research confirms this is standard DAW practice: clip gain runs
-before any plugins so compressors/EQs receive consistent input levels.
-
-`--per-channel file.wav` — single gain applied to assembled stem. Use for delivery
-normalization or when receiving pre-assembled stems. Presets:
-
-| Preset | Target LUFS | True peak limit | Use when |
-|---|---|---|---|
-| `stem` | -18 LUFS | -1 dBTP | individual stem going into a mix |
-| `premix` | -18 LUFS | -3 dBTP | alias for stem, more conservative peak |
-| `spotify` | -14 LUFS | -2 dBTP | final delivery to Spotify |
-| `apple` | -16 LUFS | -2 dBTP | final delivery to Apple Music |
-| `amazon` | -14 LUFS | -2 dBTP | final delivery to Amazon Music |
-| `broadcast` | -23 LUFS | -2 dBTP | TV/radio/podcast delivery |
-
-**Key insight from research (2026):** per-clip normalization + per-channel gain staging
-is redundant if the per-clip target matches the stem target. After a correct `--per-clip`
-pass at -18 LUFS, the assembled stem is already at mix-ready levels — `--per-channel`
-is only needed for final delivery to a specific platform.
+`apply_gain --per-clip` preserves original levels by default. `--normalize`
+uses the configured clip target. `--per-channel` sets whole-stem gain. None of
+these operations establishes mix readiness by itself.
 
 ### 2026 trend: smart / preventive gain staging
 
@@ -406,270 +379,54 @@ is only needed for final delivery to a specific platform.
 - Plugin unity gain: compensate output after each plugin so in ≈ out level-wise
 - Individual track headroom before plugins: aim for -18 to -12 dBFS peak
 
-### Bus auto-trim — the per-bus gain-staging invariant
+### Optional bus auto-trim
 
-**Invariant:** every bus's dry-sum output (volume_db = 0) sits at **-18 LUFS**,
-regardless of how many stems it contains.
-
-**Why this matters.** Per-clip normalisation calibrates each clip to -18 LUFS.
-When a bus sums N stems, the bus integrated level rises roughly by `10·log10(N)`
-(more for correlated content, less for uncorrelated). A 15-stem drum bus
-therefore sits ~6–10 LUFS hotter than a 2-stem bass bus, even though every
-underlying clip was normalised identically. Without bus-level compensation,
-the master sum becomes peak-hot and the limiter has to crush it — which is
-where "túlvezérlés / recsegés" complaints originate. A style profile's
-`default_bus_volume_db` cannot fix this on its own: it assumes a single-stem
-baseline.
-
-**How render_mix solves it.** The bus has two gain fields:
-
-- `auto_trim_db` — calibration, written by `--generate-config` or
-  `--recompute-autotrim`. Brings the bus dry-sum output to -18 LUFS by
-  measuring the actual sum of active stems (per-track volume_db + pan + child
-  bus contributions, in topological order).
-- `volume_db` — taste, written by the style profile or the user. Pure relative
-  offset on top of the calibration.
-
-At render time, **effective gain = auto_trim_db + volume_db**. With volume_db = 0
-on every bus, every bus output sits at -18 LUFS at the bus's `final` stage.
-
-**Operational rules.**
-
-1. After `--generate-config`, the `auto_trim_db` field is already present —
-   trust it; do not manually compensate "drums is too hot" by lowering its
-   `volume_db`. That used to be the workaround for the missing calibration; it
-   now compounds with the auto-trim and pushes the bus way too quiet.
-2. If the user changes `active: true/false` on tracks **after** the config was
-   generated, re-run `python tools/render_mix.py mix_config.json --recompute-autotrim`.
-   The flag is surgical — only `auto_trim_db` is touched, everything else
-   (active flags, volume_db, pan, presets, sends) is preserved.
-3. The style profile's `default_bus_volume_db` populates `volume_db` —
-   `modern_rock` gives `vocal_lead: +2.0`, `guitar: -3.0`, etc. on top of the
-   calibration. These remain valid: they shape the relative balance once the
-   bus levels are unified.
-4. Master target after auto-trim: with 3–4 top-level buses each at -18 LUFS,
-   the master sum lands around -10 to -13 LUFS pre-norm. LUFS normalization to
-   -14 then applies a modest +1–4 dB; the limiter does ≤2 dB GR on transients.
-
-**Don't reach for `volume_db` to fix peak-hot drums.** -18 LUFS drums with
-22 dB crest factor produce peaks at ~0 dBFS — that's the nature of drums, not
-a bus level problem. If the master limiter still works too hard:
-
-- First, check `mix_report.json` `bus_peaks` — if a single bus dominates the
-  master peak, look at its bus comp preset.
-- For drums: the `comp_drum_bus` preset (4:1, -10 dB) does ~5 dB GR and tames
-  peaks. `comp_drum_bus_gentle` (2:1, -8 dB) does ~2.5 dB GR and preserves
-  more dynamics. Pick based on what the music needs, not on the peak number.
-- Adding `master.clipper` is the next move if peaks still exceed -3 dBFS at
-  master sum. The clipper's relevance check requires LRA ≥ 4 LU at the
-  measurement point, so if the upstream chain already squashed dynamics, the
-  clipper SKIPS — that is correct behavior, do not force.
-
-**What auto-trim does NOT fix.**
-- Low LRA from per-clip + per-bus compression. The autotrim doesn't touch
-  dynamic range; it only moves levels.
-- Phase-coherent doubling (e.g. `BASS DI CLEAN` + `BASS DI PEDAL` from the
-  same source). The autotrim *compensates* for the +3–6 dB doubling in the
-  bus sum (it sees the actual loudness), but the comb-filter coloration
-  between the two tracks remains. `align_phase.py` and/or deactivating one
-  copy is the right fix for that, surfaced by `phase_warnings` in mix_report.
-- Master peak limiting on percussive material. Drums at -18 LUFS just have
-  hot peaks; nothing in the bus chain can change that without compression.
-
----
+`--generate-config --auto-trim` calibrates dry bus sums to -18 LUFS. This changes
+relative musical balance and is only an optional starting point. Default config
+generation preserves zero auto-trim. `volume_db` remains editable for taste.
+Do not automatically recompute calibration after an approved balance change.
+Bus processing changes loudness, so dry calibration is not a final-output invariant.
 
 ### Mix vs master separation — premaster handoff
 
 **Invariant:** `render_mix` produces a clean **premaster**, NOT a finished
-master. The master phase (`master_mix.py`) owns LUFS normalization, brick-
-wall limiting, clipper, ISP correction, M/S processing, and dither.
+master: 32-bit float, peak-normalized (default -3 dBFS), no limiter. The master
+phase (`master_mix.py`) owns LUFS normalization, true-peak limiting, clipper,
+M/S processing, and dither.
 
 **Why.** Stacking mastering moves at the mix stage and then running them
 again at the master stage produces a **two-stage limiter cascade**: every
 transient is flattened twice, which is the literal definition of "doubled
 limiting distortion" that mastering forums consistently warn against.
-This was an actual bug in the pipeline before — the user reported "néha
-túlvezérel egy-két hangszert", and the trace was: drum bus peak at +1.8
-dBFS → mix master sum +3.1 dBFS → mix limiter does ~5 dB peak GR → master
-clipper -2 dB → master limiter -1.5 dB ISP correction → master post-LUFS
--2.9 dB. Cascading peak-shaper at both stages on every chorus transient.
+Historical sessions exposed excessive cumulative peak reduction when both the
+mix render and mastering stage limited the same transients. Compare gain reduction
+across stages rather than treating every stage as an independent loudness task.
 
-**The premaster handoff numbers** (matches SOS / LANDR / iZotope / Major
-Mixing 2025–2026 best practice):
+The default premaster render uses optional glue compression, EQ, and a scalar
+peak adjustment to -3 dBFS. It bypasses delivery limiting and loudness matching.
+This is a project workflow, not a rule forbidding artistic mix-bus processing.
+Keep intentional processing that defines the sound and document it for mastering.
+`master.premaster_mode: false` retains the older combined mix/master path.
 
-| Stage | Integrated LUFS | Peak / TP | Limiter? |
-|---|---|---|---|
-| **Premaster** (`mix.wav`) | ~-18 LUFS (emergent from autotrim + glue comp) | **-3 dBFS peak**, no TP ceiling | **NO** |
-| Master (`master_<format>.wav`) | -14 LUFS (Spotify), -16 (Apple), -10 (CD), -12 (vinyl_pre) | -1 dBTP per format | YES |
+`mix_report.json` identifies the render stage. Health checks distinguish peak
+safety from advisory loudness, dynamics, width, and tonal measurements.
 
-**Premaster chain** at the master block (post-bus-sum):
-1. Glue comp — **gentle** (1.5:1 to 2:1 ratio, threshold -10 dB, 1-2 dB GR average)
-2. Master EQ — surgical tonal only (HP, gentle shelves). NOT a loudness shaper.
-3. **Peak normalize to `peak_target_dbfs` (-3 dBFS default)** — single scalar
-   gain, no limiter, no clipper. Preserves all dynamics; the master phase
-   does the loudness work.
+### Premaster handoff
 
-**What is FORBIDDEN at the mix-render stage**:
-- `Limiter` (brick-wall, ISP) — mastering's job
-- LUFS normalize to a delivery target (-14, -16, etc.) — mastering's job
-- Soft / hard clipper — mastering tool (a "make-it-hit" colorant)
-- M/S processing — mastering / wide-stage tool
-- Multiband comp — mastering tool
+Preserve the approved sound, edits, and channel layout. Check finite samples,
+clipping, and agreed headroom. The default -3 dBFS peak is a convenience; there
+is no mandatory -18 LUFS or LRA >= 6 LU gate. Lowering a loud premaster is a
+transparent gain change, not intrinsically a loss of quality. Diagnose distortion
+by comparing stages and listening; loudness/LRA alone cannot identify its cause.
 
-**What is OK at the mix-render stage**:
-- Subtle bus glue comp (1-2 dB GR) — mix-phase bus shaping, not loudness
-- Surgical EQ (HP @30, gentle shelves, narrow notches) — tonal, not loudness
-- Per-bus comp / EQ / sat / reverb — bus-level processing is part of mixing
-- Peak normalize at the end — just a gain stage, not a transformation
+### Diagnose clipping at the relevant stage
 
-**Drum bus comp guidance** (Music Guy Mixing 2025): 1-2 dB GR average, 2-3 dB
-max at busiest moments. The default preset is `comp_drum_bus_gentle` (2:1,
--8 dB threshold). Switch to the harder `comp_drum_bus` (4:1, -10 dB) only if
-the kit *genuinely* needs heavier glue; otherwise let mastering's glue comp
-do the song-level tightening.
-
-**Opt-out** (legacy): set `master.premaster_mode: false` in mix_config.json
-to restore the historical combined mix+master chain (with limiter, LUFS
-norm, clipper). Use ONLY for standalone listening / demo bounces that
-won't be mastered downstream.
-
-**Detection.** `mix_report.json` carries the `mix_stage` field ("premaster"
-or "master"). `mix_health.py` autodetects this and applies the correct gate
-thresholds (premaster: ±2 LU around -18 LUFS, peak ≤ -3 dBFS; master:
-±0.5 LU around -14 LUFS, TP ≤ -1 dBTP).
-
-**Sources** (2025–2026 best practice):
-- Sound on Sound: "Should I use limiters before the mix bus?" — NO
-- Sound on Sound: "Why shouldn't I use mastering limiting during mixing?" — doubled distortion
-- LANDR Pre-Mastering Guide — -16 LUFS, -6 to -3 dBFS peak
-- iZotope: Headroom for mixing and mastering
-- Mat Leffler-Schulman Mastering: "Should I Leave the Limiter on the Mix Buss Before Mastering?" — NO
-- Music Guy Mixing: Drum Bus — 1-2 dB GR average
-
-### Premaster handoff — the concrete numeric target table
-
-The premaster (the stereo .wav handed from mix to mastering) must meet these
-industry targets BEFORE running `master_mix.py`. If any target is missed, fix
-the MIX, not the master — mastering cannot recover what the mix gave up.
-
-| Metric | Sweet spot | Acceptable | Hard fail |
-|---|---|---|---|
-| **Sample peak** | -3 dBFS | -6 to -3 dBFS | > -1 dBFS |
-| **True peak** | < -3 dBTP | < -1 dBTP | ≥ -1 dBTP |
-| **Integrated LUFS** | -18 to -20 LUFS | -25 to -16 LUFS | > -14 LUFS |
-| **LRA** | 8-12 LU | **≥ 6 LU** | < 4 LU |
-| **Crest factor** | 14-18 dB | 12-20 dB | > 22 dB suggests over-aggressive comp leaving rare loud peaks |
-
-Why these numbers:
-- **Peak -3 dBFS**: leaves 3 dB headroom for master EQ/comp/exciter without float-summing clipping. Above -1 dBFS the master clipper has nothing to clip and the limiter has to do all the work alone (audibly bad).
-- **TP < -3 dBTP**: streaming platforms limit to -1 or -2 dBTP after their normalization. Premaster at -3 dBTP gives mastering 2+ dB margin.
-- **LUFS -18 to -20**: mastering chain adds +4 to +6 dB LUFS lift. Starting at -20 LUFS → -14 LUFS spotify needs +6 dB lift (audibly OK). Starting at -16 LUFS only leaves +2 dB lift before clipping (master can't do much). Starting at -10 LUFS mastering must REDUCE — sounds bad.
-- **LRA ≥ 6 LU**: the hardest to hit and the most consequential. Below 6 LU the mix is already over-compressed; mastering can only add MORE comp (worse) or accept the dynamics loss. Above 12 LU under-compressed; mastering will do heavy glue (less control).
-- **Crest 14-18 dB**: combined with LRA — too-high crest with low LRA means rare loud transients above a flat sustained level. Master clipper hits those transients hard while the body doesn't move = distorted transients, dull body.
-
-**The LRA recovery caveat (terido 2026-05-23 lesson):**
-If per-track comps (kick / snare / tom / OH / guitar / vocal) are already
-baked into `assembled_eq_comp.wav` files, bus + master decompression CANNOT
-recover LRA. Tried softening drum bus comp (`comp_drum_bus_gentle` →
-`comp_drum_bus_minimal` 1.5:1), softening bass per-track comp
-(`comp_bass_di` 3:1 → `comp_bass_di_gentle` 2:1), removing master.comp,
-removing drum bus saturation. Result: LRA went from 3.33 to 3.39 LU
-(unchanged), crest went UP from 21.67 to 23.81 dB. The decompression
-released TRANSIENT peaks but didn't move the BODY level, so dynamics got
-WORSE for the master clipper.
-
-When LRA is locked low because per-track comps are baked, alternatives:
-1. **Accept the LRA limit** as a constraint (modern metal often sits at 3-5 LU)
-2. **Master with lower LUFS target** (-16 instead of -14) → less LUFS lift needed → less clipping
-3. **Use a master preset without clipper** (e.g. `modern_rock_spatial_noclip`) — accept slightly louder peaks for no clipper distortion
-4. **Multiband comp master** (`modern_rock_mb` preset) — handles tall-peak / low-body material more sympathetically
-5. **Full per-track rebake** — the only true LRA recovery, but hours of work
-
-**Diagnostic — perceived "overdrive" on master:**
-Don't reach for a different preset first. Check the premaster's LRA. If LRA < 6 LU AND the master clipper is doing > 5 dB of work above its threshold, the perceived overdrive is the soft clipper crushing transient peaks while sustained level barely moves. Root cause = mix compression, not master clipper.
-
-### Overdrive protection checklist (run AFTER every render, BEFORE asking user to listen)
-
-After every `render_mix --render`, parse `mix_report.json` and verify these 4 hard gates. If any fail, fix the MIX (lower hot bus `volume_db`) before delivery or A/B comparison — don't waste user listening time on a chain that's audibly distorted.
-
-| Gate | Threshold | Failure means |
-|---|---|---|
-| **Per-bus `final` peak** | ≤ 0 dBFS (sustained content) / ≤ +0.5 dBFS (drum bus only) | Master soft clipper will distort that bus's content audibly |
-| **Master `sum_in`** | ≤ +3 dBFS | Master clipper > 5 dB above threshold = perceived overdrive |
-| **Master `verdict`** | `[OK]` | Otherwise master chain itself flagged a problem |
-| **Limiter ISP correction** | ≤ 2 dB | Above 2 dB ISP = audibly squashed dynamics |
-
-**When a gate fails:**
-1. Sort bus_peaks by `final` desc; identify the hot bus(es)
-2. **For multiple children of a parent bus, lower the PARENT `volume_db`** (cleaner than per-child individual adjustments) — typical -2 dB on the parent if 2 children are >0 dBFS
-3. **For a single isolated bus** (e.g. drums alone hot), lower that bus's `volume_db` by enough to bring final below 0 dBFS
-4. Re-render, re-check
-
-**Why this matters:** without this gate, the perceived overdrive (which sounds like the source content being distorted, not "loud") wastes A/B iterations. The user reports "guitars are overdriven", we try multiple master presets, eventually arrive at "lower the buses" — all of which could be skipped if we caught it at render time.
-
-**Field reference — terido v14c (2026-05-24):**
-- gtr_1 final +1.5 dBFS, gtr_laci 0.0 dBFS, drums +2.4 dBFS
-- master sum_in +3.6 dBFS (5.6 dB above -2 clipper threshold)
-- User perception confirmed BEFORE I noticed the data
-- Fix: guitar parent `volume_db` -1 → -3, bass -3 → -4
-- Result: master sum_in dropped to ~+0.5 dBFS, clipper now works at 2-3 dB above threshold
-
-**Quick check snippet** — only check TOP-LEVEL buses (sub-buses are attenuated by their parent before reaching master, so their > 0 dBFS peaks are not master-clipping risks):
-
-```python
-import json
-config = json.load(open('output/<session>/mix_config.json'))
-r = json.load(open('output/<session>/mixes/mix_report.json'))
-top_level = {b for b, cfg in config['buses'].items() if cfg.get('parent_bus') is None}
-issues = []
-for bus, st in r['bus_peaks'].items():
-    if bus not in top_level: continue  # sub-buses skipped — parent attenuates them
-    cap = 0.5 if bus == 'drums' else 0.0
-    if st['final'] > cap:
-        issues.append(f'{bus} (top) final {st["final"]:+.1f} dBFS (cap {cap:+.1f})')
-if r['master_peaks']['sum_in'] > 3:
-    issues.append(f'master sum_in {r["master_peaks"]["sum_in"]:+.1f} dBFS (>+3)')
-if issues:
-    print('OVERDRIVE PROTECTION FAILED:'); [print(f'  - {i}') for i in issues]
-else:
-    print('Overdrive protection: PASSED')
-```
-
-Runs in <1 s. Should be part of the post-render workflow, not an optional step.
-
-**Common false positive:** child buses (`gtr_1`, `gtr_laci`, `gtr_terka` with `parent_bus: guitar`) often have final >0 dBFS because the parent's `volume_db` and `auto_trim_db` get applied AT the parent level, not propagated to the children. The children's `bus_peaks` reflect their own output before the parent's gain stage. If the parent's `final` is OK, the children's >0 dBFS is normal float-domain internal state — not a real clipper risk. Only check `parent_bus: null` buses.
-
-Concrete signature: per-band crest factor at 250 Hz - 2 kHz drops 0.2-0.3 dB
-vs a no-clipper control render. Use `master_mix.py --master-preset
-modern_rock_spatial_noclip` as a diagnostic: re-master the same premaster
-with no clipper, then compare. If the noclip version has noticeably less
-"overdrive" feel, the clipper IS the source. Fix at premaster level by
-lowering hot bus volume_db OR by switching to the noclip master preset for
-delivery (accepts slightly louder sample peaks for cleaner mid-band crest).
-
-**Diagnostic — perceived "ear/head fatigue" on extended listening:**
-The cumulative effect of multiple upper-mid + air boosts. Equal-loudness
-contour: the ear's most-sensitive band is 2-5 kHz — a +1 dB boost there
-feels like a +3 dB boost perceptually.
-
-Check the cumulative budget in the chain:
-- Guitar bus EQ presence boost (`+1.5 dB @ 3.5 kHz`)
-- Master EQ highshelf (`+1.5 dB @ 12 kHz`)
-- Master side EQ peak (`+1 dB @ 2.5 kHz`)
-- Master side EQ highshelf (`+3 dB @ 8 kHz`)
-- Master exciter (`mix 0.10` adds harmonics above 200 Hz)
-
-These STACK. A mix can easily end up with 4-5 dB of cumulative 2-8 kHz
-boost without any single stage feeling excessive. Effects:
-- Spectral centroid > 4500 Hz (bright side)
-- 2-8 kHz band sits within -2 to -3 dB of the modern_rock industry target
-  while the other bands sit -5 to -7 dB below — the high band relatively
-  stands out by 3-4 dB
-
-Fix: use the `modern_rock_spatial_dark` master preset — same spatial
-benefits (sub-mono <200 Hz, stereo_width 1.05) but ALL top emphasis dialed
-back (side highshelf +3 → +1, peak @ 2.5k removed, master EQ shelf +1 →
-+0.5, exciter mix 0.10 → 0.05). Drops spectral centroid by ~150-200 Hz.
+Floating-point buses can exceed 0 dBFS without numerical clipping. Their level
+matters when feeding a nonlinear processor or an integer export. A bus peak,
+master sum, or amount of peak attenuation alone cannot prove audible distortion.
+Inspect processor input/output and compare a level-matched bypass before changing
+the mix balance. Scaling an internal float bus down is different from recovering
+an already clipped recording. Exported integer files must remain within range.
 
 ### Master spatial preset family — when to use which
 
@@ -678,19 +435,17 @@ The `master_mix.py` `MASTERING_PRESETS` dict has a family of `modern_rock_spatia
 | Preset | Sub-mono on side | Top side EQ | Stereo width | Exciter mix | Clipper | Use when |
 |---|---|---|---|---|---|---|
 | `modern_rock` | none | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | baseline modern rock master |
-| `modern_rock_spatial` | HP @ 150 Hz | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | first spatial increment — adds sub-mono for vinyl compat |
+| `modern_rock_spatial` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | first spatial increment — adds side high-pass (sub-mono) |
 | `modern_rock_spatial_v9` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | **0.12** | soft -2 dB | Leprous/Wheel crisp top direction |
 | `modern_rock_spatial_v10` | HP @ 200 Hz | **+1 dB peak @ 2.5k + 3 dB shelf @ 8k** | **1.05** | 0.10 | soft -2 dB | full spatial: wider sub-mono, presence boost on side, stereo width bump |
 | `modern_rock_spatial_dark` | HP @ 200 Hz | +1 dB shelf @ 8k only | 1.05 | **0.05** | soft -2 dB | spatial benefits BUT top dialed back — for ear-fatigue cases |
 | `modern_rock_spatial_noclip` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | 0.10 | **NONE** | diagnostic — isolates clipper-induced distortion |
 
-**Decision tree:**
-- "Master sounds OK but I want subtle spatial cohesion" → `modern_rock_spatial`
-- "Want pronounced width + bright top (Leprous/Wheel target)" → `modern_rock_spatial_v9` or `_v10`
-- "Got ear fatigue after extended listening" → `modern_rock_spatial_dark`
-- "Hearing overdrive distortion, suspect clipper" → diagnose with `_noclip`, then either cool hot buses or stay with noclip for delivery
-
----
+These are historical chain variants. Names and descriptions do not establish
+fitness for Tool, Wheel, any genre, or a fatigue complaint. Read the actual
+settings, choose the smallest relevant change, and compare against a minimally
+processed baseline. Switching presets changes several variables and cannot
+isolate a clipper fault unless all other settings are identical.
 
 ## Panning convention by band size
 
@@ -699,7 +454,7 @@ pan values shipped in `tools/style_profiles/<name>.json` `default_bus_pan` are
 applied automatically by `render_mix --generate-config --style NAME`. Below is
 the rationale; deviate intentionally, not by accident.
 
-**Foundation buses are always center** regardless of style:
+**Common starting point:** center foundation buses, then assess intentional stereo sources and arrangement:
 - `drums` parent: 0 (kick / snare / tom / hi-hat are individually placed via
   per-track pan, but the bus output is centered; the L/R stereo width comes
   from the OH and ROOM mic positions)
@@ -708,31 +463,34 @@ the rationale; deviate intentionally, not by accident.
 - `vocal_lead`: 0 (the listener locates the singer in the centre of the
   stereo image; off-centre lead vocal is reserved for arrangement effects)
 
-**Rhythm guitar buses are panned by number of guitarists:**
+**Rhythm guitar buses are panned by number of guitarists.** Guitar tracks
+named `GTR <player> <mic>` get one sub-bus per player (`gtr_<player>`); a `GTR`
+name without a player token goes to the centred `gtr` sub-bus. The style
+profile's `guitar_player_pans` list is assigned in sorted player order:
 
 | Active rhythm guitar buses | Convention | Example pans |
 |---|---|---|
-| **1 guitarist** | Center (or slight ±0.2) | `gtr_1: 0` |
-| **2 guitarists** (classic 2-guitar wall) | Hard L/R | `gtr_1: -0.6, gtr_laci: +0.6` |
-| **3 guitarists** | Two wide + center | `gtr_1: -0.6, gtr_laci: +0.6, gtr_terka: 0` |
+| **1 guitarist** | Center (or slight ±0.2) | `[0]` |
+| **2 guitarists** (classic 2-guitar wall) | Hard L/R | `[-0.85, +0.85]` |
+| **3 guitarists** | Two wide + center | `[-0.85, +0.85, 0]` |
 | **4+ guitarists** | Spread evenly | -0.7, -0.3, +0.3, +0.7 (consider whether overdubs are warranted) |
 
-**Genre-specific spread for 2 guitarists:**
+**Genre-specific spread for 2 guitarists (`guitar_player_pans`, project preferences):**
 
-| Style | `gtr_1` | `gtr_laci` | Character |
+| Style | 1st player | 2nd player | Character |
 |---|---|---|---|
-| `punchy_modern_rock` | -0.7 | +0.7 | Very wide, aggressive |
+| `punchy_modern_rock` | -1.0 | +1.0 | Very wide, aggressive |
+| `modern_rock` | -0.85 | +0.85 | Standard wide rhythm wall |
 | `tool_inspired` | -0.65 | +0.65 | Wide, dark image |
-| `modern_rock` | -0.6 | +0.6 | Standard wide rhythm wall |
-| `classic_rock` | -0.5 | +0.5 | Slightly narrower, band-feel |
-| `pop` | -0.4 | +0.4 | Conservative, vocal-centric |
+| `classic_rock` | -0.6 | +0.6 | Slightly narrower, band-feel |
+| `pop` | -0.5 | +0.5 | Conservative, vocal-centric |
 | `jazz_acoustic` | -0.3 | +0.3 | Narrow, intimate placement |
 | `hip_hop` | 0 | 0 | Centered, drum-and-bass-led |
 
 **When NOT to pan wide (even with multiple rhythm guitar buses):**
 
 - The 2 guitar buses are the **same player in different sections** of the song
-  (e.g. terido's `gtr_1` plays intro 11-30s, `gtr_laci` plays body 30-210s —
+  (e.g. one session's `gtr_1` played the intro 11-30s and `gtr_2` the body 30-210s —
   they never sound simultaneously, so panning has nothing to separate, just
   produces "switching from left to right" between sections). Detection: scan
   the timeline activity per bus; if pairwise overlap < 10 % of either bus's
@@ -741,7 +499,7 @@ the rationale; deviate intentionally, not by accident.
   Panning these wide just produces an L/R mono-ish image with comb filtering
   at the centre. Either commit to keeping them stacked (center) or true-double
   them with detuning / different takes before panning.
-- A **single overdub for atmosphere/lead** (e.g. gtr_terka with only 17 s of
+- A **single overdub for atmosphere/lead** (e.g. a third guitar bus with only 17 s of
   activity acting as a solo or accent) → center, not panned. Lead lines and
   solos traditionally sit center.
 
@@ -829,14 +587,14 @@ close mics with drummer-perspective OH = phase confusion + comb filtering.
 Circle, some classic prog use drummer perspective; Periphery, TesseracT,
 Karnivool, Leprous, Wheel, Haken — audience perspective is the standard.
 
-### Industry LCR pan values (researched 2025)
+### Historical LCR pan preferences (2025)
 
 Modern rock production frequently uses **hard pan (85-100%)** for double-
 tracked rhythm guitars, often the LCR (Left-Center-Right) convention. The
 shipped style profile values reflect this — `modern_rock` at ±0.85 and
 `punchy_modern_rock` at ±1.0 (full LCR). Sources: Nail The Mix, Sound on
 Sound, Producer Society, iZotope. Earlier internal numbers (±0.6) were
-more conservative than industry standard and got bumped after a real-world
+more conservative than that session's later preference and got bumped after a real-world
 mix revealed the centre column was crowded by guitars + bass + drums.
 
 ---
@@ -881,7 +639,7 @@ in the chain (amp hum, pick noise, room reflections) by the same factor (2,000�
 high-gain). The result is that the 5th-percentile RMS of a distorted amp recording is
 dominated by the amp's own sustain and character, not by unwanted noise.
 
-**Typical values observed in Terido session (2026):**
+**Typical values observed in session A (2026):**
 - Clean DI guitar (no amp processing): noise floor -38 dBFS, DR 7–8 dB
 - Distorted amp mic recording (SM57, ribbon): noise floor -18 to -19 dBFS, DR 2–3 dB
 
@@ -928,7 +686,7 @@ it is the distorted guitar's sustained amp character between notes.
 | `lowshelf` | boosts/cuts all below hz | body/warmth control, sub weight |
 | `highshelf` | boosts/cuts all above hz | air/sparkle, high-end rolloff |
 
-**Phase mode:** `sosfiltfilt` (zero-phase, forward+backward) — no phase shift. Correct for offline mixing. Linear phase avoids pre-ringing artifacts on transients vs zero-latency minimum phase modes — for offline processing they are equivalent.
+**Phase mode:** minimum phase (`sosfilt`) is the default. `--phase zero` runs the filter forward and backward with half the dB gain per pass, so the magnitude matches the requested filter with no phase shift. Zero-phase filtering is non-causal and therefore pre-rings ahead of transients; minimum-phase filtering does not pre-ring but shifts phase. Neither is universally better: compare on transient-rich material.
 
 **Parameter notation:**
 - `q` — bandwidth control. High Q (20-50) = narrow/surgical. Low Q (0.5-2) = broad/musical.
@@ -1008,52 +766,37 @@ Presets live in `tools/presets/`. Apply with `apply_eq.py --preset NAME`.
 
 - HP at 150 Hz (remove low-end mud — let close mics handle the low end)
 - Cut 280 Hz -3 dB (undefined low-mid buildup)
-- EQ before compression — never compress first (creates dark, muddy character)
+- Compare EQ before and after compression: order changes what drives the detector and the resulting tone.
 
-### Drum internal balance — shells vs cymbals
+### Drum internal balance - kit relationships
 
-The single most common drum-mix mistake: **cymbals too loud relative to
-shells**. Modern prog/metal industry standard (research synthesis from
-Develop Device, Nail The Mix, MetalRecording.net, Mastering.com):
+Classification: engineering technique, not a required shell-to-cymbal level gap.
+Balance close mics, overheads, and rooms by their contribution to the whole kit.
+Overheads may carry essential shell body and space. Do not high-pass them at a
+fixed frequency or mute recorded rooms merely because the genre is metal.
 
-- **Kick, snare, toms** all hit the SAME level on meters (~-10 to -12 dBFS peak)
-- **Hi-hat, ride, crash close mics + overheads + room** sit SIGNIFICANTLY lower, ~-24 dBFS or even lower
-- **Differential: 10-12 dB between shells and cymbals/OH**
+Compare snare/overheads, kick/overheads, kick/snare, then toms and rooms. Test
+polarity and timing alternatives in context and in mono; maximum correlation
+is not necessarily the best sound. Joe Barresi describes this contextual
+approach in [his Tool interview](https://www.waves.com/in-the-studio-with-tool-and-evil-joe-barresi)
+(2019-11-07; verified 2026-09-09; high confidence as a description of his method,
+not a universal rule). Recording geometry and arrangement are exceptions to any
+fixed alignment prescription.
 
-In LUFS terms (post-EQ, post-comp file-level), the canonical relationship:
-
-| Category | Target effective LUFS | Notes |
-|---|---|---|
-| Kick / Snare / Tom | ~-22 to -27 LUFS | reference shells |
-| OH (ribbon or condenser) | ~-33 to -35 LUFS | ~10 dB below shells |
-| Close cymbal mics (hihat / ride / crash) | ~-32 to -35 LUFS | match OH so cymbal content is consistent across paths |
-
-**Why cymbal restraint matters:**
-- Cymbals come into the mix via TWO paths: close cymbal mics AND OH bleed
-- If close cymbal mic is at 0 dB volume_db while OH is at -3 dB, the cymbal hits get summed twice at near-equal level → cymbal energy is amplified 4-6 dB perceptually
-- This drives the spectral centroid up (>4500 Hz = bright side / ear-fatiguing)
-- And the 2-8 kHz crest factor drops as the master clipper has to soft-clip cymbal peaks
-
-**Field measurement (terido 2026-05-24):** initial v14b had HIHAT/RIDE/CRASH at vol_db 0, effective LUFS -28 (only 5 dB below kick). Industry target said -33 LUFS = 11 dB below kick. Fix: vol_db 0 → -5 on the three cymbal close mics. Result: cymbal effective LUFS landed at -33, matching OH level (-34). Spectral centroid dropped from 4250 to closer to 3900 Hz.
-
-**Diagnostic — "cymbals too prominent" perception:**
-1. Render premaster + stems
-2. Measure each drum track's file LUFS (run `analyze.py` on each)
-3. Compute effective LUFS = file LUFS + bus volume_db + per-track volume_db
-4. Group by category and average
-5. If cymbal/OH category is < 10 dB below shells category → cut cymbal volume_db
-
----
+Use matched passages to assess attack, body, sustain, cymbal decay, and room
+contribution. There is no universal 10-12 dB shell/OH relationship. Integrated
+track loudness also depends on how often an instrument plays; do not average it
+into an automatic fader correction.
 
 ## True Peak vs Peak
 
-- **Sample peak (dBFS)**: highest sample value — what DAW meters typically show
-- **True peak (dBTP)**: inter-sample peak — can exceed sample peak after D/A conversion
-- Always limit true peak to -2 dBTP for streaming delivery — Amazon Music requires this explicitly; lossy
-  codec inter-sample peaks (AAC, Ogg Vorbis) can exceed the sample ceiling, so -2 dBTP gives necessary margin
-- During mixing: -3 dBTP gives safe headroom
+Sample peak measures stored samples; reconstructed waveform peaks may be higher.
+Use the agreed delivery ceiling and current platform recommendations from the
+source table. This project's premaster peak setting is a preference. A single
+-2 dBTP rule does not apply to every platform, format, and loudness choice.
 
----
+Measure decoded output and, when applicable, actual codec round trips. An
+oversampled WAV peak estimate does not test an encoder or prove audible clarity.
 
 ## Reverb in a Rock Mix
 
@@ -1144,7 +887,7 @@ of "one room". The principle: **feel** the reverb, don't **hear** it.
 3. Master the reverb-treated premaster with `master_mix.py` — the LUFS norm + limiter will compensate for any slight level shift from the wet content
 4. Compare against the no-master-reverb master at the same -14 LUFS — the wet version should sound slightly more "glued" without obvious reverb tails
 
-**When master reverb backfires (terido v11 lesson):**
+**When master reverb backfires (session A v11 lesson):**
 If the mix has cumulative top-emphasis (e.g. side highshelf +3 dB @ 8k, guitar EQ +1.5 dB @ 3.5k, exciter mix 0.10), adding master reverb at wet 0.07 stacks 300 Hz+ content into the master clipper at +5-7 dB above threshold → audible "overdrive" perception. Fix: drop wet to 0.03-0.04 OR reduce the cumulative top emphasis upstream OR use the `modern_rock_spatial_dark` master preset (drops side highshelf +3 → +1, drops master EQ shelf +1 → +0.5, halves exciter mix).
 
 **Sources:**
@@ -1178,7 +921,7 @@ Slap bass needs a different EQ than fingerstyle:
 
 **Tape (symmetric tanh):** Both halves clip equally. Generates odd-order harmonics (3rd, 5th) plus some even. Less colored than tube. Good for bus saturation (drums, guitars) — adds cohesion without tonal shift.
 
-Both are RMS-normalized in this pipeline: they change the spectral content (add harmonics) without changing the perceived level.
+Both are RMS-normalized in this pipeline. Equal RMS does not guarantee equal perceived loudness after their spectral changes; level-match auditions.
 
 ---
 
@@ -1196,10 +939,10 @@ This project treats mix and master as **two separate phases**:
 | Mix | stems + mix_config.json | mix.wav | `render_mix.py` |
 | Master | mix.wav | master_<format>.wav | `master_mix.py` |
 
-The `render_mix.py` master chain (glue comp + guarded clipper + guarded
-M/S + EQ + LUFS norm + ISP-aware limiter) is **the mix engineer's
-polish**, not the master pass. It runs inside the render to give the mix
-a coherent shape. The actual mastering pass is `master_mix.py`, run
+In premaster mode (default) the `render_mix.py` master chain is only glue
+comp + EQ + peak normalization: **the mix engineer's polish**, not the master
+pass. The legacy chain (`premaster_mode: false`) adds guarded clipper, guarded
+M/S, LUFS norm and a true-peak limiter; avoid it when the mix will be mastered. The actual mastering pass is `master_mix.py`, run
 separately on the bounced stereo file with format-specific delivery
 targets.
 
@@ -1213,26 +956,26 @@ targets.
 4. **Match real-world workflow**: mix engineers and master engineers are
    usually different people; the tools should reflect that boundary.
 
-### Format-specific delivery targets (2026)
+### Delivery presets and requirements
 
-| Platform | LUFS | True peak | Bit depth | Notes |
-|---|---|---|---|---|
-| Spotify | -14 | -1 dBTP | 24 | Ogg Vorbis encoding — codec ISP overshoots ~0.5-1.0 dB |
-| Apple Music | -16 | -1 dBTP | 24 | AAC encoding — slightly quieter target than Spotify |
-| YouTube | -14 | -1 dBTP | 24 | Same as Spotify; YouTube normalises loudly |
-| Tidal | -14 | -1 dBTP | 24 | HiFi tier; lossless playback |
-| CD | -9 | -1 dBTP | 16 | Louder; 16-bit dithered for Red Book |
-| Vinyl pre-master | -12 | -1 dBTP | 24 | Gentle — the cutter adds its own limiting |
-| Broadcast (EBU R128) | -23 | -2 dBTP | 24 | TV / radio |
+The source table at the top is authoritative for the claims verified in this
+review. Values in `master_mix.FORMAT_PRESETS` are project defaults unless explicitly
+classified as a requirement. Spotify's playback normalization level is not a
+mandatory musical loudness target. Apple does not universally require -16 LUFS.
+One approved streaming master often suffices; do not automatically make a different
+artistic master for each platform's playback setting.
 
-The targets converge enough that one "streaming master" (-14 LUFS, -1 dBTP,
-24-bit) is acceptable for Spotify, YouTube, Tidal. Apple gets a separate
-target; CD and vinyl are their own paths.
+CD export resamples to 44.1 kHz and quantizes to 16 bits with dither. Its loudness
+is an artistic choice. For vinyl, obtain the cutting engineer's specification;
+a generic LUFS preset cannot establish suitability for a particular cut. The
+broadcast preset targets -23 LUFS with a conservative -2 dBTP ceiling; confirm
+the contracted delivery specification and permitted tolerance.
 
 ### Mastering chain presets
 
-`master_mix.py` ships six chain templates (the *what to do* part, distinct
-from the format target *how loud* part):
+`master_mix.py` ships eleven chain templates (the *what to do* part, distinct
+from the format target *how loud* part): the six below plus the
+`modern_rock_spatial*` family described earlier.
 
 | Preset | Chain | Use when |
 |---|---|---|
@@ -1241,7 +984,7 @@ from the format target *how loud* part):
 | `modern_rock_mb` | EQ + 3-band multiband + exciter + M/S side highshelf + stereo width 1.05 + soft clip | Modern rock with tighter band-by-band dynamics. Replaces glue comp with multiband — better controlled low end. |
 | `pop` | EQ (bright) + comp + exciter + M/S side highshelf + width 1.1 + soft clip | Bright top, present mids, slightly wider image. |
 | `hip_hop` | EQ (sub boost) + comp + exciter + width 0.95 (slightly narrower) + hard clip | Sub weight, impact, mono-leaning width to keep the 808 centred. |
-| `transparent` | LUFS norm + limit only | When the mix doesn't need master tone. |
+| `transparent` | LUFS norm + true-peak limiter only | When the mix doesn't need master tone. |
 
 ### Optional chain steps and when to use them
 
@@ -1260,58 +1003,36 @@ any of them via a custom preset JSON:
   1.0 = no change. 1.05-1.15 = subtle widening. 0.95 = slightly narrower
   (good for sub-heavy genres). 0.0 = mono. Width > 1.3 risks
   mono-compatibility.
-- **Vinyl elliptical EQ**: sub-mono filter below ~150 Hz. Automatic on
-  the `vinyl_pre` format (cuts side energy below 150 Hz so the vinyl
-  cutter head doesn't leave the groove on wide bass). Not configurable
-  per chain preset — driven by the format's `vinyl_elliptical_hz` field.
+- **Vinyl elliptical EQ**: zero-phase side high-pass (sub-mono) below
+  ~150 Hz. Opt-in with `--vinyl-elliptical [HZ]` on the `vinyl_pre` format;
+  off by default because the cutting engineer normally decides it.
 
-### Codec-ISP vs. true peak
+### Waveform true peak and codec audition
 
-Sample peak and 4× true peak miss what the codec encoder does to the signal.
-Ogg Vorbis and AAC re-quantize transients and routinely overshoot the
-4×-oversampled true peak by 0.5-1.5 dB. `master_health.py` includes an
-**8×-oversampled codec-ISP estimate** as a conservative proxy: if your master
-sits at -1.0 dBTP measured at 4× but the 8× value is -0.3 dBTP, expect the
-encoded version to occasionally clip.
+The health tool reports 4x and 8x oversampled waveform peaks. Neither is a codec
+simulation. `codec_roundtrip.py` encodes with the local ffmpeg build, decodes,
+and measures the decoded peaks and loudness; listening to its decoded files is
+still a separate, human codec review. Overshoot confined to the first or last
+milliseconds usually comes from an abrupt full-scale file start or end.
 
-### Punch index
+### Punch index and phase diagnostics
 
-Mastering must preserve transient punch. The punch index in
-`master_health.py` is `percentile_90(short-window RMS) / mean(long-window
-RMS)` in dB — how far the transient peaks pop above the sustained bed:
+The punch index is a short/long envelope statistic. It cannot establish audible
+punch, fatigue, or the processing history of a recording. The same value can
+arise from different arrangements. Review changes on the same passage at matched
+loudness, especially drum attacks against sustained guitars and bass.
 
-| Punch index | Material character |
-|---|---|
-| < 2 dB | Squashed — transients buried in the bed. Over-limited. |
-| 2-4 dB | Low punch — borderline, may sound fatiguing. |
-| 4-7 dB | Healthy — modern rock master with intact transients. |
-| > 8 dB | Very dynamic — dynamic jazz, live recording, classical. |
+Per-band correlation and M/S width locate possible mono-translation issues.
+They do not require mono sub-bass or a fixed amount of high-frequency width for
+every song. Listen for loss of important elements in mono; relate measurements
+to source microphones and intentional stereo effects before changing them.
 
-If a master's punch index drops below 4 dB after the chain, soften the
-clipper / limiter or move to a gentler chain preset.
+### Compression-history heuristic
 
-### Per-band phase coherence
-
-Two stereo rules that matter at the master level:
-
-1. **Sub should be near-mono.** L/R correlation below ~100 Hz should be
-   > 0.85 (ideally > 0.95). Otherwise the bass collapses on mono playback
-   (phone speakers, club PA mono fold-down).
-2. **Top can be wide, but not anti-correlated.** L/R correlation in the
-   8 kHz+ band should be > 0.2. Below that, the highs are decorrelated
-   to the point of phasiness.
-
-`master_health.py` checks both per band; failing the sub check is RED.
-
-### Compression history detection
-
-If the input mix.wav already shows signs of mastering (LRA < 4 LU, crest
-< 10 dB, or sample peak > -0.5 dBFS), `master_health.py` flags
-`likely_already_mastered: true` and warns. Applying more mastering on top
-of an already-mastered track flattens it further with no benefit.
-
-When this triggers: pull back the master_preset to `gentle` or
-`transparent`, or work from the pre-master / pre-limit version of the mix.
+Low crest together with high sample peaks may suggest heavy processing, but no
+waveform summary proves the source's history. Low LRA alone is not evidence of
+compression. Compare the original and processed audio and ask about intentional
+upstream processing before adding another mastering pass.
 
 ### Reference deck
 
@@ -1322,33 +1043,28 @@ average target spectrum. `master_health.py --reference ref1.wav ref2.wav
 ref3.wav` averages all references' 1/3-octave PSDs and reports region-level
 deltas against your master. 3-5 references is the typical deck size.
 
-### Reference deck is a tonal GUIDE, not a hard delivery gate
+### Technical checks and listening decisions
 
-When `master_health` returns a red on the reference-deck section, do **not**
-treat it the same as a red on format conformance. The two are different
-classes of check:
+| Check | Role | Interpretation |
+|---|---|---|
+| File format and peak ceiling | Technical check | Correct violations of the agreed delivery specification. |
+| Integrated loudness | Requirement only when contracted; otherwise advisory | Playback normalization is not rejection of the master. |
+| Codec behavior | Measured by `codec_roundtrip.py` on a local encoder build | Waveform oversampling cannot certify encoded playback; platform encoders differ from the local build. |
+| Phase, width and punch | Listening prompts | Investigate audible mono cancellation or transient loss; no universal threshold proves quality. |
+| Compression history | Hypothesis | Metrics cannot establish which processing happened upstream. |
+| Reference spectrum | Tonal guide | Arrangement, vocals, instrumentation and era can explain differences. |
 
-| Check | Class | What red means | What to do |
-|---|---|---|---|
-| Format conformance (LUFS, true peak, codec ISP) | **Hard gate** | The delivery target is missed; the master will trigger platform normalisation / clip | Re-master, do not ship |
-| Phase coherence per band (sub mono, top wide) | **Hard gate** | The master collapses on mono speakers / has out-of-phase highs | Fix the M/S processing, re-master |
-| Punch index | **Hard gate** | The master is over-limited and will sound fatiguing | Soften the chain, re-master |
-| Compression history (already mastered?) | Yellow advisory | The input was already a master — extra master may flatten | Inform; if intentional double pass, proceed |
-| **Reference deck spectral delta** | **Tonal guide** | The master is spectrally different from the chosen reference(s) — could be the master is off, OR the reference is just different (different vocal mix, different genre tilt, different era) | Use as direction-finding; ship if hard gates are green |
-
-If the four hard gates (LUFS, true peak, phase, punch) are green, the master
-is technically deliverable even with a red reference-deck verdict. Treat
-the reference deck like a second opinion: if the deltas surprise you,
-investigate; if they're explained by known content differences (e.g. you
-mixed instrumental, the reference is vocal-driven; or you mastered for
-modern rock loudness, the reference is a 90s mix), document it and ship.
+The aggregate health result covers the implemented technical checks. It does not
+certify standards conformance, codec safety, or listening approval.
 
 ---
 
 ## Master Bus Chain Order
 
-Processing order matters. This is the current `render_mix.py` master chain
-(each step optional, guarded ones skip if their relevance_check fails):
+Processing order matters. This is the `render_mix.py` master chain in the
+legacy `premaster_mode: false` mode (each step optional, guarded ones skip if
+their relevance_check fails). Premaster mode stops after step 7 and
+peak-normalizes instead of steps 8-9:
 
 1. **Bus saturation** (per bus, before summing to master)
 2. **Bus parallel saturation** (guarded, drum bus only — relevance_check: crest > 10 dB AND LRA > 4 LU)
@@ -1358,7 +1074,7 @@ Processing order matters. This is the current `render_mix.py` master chain
 6. **M/S processing** (guarded — independent mid/side EQ + gain — relevance_check: width ≥ 0.05)
 7. **Master EQ** (zero-phase — HP@30Hz + gentle high shelf typical)
 8. **LUFS normalization** (target -14 LUFS for streaming)
-9. **ISP-aware true peak limiter** (-2 dBTP — pedalboard.Limiter + second-pass 4x-oversampled ISP scale-down)
+9. **True-peak brickwall limiter** (pedalboard `BrickwallLimiter`: stereo-linked, 5 ms lookahead, 4x true-peak detection, no makeup gain) followed by an 8x true-peak verification and static safety trim. pedalboard's older `Limiter` class is not used: it adds a fixed 4:1 stage above -10 dBFS, automatic makeup gain and a 0 dBFS hard clip.
 
 For the **master_mix.py** pass on a finished stereo mix, the chain is
 slightly different (more aggressive, format-aware) — see "Mastering
@@ -1366,7 +1082,7 @@ Workflow and Philosophy" above.
 
 ### Master glue compressor settings (pedalboard Compressor notes)
 
-Pedalboard's Compressor uses peak detection. With slow attack (>20ms), short transients pass through and the measured peak GR appears 0. For program material compression, use:
+Pedalboard's Compressor uses peak detection per channel; the tools derive one stereo-linked gain curve from it (`_dsp.linked_gain`) so a one-sided hit does not shift the image. With slow attack (>20ms), short transients pass through and the measured peak GR appears 0. For program material compression, use:
 - threshold: -10 dBFS (works with typical -12 to -9 LUFS pre-norm signals)
 - attack: 10ms (catches sustained peaks while letting some transient through)
 - ratio: 2:1
@@ -1375,68 +1091,28 @@ Pedalboard's Compressor uses peak detection. With slow attack (>20ms), short tra
 
 ---
 
-## Make-it-hit Philosophy — Loudness, Weight, Width Without Fatigue
+## Creative processing - relevance and audition
 
-A modern rock/pop mix has to **"hit"** — sound dense, weighty, and impactful — but **without sounding squashed or tiring**. These are in tension. Too little processing = thin and dynamic but inconsequential. Too much = "loud but ugly", listener fatigue, sales drop on smartphone speakers.
+Effects can change weight, density, width, texture, and space. Choose them for
+an identified problem or creative intention, not a promise of a hit or an
+assumption that more processing creates professionalism. Retain a minimally
+processed baseline for comparisons.
 
-The tools that exist to push toward "hit" — clipper, multiband compressor, sub-bass synth, exciter, parallel saturation, M/S width — are powerful and they all share a property: **they degrade the source signal in exchange for a perceived improvement.** Saturation adds harmonic distortion. Clipping flattens transients. Sub-synth adds harmonic content that wasn't there. M/S widening reduces mono compatibility.
+A tool's `relevance_check` is a conservative project heuristic. It may skip a
+process, but passing it does not establish benefit. Refer to the current tool
+report for its actual thresholds. An override needs a documented reason and
+matched listening review; existing user authorization applies.
 
-The agent's job is to apply them **only when the data justifies the trade-off**. This is why every make-it-hit tool in this project ships with a `relevance_check` — the tool measures its input and refuses to write audio when the conditions for benefit are not met.
+Compare the same passage before and after each consequential intervention.
+Measurements show what changed. Listening or actual human feedback establishes
+whether that change served the intention. A pumping flag that appears after
+processing only means a detector threshold was crossed. It cannot distinguish
+an artifact from a musical pulse by itself.
 
-### The relevance_check pattern
-
-Every make-it-hit tool runs its check first and returns a verdict like:
-
-```json
-"relevance_check": {
-  "tool": "subharm",
-  "sub_band_rms_dbfs": -25.0,
-  "target_over_fundamental_db": 3.8,
-  "recommend_skip": true,
-  "issues": [
-    "target band (80-200 Hz) is 3.8 dB louder than fundamental — new harmonics will be drowned"
-  ]
-}
-```
-
-When `recommend_skip: true`, the tool exits without writing the output WAV. The agent reads the report, understands why, and moves on. Only `--force` overrides — and that should require the user explicitly asking for it.
-
-### Required-evidence thresholds (per tool)
-
-These are the empirical thresholds derived from a real-session field test (a 56-stem rock recording referred to as "terido" in the project history). They are intended as **starting reference values** — your own session may need different thresholds depending on instrumentation density and recording quality:
-
-| Tool | Required evidence |
-|---|---|
-| Master clipper | Sample peak > -10 dBFS AND LRA > 4 LU. Below either, the clipper has no headroom to recover or just adds fatigue to an already-flat mix. |
-| Sub-bass synth | sub_60hz_rms_db ≥ -35 (something to extract harmonics from) AND sub_60hz_crest_db ≥ 8 (sub isn't squashed) AND target band 80-200 Hz must NOT exceed the fundamental by more than 3 dB (else new harmonics are drowned by existing content). |
-| Drum bus parallel sat | Bus crest > 10 dB (transient life left) AND LRA > 4 LU AND bus is drums. |
-| Exciter | spectral_centroid_hz < 4000 (stem is dark) AND air_8khz_plus_rms_db < -40 (genuine air-band emptiness). |
-| Multiband comp | At least 2 of 3 bands with crest ≥ 6 dB (real per-band dynamics to control). |
-| M/S width | ms_width_ratio < 0.2 if side-boosting; do NOT side-boost if width > 0.5 (mono-compat risk). |
-| Haas | ms_width_ratio < 0.3 AND NOT on bass / low-centroid stems. |
-
-### Process budget
-
-A single stem chain should not exceed **4 processing steps**. Typical: gain → EQ → comp → one fx. More than that compounds phase shift, transient smearing, and harmonics that didn't ask permission to be there. If you find yourself about to add a 5th step, stop and reconsider whether the earlier steps actually solved the problem — or whether the problem was something other than what the chain has been treating.
-
-### Re-analyze loop
-
-After every make-it-hit step, re-run `analyze.py` on the output. Two checks:
-
-1. **The targeted metric moved the right way.** Sub-synth on a bass stem → sub_60hz_rms_db should rise 0.5-1.5 dB. Clipper → integrated_lufs rises 1-3 dB without LRA collapsing. Multiband → per-band crest tightens in the targeted band. Exciter → spectral_centroid_hz rises (note: with mix ≤ 0.15 this can be subtle, < 50 Hz delta on the centroid is normal).
-2. **`pumping.pumping_detected` did not flip true.** If it was false before the step and true after, the step caused it. Revert or soften. (Pre-existing pumping flags often indicate musical pulse — see the pumping disambiguation section.)
-
-If the metric didn't move, **revert**. The tool either didn't help or just shifted the problem.
-
-### Field-test lesson: rock-band tracking and the subharm tool
-
-On a 56-stem rock-band test session every stem failed the subharm relevance check — the target band 80-200 Hz was always 3+ dB louder than the 40-80 Hz fundamental. This is **not a bug**: rock recording captures harmonics naturally, so the target band is always full. Subharm is genuinely a synth-bass / 808 / sample-based-low-end tool. Honour the skip.
-
-### Field-test lesson: pumping is often a musical pulse, not artifact
-
-The pumping detector flags 1-5 Hz envelope modulation. On rhythm guitar tracks the strumming itself produces this modulation at song-tempo quarters or eighths (1.37 Hz at 82 BPM, 2.34 Hz at 140 BPM). The detector cannot tell musical pulse from comp pumping from envelope statistics alone. So `pumping_detected: true` is a **suspicion, not a verdict** — see "Reading the New Analysis Metrics" below.
-
----
+Keep processing purposeful. No fixed effect count or minimum LRA guarantees a
+good result. Do not alter upstream compression to make a downstream guard pass.
+If a change produces no intended benefit, revert it; if listening is unavailable,
+keep it provisional instead of inventing an audible verdict.
 
 ## Reading the New Analysis Metrics
 
@@ -1463,7 +1139,7 @@ Detects 1-5 Hz envelope modulation. Two criteria both must trigger for `pumping_
 
 When `pumping_detected: true`, disambiguate before reverting any upstream step:
 
-1. **Did the flag appear AFTER a comp/multiband/clipper step?** Compare the analysis JSON from before and after. False → True after the step = the step caused it.
+1. **Did the flag appear AFTER a comp/multiband/clipper step?** Compare the analysis JSON from before and after. False to true means a detector threshold crossing; audition before attributing an audible artifact.
 2. **Is `pump_rate_hz` close to song-tempo quarters/eighths?** At 120 BPM: quarter = 2.0 Hz, eighth = 4.0 Hz. At 82 BPM: quarter = 1.37 Hz. If pump_rate matches the groove pulse, it is likely **musical strumming/groove**, not comp artifact.
 3. **What stem is it on?** Guitar (especially rhythm), bass, drum buses → typically musical pulse. Vocal, sustained pad, master mix → comp artifact more likely.
 4. **Depth vs excess profile.** High depth + moderate excess (depth 18 dB, excess 5 dB) = musical pulse. High depth + high excess (depth 8 dB, excess 30 dB) = comp artifact.
@@ -1478,7 +1154,7 @@ If the conclusion is "musical pulse, not artifact": **say so explicitly and do N
 
 The difference is the inter-sample peak (ISP). For low-frequency signals they are nearly identical. For HF content (cymbals, distorted guitar, snare crack) the true peak can sit 0.5-3 dB above the sample peak. After codec encoding (Spotify Ogg/Vorbis, Apple AAC), the encoded signal's inter-sample peak can climb further, occasionally pushing samples above 0 dBFS.
 
-**For stems: the difference rarely matters.** For master delivery: target `-2 dBTP` (the true peak, not the sample peak) to survive streaming codec encoding without clipping. `render_mix.py` does a second-pass true peak measurement after its limiter and scales the master down if the oversampled value exceeds the ceiling.
+**For stems: the difference rarely matters.** For master delivery: -1 dBTP is the common streaming recommendation, -2 dBTP for masters louder than -14 LUFS; actual codec playback still needs testing. The limiters in `master_mix.py` and the legacy `render_mix.py` chain verify the result at 8x oversampling and apply a static trim if the ceiling is exceeded.
 
 ### onsets_sec, tempo_bpm, estimated_key (rhythm & tonal context)
 
@@ -1488,7 +1164,7 @@ Three top-level fields in `analysis.json` that give time-domain and tonal contex
 |---|---|---|---|
 | `onsets_sec` | list of float seconds | Onset times from librosa onset detection. Same detector as `transient_density_per_sec`, exposed as a raw list. | Identify rhythmic structure; pair-wise stem alignment; precise "uneven playing" detection per onset; visual debugging. |
 | `tempo_bpm` | float (or `null`) | librosa `beat_track` estimate. Returns `null` for clips shorter than ~4 s or when the estimate is unstable / out of range (30–300 BPM). | Pick BPM-synced division for `apply_reverb --pre-delay-division` or `apply_delay --bpm`. Sanity-check against the human-known tempo (drummer's clicktrack). |
-| `estimated_key` | `{key, mode, confidence}` | Krumhansl-Schmuckler key estimation on `chroma_stft`. Confidence is 0..1 (cosine sim against the reference profile). | Decide whether a tonal mid-EQ move should track the song's key (e.g. boosting 220 Hz on an A-minor track lines up with the root). Drums / overheads / noise will give a low-confidence answer — `< 0.5` means "no reliable key", ignore. |
+| `estimated_key` | `{key, mode, confidence}` | Krumhansl-Schmuckler key estimation on `chroma_stft`. Confidence is the Pearson correlation (-1..1) with the best reference profile; white noise scores about 0.25. | Decide whether a tonal mid-EQ move should track the song's key (e.g. boosting 220 Hz on an A-minor track lines up with the root). Drums / overheads / noise give low values — `< 0.5` means "no reliable key", ignore. |
 
 The cost of computing these is modest (~+10% on `analyze.py`). They are computed unconditionally on every analyze pass — no opt-in flag needed.
 
@@ -1510,19 +1186,19 @@ Three time-series at 1-second resolution stored under `analysis.envelopes`:
 
 The arrays are JSON-array-valued, which makes them safe to pretty-print but **noisy** in `analysis.json` — they account for ~10–20 KB per stem on a 400-second take. Worth it for the analytical value.
 
-### mix_health verdicts (green / yellow / red)
+### Health reports and delivery readiness
 
-`mix_health.py` scores the final mix on 7 dimensions: LUFS-vs-target, true peak, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (if supplied), masking pair counts (if detect_masking was run), and stem pumping.
+Health tools expose technical checks separately from musical diagnostics and
+always leave listening review pending. Missing format requirements are reported
+as unassessed, not passed. Style scores measure preference similarity only.
 
-| Verdict | Meaning |
-|---|---|
-| All green | Mix is delivery-ready. |
-| 1 yellow, rest green | Mix is close. Address the yellow item if it's worth the time; otherwise ship. |
-| 2+ yellow OR any red | Address the issues, re-render, re-run mix_health. |
-| Red on tonal balance | The bottom/mids/top region differs from the reference by 2-4 dB. Use compare_reference --apply to bake in inverse-delta EQ correction. |
-| Yellow on stem pumping | One or more bus stems show 1-5 Hz envelope modulation. Verify per the pumping disambiguation checklist — usually it's musical pulse and can be left alone. |
-
----
+- Correct a failed agreed technical requirement before approved delivery.
+- Treat tonal, envelope, width, and masking warnings as investigation prompts.
+- Do not apply inverse reference EQ or chase a green score automatically.
+- Export drafts for review without representing them as final approvals.
+- Run `review_delivery.py` on the actual export, with the agreed peak ceiling and
+  applicable format/contractual loudness requirements. Read its `delivery_ready`
+  field; narrow or stale feedback cannot satisfy full-song approval.
 
 ## Stem Analysis — Interpreting Metrics
 
@@ -1540,7 +1216,7 @@ EBU R128 Loudness Range: how much the loudness varies across the file, in LU.
 | Acoustic/jazz | 12–25 LU | wide natural dynamics |
 | Brick-walled | < 2 LU | no dynamic variation left |
 
-LRA < 3 LU on a rock mix: the master compressor or limiter is working too hard. Consider raising the compressor threshold or loosening the attack.
+LRA < 3 LU can reflect a dense arrangement, intentional consistency, or processing. Compare stages and listen before changing the compressor.
 
 ### Crest Factor
 
@@ -1644,7 +1320,7 @@ This complements transient_density: density tells you *how often* onsets occur, 
 - Heavily compressed stems: compression artificially lowers prominence — measure the pre-comp assembled.wav.
 - Overhead/room mics: measure the room, not individual drums — not meaningful.
 
-**Terido session reference (2026-05-16, raw assembled.wav):**
+**Session A reference (2026-05-16, raw assembled.wav):**
 - KICK IN: prominence 10.9 dB, decay 31.7ms → strong attack, tight → no shaping needed
 - SN TOP: prominence 12.1 dB, decay 46.4ms → strong crack, normal decay → no shaping needed
 - BASS DI: prominence 4.3 dB, decay 72ms → expected for sustained instrument, ignore
@@ -1693,15 +1369,12 @@ When the measured LUFS of two busses is equal but they don't *sound* equal:
 
 ### What this means for `style_check.py` profiles
 
-The style profile tonal-balance targets are wideband band-RMS at the
-profile's LUFS target. They tell you the spectral balance is correct
-*on the meter*. They do NOT guarantee perceptual loudness equality
-between busses. After a render passes `style_check` GREEN on tonal
-balance, still A/B-listen on headphones — if a bus pops out or hides,
-adjust the `volume_db` and re-render. Don't override the ear because
-the measurement looks balanced.
+Profile targets are project preferences measured at the profile's loudness.
+Matching them does not establish correct tone, audible balance, genre identity,
+or reference equivalence. Inspect actual in-mix contributions and compare at
+matched loudness. Keep user preferences when profile scores disagree.
 
-### Field-test reference: terido v4 → v5
+### Field-test reference: session A v4 → v5
 
 After v4 hit drum = bass = guitar = -19 LUFS exactly on `bus_balance`, the
 listener reported the bass still felt 1–2 dB hotter on stereo headphones.
@@ -1720,38 +1393,22 @@ equal" debate.
 
 ## Vocal Mixing
 
-Vocal mixing has its own chain order and its own set of tools because vocals
-sit on top of the mix and demand specific treatment that doesn't apply to
-instrument stems. The chain order below is the 2026 industry-best-practice
-ordering — there are two non-obvious choices in it that matter.
+Preserve the approved lead take, doubles, and intended expression. Review phrase
+levels, breaths, consonants, sibilance, pitch/timing intent, and effect tails in
+quiet and dense sections. Do not substitute whole-file loudness for this review.
 
-### Chain order — and the two non-obvious choices
+### Chain choices
 
-```
-volume → pan
-  → subtractive EQ      (HP @ 80-100 Hz, mud cut @ 200-400 Hz, harshness notch)
-  → compression         (3-6:1 leveling, genre-dependent)
-  → de-esser            (NOT before the comp — see below)
-  → additive EQ         (presence @ 3-4 kHz, air @ 12 kHz)
-  → [pitch correction]  (optional — only if pitch.cents_std > 30)
-  → saturation          (optional character)
-  → reverb sends        (to shared `reverb_buses`, NOT insert reverb)
-```
+Use gain rides, EQ, compression, and de-essing only where they serve a stated
+purpose. Compression can change the prominence of sibilance, but does not
+universally amplify it. De-essing before compression can prevent sibilants from
+driving the detector; de-essing afterward can control what the chain emphasizes.
+Choose placement by comparing the actual problem at matched loudness.
 
-**Choice 1: De-esser AFTER the compressor, not before.** A vocal compressor
-amplifies the sibilance peaks (because every gain-reduction stage makes the
-already-loud "s"/"sh"/"ch" peaks even more prominent relative to the rest
-of the signal). Putting the de-esser at the comp's *output* catches those
-peaks where they are at their worst. The classic ordering mistake is
-"de-esser first, then comp, then EQ" — that lets the comp re-amplify the
-sibilance the de-esser just tamed.
-
-**Choice 2: EQ split into subtractive (pre-comp) and additive (post-comp).**
-Cuts go before the comp so the compressor's level detection works on a
-clean signal — feeding 200 Hz mud into the comp's detector means the comp
-reacts to mud peaks rather than vocal peaks. Boosts go after the comp so
-the gain-reduction doesn't undo the boost (a 3 kHz boost ahead of the comp
-gets squashed by the comp the moment it triggers).
+EQ placement also affects compressor detection. Neither subtractive-before nor
+additive-after is mandatory. Check whether a proposed EQ change is fixing the
+vocal or compensating for another instrument masking it. Preserve the approved
+balance while evaluating tone and consistency separately.
 
 ### Genre-specific aesthetics
 
@@ -1772,17 +1429,17 @@ parameters automatically.
 
 | Field | Meaning | Action |
 |---|---|---|
-| `sibilance.peak_db` | 5-8 kHz transient peak in dBFS | > -25 dBFS: run `apply_deesser` after the comp step. -25 to -35: borderline, default `deesser_smooth` is enough. < -35: relevance_check will skip (nothing to de-ess). |
+| `sibilance.peak_db` | 5-8 kHz transient peak in dBFS | > -25 dBFS: listen for harsh esses; `apply_deesser` after the comp step is a candidate. -25 to -35: borderline, `deesser_smooth` if anything. < -35: relevance_check will skip (nothing to de-ess). |
 | `sibilance.density_per_sec` | sibilant events per second | > 4/sec is dense — use `deesser_aggressive`. Sparse takes are fine with `deesser_smooth`. |
-| `plosive.events_count` | sub-100 Hz transient bursts | > 10 in a 3-minute take: tighten the HP filter (subtractive EQ) from 80 to 100-120 Hz, or use a high-pass at 150 Hz on the BG vocal preset. |
+| `plosive.events_per_minute` | sub-100 Hz bursts (20 ms envelope) within 12 dB of the stem's loud level, 150 ms refractory; `events_count` is the total | > 10 per minute: audition a tighter HP (100-120 Hz) or clip-gain on the worst bursts; BG vocals tolerate a higher HP. |
 | `pitch.mean_hz` | average fundamental | < 200 Hz typically male (use `deesser_male_lead` detection band 4-7 kHz); > 250 Hz typically female (use `deesser_female_lead` 6-9 kHz). |
-| `pitch.cents_std` | std-dev of cents-deviation from nearest semitone | < 25 cents: in tune. 25-40: minor wobble — `pitch_correct_subtle` (strength 0.3). > 40: noticeable drift — ask the user before applying pitch correction; the take may have intentional bends. |
-| `vibrato.rate_hz` | 4-7 Hz pitch modulation | 5-6 Hz is healthy controlled vibrato. < 4 Hz = wobble (often a sign of a tired voice). > 7 Hz = "warble" (often unwanted from a forced effect). |
+| `pitch.cents_std` | RMS cents from per-note semitone targets after removing the global tuning offset (`tuning_offset_cents`); notes split at > 80-cent jumps and smoothed over 200 ms; random notes give about 29 | < 15: well intoned. 15-25: noticeable — listen to the phrases with high `fraction_over_25_cents`. > 25: surface to the user; the take may have intentional bends. Correction is the artist's choice. |
+| `vibrato.rate_hz` / `vibrato.extent_cents` | 4-7 Hz pitch modulation per sustained note (>= 0.5 s); extent is the semi-extent (± cents) | Extent under ~10 cents: no meaningful vibrato. Rate and extent describe the performance; whether they suit the song is a listening judgment. |
 | `breath.silence_ratio` | fraction of frames below -45 dBFS | > 0.4: a lot of breaths/silence between phrases — consider gating between phrases, or accept it as part of the intimate character. |
 
 ### Reverb-bus architecture (shared sends vs. insert)
 
-Vocals should **never** get insert reverb. The standard is to declare one
+Shared send reverb is a useful default for coordinating vocal space. Insert reverb can also be intentional. To use shared space, declare one
 or two reverb buses at the top of `mix_config.json` and let each vocal
 track send to those buses at appropriate levels:
 
@@ -1818,21 +1475,15 @@ Why this matters:
 
 ### Pitch correction philosophy
 
-The agent should ask the user before applying `apply_pitch_correct.py`
-because pitch correction makes irreversible aesthetic choices:
+Treat pitch correction as an aesthetic decision. Follow existing user intent
+and authorization; when the intended correction is unclear, clarify it before
+changing the performance. Keep the original and compare specific phrases.
+A cents-deviation statistic can reflect bends, vibrato, tuning, or tracking
+errors; it cannot prove an out-of-tune performance by itself.
 
-- **Strength 0.3 (`pitch_correct_subtle`)** is a safe default for "I want
-  the vocal in tune but not robotic." Nudges the worst out-of-tune notes
-  toward the scale grid, leaves intentional bends and vibrato intact.
-- **Strength 0.7 (`pitch_correct_pop`)** is modern pop's standard. Strong
-  enough to hear the snap; not so strong that the vocal sounds artificial.
-- **Strength 1.0 (`pitch_correct_hard_tune`)** is the audible "Cher /
-  T-Pain" effect. Only use when explicitly requested.
-
-If `vocal.pitch.cents_std > 50` the take has substantial intonation
-problems — surface this to the user rather than silently auto-correcting.
-The user may want to re-track that section rather than have the agent
-mask a performance issue with PSOLA.
+Strength values are tool settings, not universal subtle/pop standards. The pitch
+tracker and scale quantization can make wrong decisions. Review note transitions,
+consonants, vibrato, and artifacts, and keep unreviewed correction provisional.
 
 ### Why the de-esser is a `relevance_check`-guarded tool
 
@@ -1857,9 +1508,9 @@ Researched against the 2026 vocal-mixing consensus:
 
 ---
 
-## Style Profiles — Reference-Free Genre Grading
+## Style Profiles - Project Preference Similarity
 
-`tools/style_check.py mix.wav --style NAME` grades a finished mix against one of five built-in profiles in `tools/style_profiles/`: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference track is supplied, the profile **is** the reference.
+`tools/style_check.py mix.wav --style NAME` measures similarity of a finished master to one of seven project profiles in `tools/style_profiles/`: `classic_rock`, `hip_hop`, `jazz_acoustic`, `modern_rock`, `pop`, `punchy_modern_rock`, `tool_inspired`. On premaster input (`--input-kind premaster`, or auto-detected when worst-channel TP <= -2.5 dBTP) loudness, LRA and crest checks are N/A. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference audio is supplied, the profile remains a numerical preference and cannot replace listening references.
 
 ### What's in a profile
 
@@ -1867,11 +1518,11 @@ Every profile JSON has the same shape:
 
 | Section | Fields | Meaning |
 |---|---|---|
-| `lufs` | `integrated_target`, `tolerance_lu` | Genre-typical streaming loudness. Symmetric tolerance — outside `target ± tolerance` is yellow, beyond 1.5× is red. |
+| `lufs` | `integrated_target`, `tolerance_lu` | Project loudness preference. Symmetric tolerance — outside `target ± tolerance` is yellow, beyond 1.5× is red. |
 | `lra` | `target_lu`, `range_lu` | Loudness Range. Range-based grading: inside [min, max] = green. |
 | `crest_factor` | `target_db`, `range_db` | Sample peak vs RMS, range-graded. |
-| `tonal_balance_dbfs` | `{sub_60hz, low_60_250hz, mid_250_2khz, high_2_8khz, air_8khz_plus}` each with `target` + `tolerance` | **Wideband band-RMS measured at the profile's LUFS target**, not iZotope-TBC PSD-curve numbers. Calibrated against real-world streaming masters. |
-| `default_bus_volume_db` | `{drums, bass, guitar}` each with a dB number | Starting `volume_db` for each top-level bus when running `render_mix --generate-config --style NAME`. The neutral-0-dB default rarely matches modern conventions — these per-genre starting points encode the industry-standard bus ratio (drums+bass as foundation in rock, vocal-forward in pop, sub-dominated in hip-hop, etc.). |
+| `tonal_balance_dbfs` | `{sub_60hz, low_60_250hz, mid_250_2khz, high_2_8khz, air_8khz_plus}` each with `target` + `tolerance` | **Wideband band-RMS measured at the profile's LUFS target**, not iZotope-TBC PSD-curve numbers. Project targets; no independently validated reference corpus is supplied. |
+| `default_bus_volume_db` | `{drums, bass, guitar}` each with a dB number | Starting `volume_db` for each top-level bus when running `render_mix --generate-config --style NAME`. The neutral-0-dB default rarely matches modern conventions — these per-genre starting points encode the legacy hand-tuned bus starting point (drums+bass as foundation in rock, vocal-forward in pop, sub-dominated in hip-hop, etc.). |
 
 ### Genre-typical bus starting points (current profile values)
 
@@ -1886,7 +1537,7 @@ Every profile JSON has the same shape:
 The agent and user iterate from these starting points; they're a reference,
 not a final answer. After `--style` generation, listen to the first render
 and adjust on a per-session basis (e.g. a particularly bass-heavy bass DI
-might need an extra -2 dB, as the v5 terido iteration documented).
+might need an extra -2 dB, as the session A v5 iteration documented).
 
 ### How the grading works
 
@@ -1895,7 +1546,7 @@ might need an extra -2 dB, as the v5 terido iteration documented).
 3. Measure 5-band wideband RMS on the LUFS-normalised mix.
 4. Grade each check: GREEN if within tolerance / range, YELLOW just outside, RED significantly outside.
 5. Overall score: GREEN-check = 100, YELLOW = 50, RED = 0. Average → 0..100. Verdict thresholds: ≥85 green, ≥60 yellow, below 60 red.
-6. **Hard-fail rule**: a RED on `integrated_lufs` or `lra_lu` caps the overall verdict at RED (max 55 score) regardless of the band results. Wrong loudness or wrong dynamics aren't fixable with EQ alone.
+6. There is no loudness/LRA hard-fail override. The score describes profile similarity; the CLI returns success when measurement completes, including a red similarity result.
 
 ### When to use which profile
 
@@ -1915,7 +1566,7 @@ Implication: do not paste these numbers into TBC and expect them to line up with
 
 ### Tuning a profile to a specific user's taste
 
-The shipped profiles are calibrated against published streaming-mastering references and one real-world rock session (terido). To bias them toward a user's preference:
+The profiles contain historical project preferences; the repo does not supply a reproducible, independently validated calibration corpus. To explore a user-specific preference:
 
 1. Measure 3–5 reference mixes the user considers "right" using `analyze.py` (LUFS-normalise each to the profile's target first).
 2. Average the per-band RMS values.
@@ -1926,98 +1577,158 @@ The profiles are versioned and well-commented intentionally so that user-specifi
 
 ---
 
-## Modern Prog Metal Mixing Recipe — cookbook
+## Progressive metal - section-based working method
 
-A consolidated recipe for prog metal mixing that pulls together the individual sections in this document. Use as a session-start template for prog metal projects (Tool, Karnivool, Periphery, TesseracT, Leprous, Wheel, Haken, Caligula's Horse direction).
+Classification: project starting hypotheses, not an artist preset or universal
+recipe. The user's arrangement and references determine the desired result.
 
-### Phase 0 — Session inspection
-1. Run `audit_session.py session.json` — flag duplicate clips that share source files (phase-coherent doubling risk)
-2. For each track with `clips_per_source ≥ 5 AND total_clips ≥ 20`: flag for `--source-mode continuous` (especially bass DI, sustained vocals/synths). Drums stay per-clip.
-3. Confirm which takes / mics / dups to keep — never carry over decisions from old `output/<session>/` runs
+1. Preserve takes and edits. Map quiet passages, dense riffs, exposed vocals,
+   fills, transitions, solos, and the ending. Identify intended contrast.
+2. Build the drum kit from useful microphone relationships. Compare overhead
+   and room alternatives before gating or replacing their contribution. Test
+   shell attack, body, sustain, and cymbal decay in the full arrangement.
+3. Establish kick and bass roles by section. Compare clean and driven bass
+   components for articulation, weight, and mono behavior. Neither instrument
+   automatically owns an entire frequency range. Do not synthesize sub-bass
+   solely because a spectrum looks sparse.
+4. Evaluate guitar microphone blends, note definition, and stereo placement
+   against the rhythm section. Avoid automatic mid scoops and top-end boosts.
+5. Preserve the selected vocal take and double restraint. Review phrase levels,
+   consonants, breaths, sibilance, effect tails, and intelligibility in quiet and
+   dense sections. Do not infer pitch/timing edits from a genre label.
+6. Use automation to support transitions and emotional contrast. Test one
+   coherent change at a time with matched excerpts; keep the earlier version.
+7. Compare a minimally processed master baseline with any more processed
+   candidate. Inspect actual dynamics changes before seeking more loudness.
+8. Deliver the requested formats after checking the exported files and recording
+   scoped full-song approval. Do not generate every streaming preset by default.
 
-### Phase 1 — Per-track processing
-**Bass DI (CLEAN + PEDAL via continuous mode):**
-- `apply_gain --per-clip --source-mode continuous --crossfade-ms 50 --interloper-head-ms 2000 --interloper-tail-ms 800`
-- `apply_eq --preset bass_di` (HP @ 30 / lowshelf @ 100 +1.5 / peak @ 320 -3)
-- `apply_compression --preset comp_bass_di_gentle` (preserves LRA for premaster)
-- Optional: `apply_octaver --octaves -1 --hp-hz 30 --lp-hz 90 --mix 0.18` for sub weight on small speakers (BT, phones)
-- **Bass split** (frequency separation, not parallel mics): LP @ 400 Hz on CLEAN, HP @ 200 Hz on PEDAL — they share frequency-domain not amplitude-domain. The CLEAN owns 50-400 Hz, PEDAL owns 200 Hz+
+Creative options to audition include changing room contribution across a build,
+restrained delay throws in vocal gaps, or a bass/guitar texture change around a
+transition. These are optional ideas; measurements alone cannot select them.
 
-**Drum kit (per-track foundation — NOT raw):**
-- KICK IN: `kick_in` EQ + `comp_kick_in` + `transient_kick_punch`
-- KICK OUT / SUB: comp + (optional align_phase to KICK IN)
-- SN TOP: `snare_top` EQ + `comp_snare_top` + `transient_snare_crack`
-- SN BOTTOM: comp + (optional align_phase)
-- TOMS (rack 1, rack 2, floor): `tom` EQ + `comp_tom` + `transient_tom_tight`
-- HIHAT / RIDE / CRASH: `hihat` / `cymbal` EQ only (no comp on cymbal close mics typically)
-- OH (ribbon): HP @ 400 Hz + air shelf @ 10 kHz +2 dB + `comp_overhead`. HP @ 80 from the built-in `overhead_ribbon` preset is TOO permissive for prog — it lets kick/snare body bleed which phase-fights with close mics
-- Skip room mics OR use them with aggressive HP @ 150 + `comp_room` heavy. Modern prog often uses controlled reverb sends INSTEAD of recorded room mics
+Barresi's [Tool interview](https://www.waves.com/in-the-studio-with-tool-and-evil-joe-barresi)
+describes section-dependent instrument sounds and vocal treatments. That supports
+contextual experimentation, not copying numerical EQ or stereo settings.
 
-**Guitar (rhythm L + R hard-panned, ±0.85 modern_rock):**
-- Per-mic EQ + comp baked
-- Bus-level: HP @ 100-120 Hz (let bass own sub-100), peak @ 200-300 Hz -2 to -3 dB (carve out bass space), peak @ 3500 Hz +1.5 dB (presence, but careful — see ear fatigue)
+### Mastering review diagnostics
 
-### Phase 2 — Bus + master
-**Drums bus:**
-- HP @ 60 Hz (give bass the sub alone)
-- `comp_drum_bus_minimal` or `comp_drum_bus_gentle` (preserve LRA)
-- `reverb_send: {preset: room_drums, wet: 0.15-0.20}` (controlled room replacement)
-- **Audience-perspective panning** with tom fill-sweep (Rack 1 +0.65 / Rack 2 0 / Floor -0.65)
-- **Internal balance**: shells ~-22 to -27 LUFS, cymbals + OH at ~-33 to -35 LUFS (10-12 dB differential). Cut HIHAT/RIDE/CRASH `volume_db` by -3 to -5 dB if they sit too prominent.
+`master_mix.py` reports whole-file crest change, gain before limiting,
+post-limiter peak attenuation, and true-peak/sample-peak difference. Current
+review triggers are a crest reduction over 4 dB, normalization gain over 6 dB,
+post-limiter attenuation over 3 dB, or peak difference over 1 dB. These are
+conservative project heuristics, not evidence of audible damage or standards.
+A green peak result does not clear these listening questions.
 
-**Bass bus:**
-- `volume_db -1` to -3 dB (Wheel-style "near guitars" presence — adjust by perceptual reference; bass-forward style use -1, balanced -3)
-- Bus-level EQ: subtle cut at masking band (e.g. -2 dB @ 127 Hz if `detect_masking` flags it vs guitar)
-
-**Guitar bus:**
-- `volume_db -1` (style-dependent — modern_rock style profile default is -3)
-- Mid-scoop EQ (handled per-bus)
-- Optional `reverb_send: {preset: guitar_room, wet: 0.05}` for subtle "lives in a room" feel
-
-**Shared reverb buses (replaces individual reverb sends per track):**
-```json
-"reverb_buses": {
-  "snare_plate": {"preset": "snare_plate", "wet": 1.0, "return_volume_db": -8, "return_pan": 0.0},
-  "guitar_hall": {"preset": "hall_ambient", "wet": 1.0, "return_volume_db": -14, "return_pan": 0.0}
-}
-```
-**HP all reverb sends** (built into the presets — verify if not). Mud kills prog clarity.
-
-**Master (modern_rock_spatial_v10 or _dark depending on top-emphasis budget):**
-- Sub-mono extension HP @ 200 Hz on side
-- Stereo width 1.05
-- See "Master spatial preset family" decision tree above
-
-### Phase 3 — Optional FX moves (effects that add space without losing clarity)
-
-- **Slapback delay on snare** (`delay_slapback_snare` preset) — adds "there-ness" without reverb wash
-- **Atmospheric ducked reverb track** on one sustained guitar layer — render via `apply_reverb --send --sidechain <kick_or_kick_snare_combined> --sc-depth 8 --sc-hp 60 --sc-lp 6000`, route as a new track to the guitar bus. The reverb tail "breathes" with the kick/snare hits.
-- **Subtle master bus reverb** (insert mode, wet 0.04-0.07, HP @ 300, pre-delay 60) — the 2025 trend for "one room" cohesion at mastering. See "Master bus reverb — subtle cohesion".
-
-### Phase 4 — Premaster + master + delivery
-1. Render premaster → must hit industry targets: peak -3 dBFS, TP <-3 dBTP, LUFS -18 to -20, LRA ≥6
-2. Run `mix_health.py` — if any RED on LUFS/TP/LRA: fix the MIX, not the master
-3. `master_mix --all-formats --master-preset modern_rock_spatial_v10` (or `_dark` if ear-fatigue / clipper-overdrive showing up)
-4. `master_health.py` per format
-
-### What this recipe deliberately AVOIDS
-- Heavy per-track comp (kills LRA → master can't recover) — gentle ratios 2:1-3:1, slow attacks
-- Wide stereo on rhythm gitár below 200 Hz (mono compat issues) — handled by master sub-mono
-- Recorded room mics (bleed-phase issues) — use controlled reverb sends instead
-- Cumulative top-end stacking (guitar EQ presence + master EQ shelf + side highshelf + exciter) — pick TWO, not all four
-- level_notes on continuous-mode bass (creates 5-6 Hz amplitude modulation that sounds like warble)
-- align_phase between same-instrument siblings (CLEAN + PEDAL bass) when using continuous mode (polarity-detector false positives)
-
-### Reference bands for "this sounds like prog metal" sanity check
-Use `style_check.py --style modern_rock` (closest to prog metal in the shipped profiles) or `tool_inspired` for darker variants:
-- Modern_rock spec @ -10 LUFS: sub_60 -26, low_60-250 -17, mid_250-2k -20.5, high_2-8k -24.5, air_8k+ -31.5
-- Tool_inspired @ -14 LUFS: sub_60 -27, low_60-250 -18, mid_250-2k -26 (more scooped), high_2-8k -26, air_8k+ -41 (darker top)
-
-A green `style_check` verdict + master_health green = delivery-ready.
-
----
+The brickwall limiter applies no makeup gain, so post-limiter attenuation is the
+limiter's gain reduction plus any 8x safety trim; it is not all intersample
+overshoot. Compressor input/output
+LUFS difference is a loudness change, not measured instantaneous gain reduction.
+Whole-file crest is sensitive to arrangement; use matched section comparisons
+before choosing a corrective action.
 
 ## Sources
+
+### Finishing techniques and their limits
+
+These techniques are candidates for a section-based review. Numeric settings
+belong to individual session records, not universal genre requirements.
+
+| Technique | Intended purpose | Required listening question |
+|---|---|---|
+| Bounded phrase rides | Improve lead consistency while retaining expression | Do important words stay clear without leveling away the performance? |
+| Parallel shell compression | Add drum body beneath original attacks | Does the kit gain useful weight without cymbal spill, pumping, or softened attacks? |
+| Sample reinforcement | Support identified weak/inconsistent hits | Does the original kit identity, velocity, timing, and phase relationship survive? |
+| External-sidechain dynamic EQ | Reduce a specific overlap only during competing activity | Is separation improved without audible holes or pumping? |
+| Wet-return ducking | Keep ambience out of active vocal phrases | Do tails emerge naturally without making the voice unnaturally dry? |
+| Selected delay throws or swells | Reinforce a musical event | Does the detail support the phrase and transition, rather than distract? |
+| Section automation | Develop attention, space, and intensity through the song | Do transitions and contrasts feel intentional at matched loudness? |
+
+`apply_dynamic_eq.py` uses a linked RMS detector to interpolate between dry audio
+and a fixed minimum-phase bell cut. Its depth is bounded, and a silent detector
+is dry bypass. This is a specific implementation, not an emulation of a named
+commercial equalizer. Sidechain length and sample rate must match. Check actual
+activity and center-cut statistics; they describe processing, not its benefit.
+
+Room-depth guidance, reviewed 2026-09-10:
+
+For more assertive drum production, Mark Mynett documents parallel snare
+distortion, selective sample reinforcement, and separate short plate/room sends
+in [Making Modern Metal, Part 3](https://www.soundonsound.com/techniques/making-modern-metal-part-3).
+His particular settings and opinions are not universal requirements. Compare
+instrument character before adding more room; retain original performances when
+no concrete need for replacement or timing correction has been established.
+
+Stronger nonlinear processing can generate aliases. The saturation tool supports
+2x, 4x, and 8x oversampling, with overlapping blocks and a final linked RMS match.
+Its default remains 1x for compatibility; input_gain_db provides additional drive
+without intentional wet-path level gain. The modes are simple waveshapers, not
+physical tape or tube models. Symmetric tanh has odd symmetry; asymmetric shaping
+can generate even harmonics and DC. See the official
+[FabFilter oversampling documentation](https://www.fabfilter.com/help/saturn/using/inputoutput)
+for the general rationale, not equivalence to that product.
+
+- Natural room microphones contain acoustic travel time and reflections. Preserve
+  their timing unless a listening comparison supports a change. Check the full
+  kit rather than optimizing a waveform correlation score. Barresi describes
+  combining recorded rooms and additional reverbs, with listening-led microphone
+  decisions in the [Tool interview](https://www.waves.com/in-the-studio-with-tool-and-evil-joe-barresi).
+- Early reflections, predelay, decay, and wet balance affect different aspects of
+  depth. A short shared room is a candidate for cohesion; more width or a longer
+  tail alone does not establish realism. See the official
+  [FabFilter reverb controls](https://www.fabfilter.com/help/pro-r/using/maincontrols).
+- Shape instrument sends and room returns where needed. Filtered returns and
+  predelay can help manage drum ambience, but numeric settings require a session
+  comparison. See [Waves drum-reverb techniques](https://www.waves.com/tips-for-using-reverb-on-drums-in-your-mix).
+- The repository's Freeverb presets are tonal starting points. Names such as
+  plate and hall are not distinct physical models, and their approximate decay
+  notes are not measurements. For a timed-room experiment, report a measured
+  impulse-response decay estimate, including the fit interval and filters.
+
+Delivery and premaster conventions, verified 2026-10-06 (repository review):
+
+- Spotify ([loudness normalization](https://support.spotify.com/us/artists/article/loudness-normalization/)):
+  playback at -14 LUFS (Normal), -11 (Loud), -19 (Quiet); keep true peak below
+  -1 dBTP, or -2 dBTP when the master is louder than -14 LUFS. Official
+  platform guidance; high confidence.
+- SoundCloud ([help center](https://help.soundcloud.com/hc/en-us/articles/360053660014))
+  now normalizes to -14 LUFS with the same -1 / -2 dBTP advice. Older
+  "no normalization" claims are outdated.
+- AES TD1008 (2021): -16 LUFS music distribution loudness with album
+  normalization; deliberately not a mastering target. ITU-R BS.1770-5 (2023)
+  is current; ATSC A/85 is -24 LKFS / -2 dBTP.
+- Premaster handoff: Abbey Road (2021) asks for 2-3 dB of peak headroom with
+  limiting removed; the Metropolis preparation guide (2026-05) asks for 32-bit
+  float at the native sample rate and no clipping, and de-emphasizes headroom.
+  "Premaster -18..-20 LUFS / LRA >= 6 LU / crest 14-18 dB" targets appear only in
+  blogs and are folklore, not standards; mix_health treats LRA as advisory.
+- pyloudnorm 0.2.0 (2026-01) provides `loudness_range()`; it has no true-peak
+  meter, so true peak is measured in `tools/_dsp.py` by polyphase oversampling
+  (4x/8x estimates, not certified against the BS.1770 conformance set).
+- pedalboard 0.9.25 adds `BrickwallLimiter` (lookahead, true-peak option, no
+  makeup gain). Its documentation does not guarantee the reconstructed ceiling,
+  hence the 8x verification step.
+
+Source register, verified 2026-09-09:
+
+- [Joe Barresi on Tool](https://www.waves.com/in-the-studio-with-tool-and-evil-joe-barresi),
+  published 2019-11-07. First-person engineering account; high confidence for
+  his described section-dependent tones, vocal treatments, and microphone work.
+  It does not prescribe universal Tool/Wheel settings.
+- [Joe Barresi on vocal depth and details](https://www.waves.com/mixing-vocals-depth-excitement-ear-candy).
+  Engineer tutorial page; supports selective vocal effects as a creative option.
+  The page description was reviewed; no claim of auditioning its demonstration.
+- [FabFilter external sidechain documentation](https://www.fabfilter.com/help/pro-q/support/externalsidechaining).
+  Official implementation documentation; high confidence for triggering EQ from
+  another signal. It establishes capability, not a song-specific need or setting.
+- [Ian Shepherd on mastering metal](https://www.izotope.com/community/blog/how-to-master-metal),
+  published 2019-09-04. First-person mastering guidance; supports considering
+  separation, tonal balance, contrast, and appropriate dynamics processing.
+  Historical streaming details require separate current verification.
+- [Sound On Sound: Masters Of The Art Of Mixing](https://www.soundonsound.com/techniques/masters-art-mixing).
+  Indexed excerpts describe different engineers' acoustic, parallel-processing,
+  and sample-reinforcement approaches. Full-page access was blocked; confidence
+  is limited to the retrieved excerpts, not a complete review of the article.
 
 - [Gain Staging Explained 2026 — Mixing Monster](https://mixingmonster.com/gain-staging/)
 - [Understanding LUFS 2026 — Mixing Monster](https://mixingmonster.com/understanding-lufs/)

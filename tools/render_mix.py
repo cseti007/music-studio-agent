@@ -17,8 +17,8 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from pedalboard import Compressor, Gain, Limiter, Pedalboard, Reverb
-from scipy.signal import butter as _butter, resample_poly as _resample_poly, sosfilt as _sosfilt, sosfiltfilt as _sosfiltfilt
+from pedalboard import Compressor, Pedalboard, Reverb
+from scipy.signal import butter as _butter, sosfilt as _sosfilt
 
 # Optional reverb support — loaded from apply_reverb in same directory
 try:
@@ -31,17 +31,32 @@ except ImportError:
     _HAS_REVERB = False
 
 try:
-    from apply_eq import _hp_sos, _lp_sos, _lowshelf_sos, _highshelf_sos, _peak_sos
+    from apply_eq import filter_signal
     _HAS_EQ = True
 except ImportError:
     _HAS_EQ = False
 
 from _stages import STAGE_CANDIDATES as _STAGE_CANDIDATE_LISTS, STAGE_NAMES
+from _dsp import (
+    brickwall_limit as _brickwall_limit,
+    linked_gain as _linked_gain,
+    worst_channel_true_peak_dbfs as _worst_channel_true_peak_dbfs,
+)
 
 PRESETS_DIR = Path(__file__).parent / "presets"
 
-# Guitar guitarist prefixes in specificity order (most specific first)
-_GUITARIST_PREFIXES = ["GTR 1", "GTR LACI", "GTR TERKA", "GTR"]
+# Fixed tail appended to the render timeline when any reverb is configured.
+# Covers the bundled Freeverb presets (room_size <= 0.8 decays 60 dB in
+# about 2.4 s) plus pre-delay; trailing silence is otherwise harmless.
+_REVERB_TAIL_S = 3.0
+
+_LIMITER_NAME = ("pedalboard.BrickwallLimiter (true-peak, stereo-linked, 5 ms lookahead, "
+                 "100 ms release, no makeup) + 8x-verified static safety trim")
+
+# Guitar tracks follow the "GTR <player> <mic>" naming convention (README).
+# The player token becomes a sub-bus (gtr_<player>); a name with only one
+# token after GTR ("GTR DI.01") goes to the generic "gtr" sub-bus.
+_GUITARIST_RE = re.compile(r"^(GTR\s+\S+)\s+\S")
 
 _DRUM_KEYWORDS = ["KICK", "SN ", " SN", "OH ", " OH", "TOM", "HIHAT", "HI-HAT",
                   "CRASH", "RIDE", "ROOM", "CYMBAL"]
@@ -54,13 +69,15 @@ _VOCAL_LEAD_KEYWORDS = ["LEAD VOX", "LEAD VOC", "VOX", "VOC", "WHISPER", "TALK"]
 
 def _detect_bus(name: str) -> str:
     u = name.upper()
-    if any(k in u for k in _DRUM_KEYWORDS):
+    # "ROOM" also names vocal room-mic takes, so a vocal keyword outranks it.
+    is_vocal = any(k in u for k in _VOCAL_BG_KEYWORDS + _VOCAL_LEAD_KEYWORDS)
+    if any(k in u for k in _DRUM_KEYWORDS if k != "ROOM") or ("ROOM" in u and not is_vocal):
         return "drums"
     if "BASS" in u:
         return "bass"
-    for prefix in _GUITARIST_PREFIXES:
-        if u.startswith(prefix):
-            return prefix.lower().replace(" ", "_")
+    prefix = _guitarist_prefix(name)
+    if prefix:
+        return _guitar_bus_slug(prefix)
     if any(k in u for k in _VOCAL_BG_KEYWORDS):
         return "vocal_bg"
     if any(k in u for k in _VOCAL_LEAD_KEYWORDS):
@@ -140,11 +157,18 @@ def _detect_pan(name: str) -> float:
 
 
 def _guitarist_prefix(name: str) -> str | None:
+    """'GTR <player>' for 'GTR <player> <mic>' names, 'GTR' for other GTR names."""
     u = name.upper()
-    for p in _GUITARIST_PREFIXES:
-        if u.startswith(p):
-            return p
+    m = _GUITARIST_RE.match(u)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1))
+    if u.startswith("GTR"):
+        return "GTR"
     return None
+
+
+def _guitar_bus_slug(prefix: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", prefix.lower()).strip("_")
 
 
 def _mic_type(name: str, prefix: str) -> str:
@@ -154,14 +178,36 @@ def _mic_type(name: str, prefix: str) -> str:
     return mic if mic else "DI"
 
 
+_FINAL_FILE_LADDER = ["assembled_aligned_eq_comp.wav", "assembled_eq_comp.wav",
+                      "assembled_aligned_eq.wav", "assembled_eq.wav",
+                      "assembled_aligned.wav", "assembled.wav"]
+
+
 def _find_final_file(track_dir: Path) -> str | None:
-    for name in ["assembled_aligned_eq_comp.wav", "assembled_eq_comp.wav",
-                 "assembled_aligned_eq.wav", "assembled_eq.wav",
-                 "assembled_aligned.wav", "assembled.wav"]:
-        p = track_dir / name
-        if p.exists():
-            return str(p)
-    return None
+    """Pick the stem file for --generate-config.
+
+    Operation records win when they describe one unbranched chain that
+    includes the file the filename ladder would pick. A branch, or a
+    partially recorded directory (the ladder's file is a legacy output
+    outside the records), prints a warning and falls back to the ladder, so
+    one track never aborts config generation.
+    """
+    ladder = next((str(track_dir / n) for n in _FINAL_FILE_LADDER if (track_dir / n).exists()), None)
+    operations = [json.loads(p.read_text()) for p in track_dir.glob("*.operation.json")]
+    if not operations:
+        return ladder
+    inputs = {op.get("input") for op in operations}
+    recorded = inputs | {op.get("output") for op in operations}
+    leaves = sorted(op["output"] for op in operations
+                    if op["output"] not in inputs and Path(op["output"]).is_file())
+    if len(leaves) == 1 and (ladder is None or str(Path(ladder).resolve()) in recorded):
+        return leaves[0]
+    chosen = ladder or (leaves[0] if leaves else None)
+    print(f"  WARNING: {track_dir.name}: operation records are "
+          f"{'branched' if len(leaves) > 1 else 'partial'} "
+          f"(recorded leaves: {[Path(p).name for p in leaves]}); using "
+          f"{Path(chosen).name if chosen else 'no file'} — set 'file' in mix_config.json if wrong")
+    return chosen
 
 
 def _resolve_stage_file(config_file: str, stage: str) -> str:
@@ -216,13 +262,8 @@ def _load_style_bus_pans(style: str | None) -> dict[str, float]:
     the field. Callers should fall back to 0.0 (center) for any bus not
     in the returned dict.
 
-    Genre conventions (typical 2 rhythm guitarist setup):
-      - modern_rock:        gtr_1 -0.6,  gtr_laci +0.6  (wide L/R)
-      - punchy_modern_rock: gtr_1 -0.7,  gtr_laci +0.7  (very wide)
-      - classic_rock:       gtr_1 -0.5,  gtr_laci +0.5  (band-feel)
-      - pop:                gtr_1 -0.4,  gtr_laci +0.4  (conservative)
-      - hip_hop:            gtr_1  0,    gtr_laci  0    (centered, drum-led)
-      - jazz_acoustic:      gtr_1 -0.3,  gtr_laci +0.3  (narrow, intimate)
+    Per-guitarist sub-buses are not listed here because their names come
+    from the session's track names; see _load_style_guitar_player_pans.
     """
     if not style:
         return {}
@@ -236,7 +277,21 @@ def _load_style_bus_pans(style: str | None) -> dict[str, float]:
     return profile.get("default_bus_pan", {})
 
 
-def generate_config(session_dir: Path, output_path: Path, style: str | None = None) -> None:
+def _load_style_guitar_player_pans(style: str | None) -> list[float]:
+    """`guitar_player_pans` from the style profile: pans for the per-player
+    guitar sub-buses, assigned in sorted player order (e.g. [-0.85, 0.85, 0.0]
+    puts the first player left, the second right, a third centre)."""
+    if not style:
+        return []
+    profile_path = Path(__file__).resolve().parent / "style_profiles" / f"{style}.json"
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [float(v) for v in profile.get("guitar_player_pans", [])]
+
+
+def generate_config(session_dir: Path, output_path: Path, style: str | None = None, auto_trim: bool = False) -> None:
     sr = 48000
     session_json = session_dir / "session.json"
     if session_json.exists():
@@ -276,6 +331,12 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
             "pan": _detect_pan(name),
         })
 
+    if not session_json.exists() and tracks:
+        sr = sf.info(tracks[0]["file"]).samplerate
+    for track in tracks:
+        if sf.info(track["file"]).samplerate != sr:
+            raise ValueError("Stem sample rates differ; resample explicitly before mixing")
+
     # Assign blend groups and normalize volumes for guitar multi-mic tracks.
     # Count distinct mic types per guitarist (not dup variants) to determine
     # the normalization factor: volume = -20*log10(n_mic_types).
@@ -288,25 +349,27 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
     for t in tracks:
         prefix = _guitarist_prefix(t["name"])
         if prefix:
-            slug = prefix.lower().replace(" ", "_")
+            slug = _guitar_bus_slug(prefix)
             t["blend_group"] = f"{slug}_mics"
             n = len(gtr_mic_types[prefix])
             t["volume_db"] = round(-20.0 * float(np.log10(max(n, 1))), 1)
 
     # Build bus hierarchy: per-guitarist sub-buses feed into a shared guitar bus
     gtr_sub_buses = {}
-    for prefix in _GUITARIST_PREFIXES:
-        slug = prefix.lower().replace(" ", "_")
-        if any(t["bus"] == slug for t in tracks):
-            gtr_sub_buses[slug] = {
-                "volume_db": 0.0,
-                "comp_preset": None,
-                "parent_bus": "guitar",
-            }
+    player_pans = iter(_load_style_guitar_player_pans(style))
+    for prefix in sorted(gtr_mic_types):
+        slug = _guitar_bus_slug(prefix)
+        pan = 0.0 if prefix == "GTR" else next(player_pans, 0.0)
+        gtr_sub_buses[slug] = {
+            "volume_db": 0.0,
+            "pan": float(style_bus_pans.get(slug, pan)),
+            "comp_preset": None,
+            "parent_bus": "guitar",
+        }
 
     # Top-level bus volume_db: use the style profile default if given, else 0 dB.
-    # Bus pan: same idea — style profile says e.g. modern_rock gtr_1 -0.6.
-    # auto_trim_db is computed below by measuring active stem dry-sums.
+    # Bus pan: same idea — style profile default_bus_pan per named bus.
+    # auto_trim_db remains zero unless equal-LUFS calibration is requested.
     def _bus_default(name: str) -> float:
         return float(style_bus_defaults.get(name, 0.0))
 
@@ -321,7 +384,7 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         # session genuinely needs heavier glue.
         "drums":  {"volume_db": _bus_default("drums"),  "pan": _bus_pan("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus_gentle", "parent_bus": None},
         "bass":   {"volume_db": _bus_default("bass"),   "pan": _bus_pan("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
-        **{name: {**cfg, "pan": _bus_pan(name), "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
+        **{name: {**cfg, "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
         "guitar": {"volume_db": _bus_default("guitar"), "pan": _bus_pan("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
     }
 
@@ -356,12 +419,11 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
 
     # Per-bus auto-trim: load active stems, measure dry-sum LUFS per bus, and
     # set auto_trim_db so each bus output sits at -18 LUFS with volume_db = 0.
-    # This is the "calibration anchor" — keeps the master sum at a sane level
-    # regardless of how many stems each bus has (drums 15+, bass 2, vocal 1...).
-    print("\nComputing per-bus auto-trim (target -18 LUFS per bus):")
-    auto_trims = _compute_bus_auto_trims(config, target_lufs=-18.0, verbose=True)
-    for name, trim in auto_trims.items():
-        config["buses"][name]["auto_trim_db"] = trim
+    # Equal-bus loudness is an optional starting point, not gain staging policy.
+    if auto_trim:
+        auto_trims = _compute_bus_auto_trims(config, target_lufs=-18.0, verbose=True)
+        for name, trim in auto_trims.items():
+            config["buses"][name]["auto_trim_db"] = trim
 
     with open(output_path, "w") as f:
         json.dump(config, f, indent=2)
@@ -392,18 +454,25 @@ def _topo_order(buses: dict) -> list[str]:
     children: dict[str, list] = {name: [] for name in buses}
     for name, cfg in buses.items():
         parent = cfg.get("parent_bus")
-        if parent and parent in children:
+        if parent and parent not in children:
+            raise ValueError(f"Unknown parent bus: {parent}")
+        if parent:
             children[parent].append(name)
 
     order: list[str] = []
     visited: set = set()
+    visiting: set = set()
 
     def visit(name: str) -> None:
+        if name in visiting:
+            raise ValueError("Bus routing contains a cycle")
         if name in visited:
             return
-        visited.add(name)
+        visiting.add(name)
         for child in children.get(name, []):
             visit(child)
+        visiting.remove(name)
+        visited.add(name)
         order.append(name)
 
     for name in buses:
@@ -457,11 +526,12 @@ def _compute_bus_auto_trims(
         polarity = -1.0 if t.get("polarity_flip", False) else 1.0
         try:
             stereo = _load_as_stereo(Path(t["file"]), max_length, sr)
+            mono_source = sf.info(t["file"]).channels == 1
         except Exception as exc:
             if verbose:
                 print(f"  auto-trim: skip {t['file']} ({exc})", file=sys.stderr)
             continue
-        stereo = _pan(stereo * vol * polarity, pan_v)
+        stereo = _pan(stereo * vol * polarity, pan_v, mono_source=mono_source)
         if bus not in bus_buffers:
             bus_buffers[bus] = np.zeros((2, max_length), dtype=np.float32)
         bus_buffers[bus] += stereo
@@ -485,10 +555,9 @@ def _compute_bus_auto_trims(
 
         # Apply the bus's own pan BEFORE measuring LUFS so the calibration
         # matches the post-pan state the renderer produces (the renderer
-        # applies eff_gain then bus_pan; gain and constant-power pan
-        # commute, so the LUFS landing point is identical). Without this,
-        # hard-panned buses lose ~3 dB LUFS at render that the calibration
-        # never sees, producing too much downstream attenuation.
+        # applies eff_gain then bus_pan; gain and the balance pan commute,
+        # so the LUFS landing point is identical). Without this, panned
+        # buses lose loudness at render that the calibration never sees.
         bus_pan = float(cfg.get("pan", 0.0))
         if bus_pan != 0.0:
             buf = _pan(buf, bus_pan)
@@ -533,6 +602,8 @@ def _load_as_stereo(path: Path, length: int, sr: int) -> np.ndarray:
     if file_sr != sr:
         raise ValueError(f"SR mismatch: {path} is {file_sr} Hz, expected {sr}")
 
+    if data.shape[1] > 2 or not np.isfinite(data).all():
+        raise ValueError(f"Expected finite mono/stereo audio: {path}")
     n = data.shape[0]
     out = np.zeros((2, length), dtype=np.float32)
     take = min(n, length)
@@ -545,13 +616,32 @@ def _load_as_stereo(path: Path, length: int, sr: int) -> np.ndarray:
     return out
 
 
-def _pan(buf: np.ndarray, pan: float) -> np.ndarray:
-    """Constant-power pan. pan: -1.0 (full L) to 1.0 (full R). buf: (2, N)."""
-    angle = (pan + 1.0) / 2.0 * (np.pi / 2.0)
+def _pan(buf: np.ndarray, pan: float, mono_source: bool = False) -> np.ndarray:
+    """Pan a (2, N) buffer. pan: -1.0 (full L) to 1.0 (full R).
+
+    mono_source=True (a mono file duplicated onto both channels): constant-
+    power law, -3 dB per channel at centre. Otherwise a stereo balance law
+    with unity at centre: the far channel is attenuated linearly and the
+    near channel stays at unity, so pan 0.01 is continuous with pan 0.
+    """
+    if mono_source:
+        angle = (pan + 1.0) / 2.0 * (np.pi / 2.0)
+        gains = (np.cos(angle), np.sin(angle))
+    else:
+        gains = (min(1.0, 1.0 - pan), min(1.0, 1.0 + pan))
     result = buf.copy()
-    result[0] *= np.cos(angle)
-    result[1] *= np.sin(angle)
+    result[0] *= gains[0]
+    result[1] *= gains[1]
     return result
+
+
+def _linked_compress(buf: np.ndarray, sr: int, threshold_db: float, ratio: float,
+                     attack_ms: float, release_ms: float, makeup_db: float = 0.0) -> np.ndarray:
+    """Stereo-linked compressor: one gain curve (from the louder channel) drives both channels."""
+    comp = Compressor(threshold_db=float(threshold_db), ratio=float(ratio),
+                      attack_ms=float(attack_ms), release_ms=float(release_ms))
+    gain = _linked_gain(buf, comp, sr) * 10.0 ** (float(makeup_db) / 20.0)
+    return (buf * gain).astype(np.float32)
 
 
 def _apply_comp_preset(buf: np.ndarray, preset_name: str, sr: int) -> np.ndarray:
@@ -561,29 +651,13 @@ def _apply_comp_preset(buf: np.ndarray, preset_name: str, sr: int) -> np.ndarray
     with open(path) as f:
         p = json.load(f)
     s = p["settings"]
-    makeup = float(s.get("makeup_db") or 0.0)
-    board = Pedalboard([
-        Compressor(
-            threshold_db=float(s["threshold_db"]),
-            ratio=float(s["ratio"]),
-            attack_ms=float(s["attack_ms"]),
-            release_ms=float(s["release_ms"]),
-        ),
-        Gain(gain_db=makeup),
-    ])
-    return board(buf.astype(np.float32), sr).astype(np.float32)
+    return _linked_compress(buf, sr, s["threshold_db"], s["ratio"], s["attack_ms"],
+                            s["release_ms"], s.get("makeup_db") or 0.0)
 
 
-def _write_stem(buf: np.ndarray, path: Path, sr: int, lufs_target: float = -18.0) -> None:
-    """Write a single bus buffer as a normalized stem WAV."""
-    meter = pyln.Meter(sr)
-    loudness = meter.integrated_loudness(buf.T)
-    if np.isfinite(loudness):
-        buf = buf * 10.0 ** ((lufs_target - loudness) / 20.0)
-    peak = np.max(np.abs(buf))
-    if peak > 1.0:
-        buf = buf / peak
-    sf.write(str(path), buf.T, sr, subtype="PCM_24")
+def _write_stem(buf: np.ndarray, path: Path, sr: int) -> None:
+    """Preserve the actual bus level and floating-point headroom on export."""
+    sf.write(str(path), buf.T, sr, subtype="FLOAT")
 
 
 def _apply_bus_reverb(buf: np.ndarray, sr: int, preset_name: str, wet: float) -> np.ndarray:
@@ -613,8 +687,8 @@ def _apply_bus_reverb(buf: np.ndarray, sr: int, preset_name: str, wet: float) ->
     ])
     reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float32)  # (N+pre, 2)
 
-    if pre_delay_samples > 0:
-        reverb_out = reverb_out[pre_delay_samples:]
+    # Preserve the leading pre-delay. The renderer pads the timeline by
+    # _REVERB_TAIL_S when reverb is configured, so the tail fits.
     reverb_out = reverb_out[:len(data)]
     if len(reverb_out) < len(data):
         reverb_out = np.concatenate([reverb_out, np.zeros((len(data) - len(reverb_out), 2))], axis=0)
@@ -675,7 +749,7 @@ def _parallel_saturate(buf: np.ndarray, mode: str, drive: float, mix: float) -> 
     """Blend a saturated copy of `buf` back into the dry signal.
 
     mode: 'tube'   = asymmetric tanh (even harmonics, warmth)
-          'tape'   = symmetric tanh   (odd+even, smooth)
+          'tape'   = symmetric tanh   (odd harmonics only, smooth)
           'clipper'= cubic soft clip  (odd, presence)
     drive: 0.0-1.0, amount of saturation push
     mix: 0.0-1.0, blend amount of the saturated copy on top of the dry
@@ -740,7 +814,7 @@ def _bus_tape_sat_relevance_check(buf: np.ndarray, sr: int, bus_name: str) -> di
 def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
     """Symmetric tanh soft clipping (tape saturation). buf: (2, N). RMS-normalized.
 
-    Symmetric clipping generates odd-order harmonics (2nd, 3rd) — tape-like warmth
+    Symmetric clipping generates odd-order harmonics only (3rd, 5th, ...) — tape-like warmth
     without the tonal shift of asymmetric tube saturation. RMS normalization preserves
     level: only the spectral content changes.
     """
@@ -756,37 +830,25 @@ def _tape_saturate(buf: np.ndarray, drive: float) -> np.ndarray:
 
 
 def _soft_clip(buf: np.ndarray, threshold_db: float, knee_db: float = 1.5) -> np.ndarray:
-    """Cubic soft clipper. Above threshold the signal is gradually rounded
-    over a knee_db transition; far above threshold it asymptotes to the
-    ceiling. Generates mostly odd-order harmonics, like a console clipper.
+    """Soft-knee clipper. Unity below (threshold - knee_db); a quadratic knee
+    of half-width w = T - knee_start rounds the transfer curve into the
+    ceiling T at T + w; above that the output is held at T. The curve is
+    monotone and never exceeds T. Generates odd-order harmonics (symmetric).
 
     Use BEFORE the brick-wall limiter for modern loudness without "squashed"
     feel: clipper handles the peaks musically, limiter just catches strays.
     """
     threshold_lin = 10.0 ** (threshold_db / 20.0)
-    knee_lin = 10.0 ** (knee_db / 20.0)
-    out = buf.copy()
+    knee_start = threshold_lin * 10.0 ** (-max(knee_db, 0.0) / 20.0)
+    w = threshold_lin - knee_start
     abs_buf = np.abs(buf)
-
-    # Three zones: below knee start, inside knee, above knee
-    knee_start = threshold_lin / knee_lin
-    knee_end = threshold_lin * knee_lin
-
-    # Knee region: smooth cubic transition
-    in_knee = (abs_buf >= knee_start) & (abs_buf < knee_end)
-    if in_knee.any():
-        # Normalise position in the knee to [0, 1]
-        x = (abs_buf[in_knee] - knee_start) / (knee_end - knee_start)
-        # Cubic ease-out that asymptotes near the ceiling
-        gain = 1.0 - x * x * (3.0 - 2.0 * x) * (1.0 - threshold_lin / abs_buf[in_knee])
-        out[in_knee] = np.sign(buf[in_knee]) * abs_buf[in_knee] * gain
-
-    # Above-knee region: hard ceiling at threshold
-    above = abs_buf >= knee_end
-    if above.any():
-        out[above] = np.sign(buf[above]) * threshold_lin
-
-    return out
+    if w <= 0.0:
+        shaped = np.minimum(abs_buf, threshold_lin)
+    else:
+        knee = abs_buf - (abs_buf - knee_start) ** 2 / (4.0 * w)
+        shaped = np.where(abs_buf < knee_start, abs_buf,
+                          np.where(abs_buf < threshold_lin + w, knee, threshold_lin))
+    return np.sign(buf) * shaped
 
 
 def _hard_clip(buf: np.ndarray, threshold_db: float) -> np.ndarray:
@@ -823,30 +885,9 @@ def _clipper_relevance_check(master: np.ndarray, sr: int) -> dict:
     }
 
 
-def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4,
-                            fast_skip_db: float = -3.0) -> float:
-    """4x-oversampled true peak in dBFS for a (2, N) stereo buffer.
-
-    pedalboard.Limiter only constrains the sample peak; inter-sample peaks
-    can still exceed the ceiling after codec encoding (Spotify Ogg/Vorbis,
-    Apple AAC). This second-pass measurement reveals them.
-
-    Fast path: if the sample peak is below `fast_skip_db` (default -3 dBFS)
-    we skip the resample_poly call and approximate TP ≈ sample_peak + 0.5 dB.
-    The approximation is always conservative — the actual TP-vs-sample-peak
-    gap can't exceed ~0.5 dB for normal stereo audio, and at -3 dBFS the
-    TP can't reach the -1 dBTP ceiling regardless. Saves ~0.8s per call;
-    a typical render measures 8-11 buses, only the master output is hot
-    enough to actually need the oversampled measurement.
-    """
-    sample_peak = float(np.max(np.abs(master)))
-    sample_peak_db = 20.0 * np.log10(max(sample_peak, 1e-12))
-    if sample_peak_db < fast_skip_db:
-        return sample_peak_db + 0.5  # conservative TP approximation
-    up_l = _resample_poly(master[0], oversample, 1)
-    up_r = _resample_poly(master[1], oversample, 1)
-    tp = max(float(np.max(np.abs(up_l))), float(np.max(np.abs(up_r))))
-    return 20.0 * np.log10(max(tp, 1e-12))
+def _measure_true_peak_dbfs(master: np.ndarray, oversample: int = 4) -> float:
+    """Worst-channel true peak (dBTP), including inter-sample peaks."""
+    return _worst_channel_true_peak_dbfs(master, oversample)
 
 
 def _peak_db(buf: np.ndarray) -> float:
@@ -888,7 +929,7 @@ def _ms_relevance_check(master: np.ndarray, ms_cfg: dict, sr: int) -> dict:
     Conditions:
       - The mix has actual side content (rms(side) / rms(mid) > 0.05).
         A near-mono mix won't benefit and could just create stereo problems.
-      - If side gain > 0 dB is configured, the existing width can't already be huge
+      - If a side boost (side_gain_db > 0 or a positive side EQ gain) is configured, the existing width can't already be huge
         (ms_width_ratio < 0.5), or we risk breaking mono compatibility.
     """
     mid, side = _ms_encode(master)
@@ -902,10 +943,11 @@ def _ms_relevance_check(master: np.ndarray, ms_cfg: dict, sr: int) -> dict:
             f"M/S width {width_ratio:.3f} < 0.05 — mix is near-mono, M/S processing has no audible target"
         )
     side_eq = ms_cfg.get("side_eq", [])
-    side_boost = any(f.get("db", 0) > 0 for f in side_eq)
+    side_boost = (float(ms_cfg.get("side_gain_db", 0.0)) > 0
+                  or any(f.get("db", 0) > 0 for f in side_eq))
     if side_boost and width_ratio > 0.5:
         issues.append(
-            f"side EQ boost requested but width {width_ratio:.3f} > 0.5 — risk of mono-compat breakage"
+            f"side boost requested but width {width_ratio:.3f} > 0.5 — risk of mono-compat breakage"
         )
 
     return {
@@ -918,24 +960,11 @@ def _ms_relevance_check(master: np.ndarray, ms_cfg: dict, sr: int) -> dict:
 
 def _ms_apply_eq(channel: np.ndarray, sr: int, filters: list) -> np.ndarray:
     """Apply EQ chain to a single mono channel (mid or side). Zero-phase."""
-    if not _HAS_EQ or not filters:
-        return channel
+    if filters and not _HAS_EQ:
+        raise RuntimeError("EQ support is unavailable")
     out = channel.copy()
     for f in filters:
-        ftype = f.get("type", "")
-        if ftype == "highpass":
-            sos = _hp_sos(f["hz"], f.get("order", 2), sr)
-        elif ftype == "lowpass":
-            sos = _lp_sos(f["hz"], f.get("order", 2), sr)
-        elif ftype == "highshelf":
-            sos = _highshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
-        elif ftype == "lowshelf":
-            sos = _lowshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
-        elif ftype == "peak":
-            sos = _peak_sos(f["hz"], f.get("q", 1.0), f["db"], sr)
-        else:
-            continue
-        out = _sosfiltfilt(sos, out)
+        out = filter_signal(out, sr, f, "zero")
     return out
 
 
@@ -971,45 +1000,68 @@ def _apply_eq_chain(buf: np.ndarray, sr: int, filters: list, label: str = "EQ") 
 
     `label` is used only for warning prints (e.g. "master EQ" or "bus 'drums' EQ").
     """
-    if not _HAS_EQ:
-        print(f"  WARNING: apply_eq.py not importable — skipping {label}")
-        return buf
+    if filters and not _HAS_EQ:
+        raise RuntimeError(f"EQ support is unavailable for {label}")
     out = buf.copy()
     for f in filters:
-        ftype = f.get("type", "")
-        if ftype == "highpass":
-            sos = _hp_sos(f["hz"], f.get("order", 2), sr)
-        elif ftype == "lowpass":
-            sos = _lp_sos(f["hz"], f.get("order", 2), sr)
-        elif ftype == "highshelf":
-            sos = _highshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
-        elif ftype == "lowshelf":
-            sos = _lowshelf_sos(f["hz"], f["db"], f.get("slope", 1.0), sr)
-        elif ftype == "peak":
-            sos = _peak_sos(f["hz"], f.get("q", 1.0), f["db"], sr)
-        else:
-            print(f"  WARNING: unknown {label} filter type '{ftype}' — skipped")
-            continue
-        out = _sosfiltfilt(sos, out, axis=1)
+        out = filter_signal(out, sr, f, "zero", axis=1)
     return out
 
 
-# Backwards-compat alias — older code calls _apply_master_eq
-def _apply_master_eq(master: np.ndarray, sr: int, filters: list) -> np.ndarray:
-    return _apply_eq_chain(master, sr, filters, label="master EQ")
+def validate_mix_config(config: dict, pending_files=()) -> None:
+    """Check routing and file references before rendering or replaying stems."""
+    sr = config["sample_rate"]
+    if not isinstance(sr, int) or sr <= 0:
+        raise ValueError("Mix sample rate must be a positive integer")
+    if not isinstance(config["master"], dict):
+        raise ValueError("Master settings must be an object")
+    buses_cfg: dict = config["buses"]
+    if "master" in buses_cfg:
+        raise ValueError("The bus name 'master' is reserved for direct master routing")
+    _topo_order(buses_cfg)
+    pending = {str(Path(path).resolve()) for path in pending_files}
+    active = [t for t in config["tracks"] if t.get("active", True)]
+    if not active:
+        raise ValueError("No active tracks in config")
+    # Preset names fail fast here, not after every stem has been loaded.
+    reverb_presets = [cfg["reverb_send"].get("preset") for cfg in buses_cfg.values() if cfg.get("reverb_send")]
+    reverb_presets += [rb.get("preset") for rb in config.get("reverb_buses", {}).values()]
+    for name in reverb_presets:
+        if _HAS_REVERB and name not in _REVERB_PRESETS:
+            raise ValueError(f"Unknown reverb preset: {name}")
+    for bus_name, cfg in buses_cfg.items():
+        preset = cfg.get("comp_preset")
+        if preset and not (PRESETS_DIR / f"{preset}.json").is_file():
+            raise ValueError(f"Unknown comp_preset '{preset}' on bus '{bus_name}'")
+    for settings in [*buses_cfg.values(), *active]:
+        if not -1 <= float(settings.get("pan", 0)) <= 1:
+            raise ValueError("Pan must be between -1 and 1")
+        for key in ("volume_db", "auto_trim_db"):
+            if not np.isfinite(float(settings.get(key, 0))):
+                raise ValueError(f"{key} must be finite")
+    for track in active:
+        if track.get("bus", "master") not in {*buses_cfg, "master"}:
+            raise ValueError(f"Unknown bus for track {track['name']}")
+        source = Path(track["file"])
+        if str(source.resolve()) not in pending:
+            info = sf.info(source)
+            if info.samplerate != sr or info.channels not in (1, 2) or info.frames == 0:
+                raise ValueError(f"Invalid audio format for track {track['name']}")
+        for send in track.get("reverb_sends", []):
+            if send["bus"] not in config.get("reverb_buses", {}):
+                raise ValueError(f"Unknown reverb bus: {send['bus']}")
+            if not np.isfinite(float(send.get("level_db", -6))):
+                raise ValueError("Reverb send level must be finite")
 
 
 def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: bool = False, stage: str | None = None) -> None:
     with open(config_path) as f:
         config = json.load(f)
-
+    validate_mix_config(config)
     sr: int = config["sample_rate"]
     master_cfg: dict = config["master"]
     buses_cfg: dict = config["buses"]
     active = [t for t in config["tracks"] if t.get("active", True)]
-
-    if not active:
-        raise ValueError("No active tracks in config")
 
     print(f"Active tracks: {len(active)} / {len(config['tracks'])}")
 
@@ -1025,6 +1077,11 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         print()
 
     max_length = max(sf.info(t["file"]).frames for t in active)
+    reverb_buses_cfg: dict = config.get("reverb_buses", {})
+    if _HAS_REVERB and (reverb_buses_cfg or any(c.get("reverb_send") for c in buses_cfg.values())):
+        # Pad the timeline so reverb tails ring out past the last stem sample.
+        max_length += int(_REVERB_TAIL_S * sr)
+        print(f"Reverb configured: timeline padded by {_REVERB_TAIL_S:.0f}s for the tail")
     print(f"Mix length: {max_length / sr:.1f}s ({max_length} samples at {sr} Hz)")
     print()
 
@@ -1033,7 +1090,6 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # Each named bus accumulates pre-fader sends from any track listing it in
     # its `reverb_sends`. After the track loop, each reverb bus is rendered
     # once and the wet return is summed into master.
-    reverb_buses_cfg: dict = config.get("reverb_buses", {})
     reverb_send_buffers: dict[str, np.ndarray] = {
         rb_name: np.zeros((2, max_length), dtype=np.float32) for rb_name in reverb_buses_cfg
     }
@@ -1058,13 +1114,13 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         print(f"    bus:{bus}  vol:{t.get('volume_db', 0.0):+.1f}dB  pan:{p:+.2f}")
 
         stereo = _load_as_stereo(Path(t["file"]), max_length, sr)
-        stereo = _pan(stereo * vol * polarity, p)
+        stereo = _pan(stereo * vol * polarity, p, mono_source=sf.info(t["file"]).channels == 1)
 
         if bus not in bus_buffers:
             bus_buffers[bus] = np.zeros((2, max_length), dtype=np.float32)
         bus_buffers[bus] += stereo
 
-        # Capture pre-mix mono (before pan/vol scaling) for phase-correlation
+        # Capture the track's mono sum (after volume, polarity and pan) for phase-correlation
         # check between tracks on the same bus. Decimated to 1 kHz to keep
         # memory bounded (41 tracks × 7-min @ 48 kHz = 13.5 GB otherwise).
         bus_track_mono.setdefault(bus, []).append(
@@ -1302,7 +1358,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                   f"{bp['final']:>8.1f}{bp['true_peak_final']:>7.1f}  {bp['verdict']}")
 
     # Sum top-level buses (parent_bus: null) into master
-    master = np.zeros((2, max_length), dtype=np.float32)
+    master = bus_buffers.get("master", np.zeros((2, max_length), dtype=np.float32)).copy()
     for bus_name, cfg in buses_cfg.items():
         if not cfg.get("parent_bus") and bus_name in processed:
             master += processed[bus_name]
@@ -1327,17 +1383,10 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # Master bus glue compressor (optional)
     master_comp = master_cfg.get("comp")
     if master_comp:
-        comp_board = Pedalboard([
-            Compressor(
-                threshold_db=float(master_comp["threshold_db"]),
-                ratio=float(master_comp.get("ratio", 2.0)),
-                attack_ms=float(master_comp.get("attack_ms", 10.0)),
-                release_ms=float(master_comp.get("release_ms", 300.0)),
-            ),
-            Gain(gain_db=float(master_comp.get("makeup_db", 0.0))),
-        ])
         lufs_pre_comp = meter.integrated_loudness(master.T)
-        master = comp_board(master.astype(np.float32), sr).astype(np.float32)
+        master = _linked_compress(master, sr, master_comp["threshold_db"], master_comp.get("ratio", 2.0),
+                                  master_comp.get("attack_ms", 10.0), master_comp.get("release_ms", 300.0),
+                                  master_comp.get("makeup_db", 0.0))
 
         lufs_post_comp = meter.integrated_loudness(master.T)
         peak_post_comp = _peak_db(master)
@@ -1410,7 +1459,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     # premaster — it's not loudness-focused processing.
     master_eq = master_cfg.get("eq")
     if master_eq:
-        master = _apply_master_eq(master, sr, master_eq)
+        master = _apply_eq_chain(master, sr, master_eq, label="master EQ")
         peak_post_eq = _peak_db(master)
         master_peaks["after_eq"] = round(peak_post_eq, 2)
         filter_desc = ", ".join(
@@ -1443,11 +1492,14 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         master_peaks["after_limiter"] = None
         master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
         master_peaks["final_true_peak"] = round(tp_final, 2)
-        # Verdict for a premaster: peak should be in the -6..-3 dBFS window
-        # (industry standard handoff). Use a relaxed verdict here.
-        if sample_peak_after > -1.0:
+        # Premaster bands differ from _peak_verdict on purpose: the handoff is
+        # normalized to about -3 dBFS, which must read [OK]. Take the worse of
+        # sample and true peak (a -3 dBFS sample-normalized buffer can still
+        # carry higher inter-sample peaks).
+        worst_peak = max(sample_peak_after, tp_final)
+        if worst_peak > -1.0:
             verdict = "[CLIP]"
-        elif sample_peak_after > -2.0:
+        elif worst_peak > -2.0:
             verdict = "[WARN]"
         else:
             verdict = "[OK]"
@@ -1470,42 +1522,17 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
             master_peaks["after_lufs_norm"] = round(peak_post_norm, 2)
             print(f"  Applied gain: {gain_db:+.1f} dB  -> peak {peak_post_norm:.1f} dBFS {_peak_verdict(peak_post_norm)}")
 
-        tp_limit = master_cfg.get("true_peak_dbfs", -2.0)
-        board = Pedalboard([Limiter(threshold_db=float(tp_limit), release_ms=100.0)])
-        master = board(master.astype(np.float32), sr).astype(np.float32)
-
+        tp_limit = float(master_cfg.get("true_peak_dbfs", -2.0))
+        # Lookahead true-peak limiter (no makeup gain) with an 8x-verified
+        # static safety trim; output TP <= tp_limit - 0.01 dBTP at 8x.
+        master, trim_db = _brickwall_limit(master, sr, tp_limit)
+        master = master.astype(np.float32)
         sample_peak_after = _peak_db(master)
-        tp_measured = _measure_true_peak_dbfs(master)
-        if tp_measured > tp_limit:
-            isp_scale_db = tp_limit - tp_measured
-            master *= 10.0 ** (isp_scale_db / 20.0)
-            tp_final = tp_limit
-            sample_peak_after = _peak_db(master)
-            print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
-                  f"true {tp_measured:.2f} dBTP -> {tp_final:.2f} dBTP "
-                  f"(ISP correction {isp_scale_db:+.2f} dB)")
-        else:
-            tp_final = tp_measured
-            print(f"  Peak after limiter: sample {sample_peak_after:.2f} dBFS  "
-                  f"true {tp_final:.2f} dBTP")
+        peak_final = _measure_true_peak_dbfs(master, oversample=8)
         master_peaks["after_limiter"] = round(sample_peak_after, 2)
-        peak_final = tp_final
-
-        loudness_post = meter.integrated_loudness(master.T)
-        if np.isfinite(loudness_post):
-            delta_post = target_lufs - loudness_post
-            if abs(delta_post) > 0.3:
-                current_tp = _measure_true_peak_dbfs(master)
-                headroom_db = tp_limit - current_tp
-                corrected_gain_db = delta_post if delta_post < 0 else min(delta_post, headroom_db)
-                master *= 10.0 ** (corrected_gain_db / 20.0)
-                print(f"  Post-limiter LUFS: {loudness_post:.2f} -> applying {corrected_gain_db:+.2f} dB "
-                      f"(target {target_lufs}, headroom {headroom_db:+.2f} dB)")
-                loudness_post = meter.integrated_loudness(master.T)
-                peak_final = _measure_true_peak_dbfs(master)
-                sample_peak_after = _peak_db(master)
-                master_peaks["after_limiter"] = round(sample_peak_after, 2)
-        loudness = loudness_post
+        print(f"  Limiter ({_LIMITER_NAME}): sample {sample_peak_after:.2f} dBFS  "
+              f"true {peak_final:.2f} dBTP (8x)  safety trim {trim_db:+.2f} dB")
+        loudness = meter.integrated_loudness(master.T)
 
         master_peaks["final_sample_peak"] = round(sample_peak_after, 2)
         master_peaks["final_true_peak"] = round(peak_final, 2)
@@ -1522,10 +1549,15 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
         else:
             output_wav = out_dir / "mix.wav"
     output_wav.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_wav), master.T, sr, subtype="PCM_24")
+    # A premaster handoff is written as 32-bit float (no truncation, no dither
+    # decision for mastering to undo); the legacy combined chain stays 24-bit.
+    out_subtype = "FLOAT" if premaster_mode else "PCM_24"
+    sf.write(str(output_wav), master.T, sr, subtype=out_subtype)
 
     report = {
         "output": str(output_wav),
+        "delivery_ready": False,
+        "listening_review": {"status": "pending", "performed_by_tool": False},
         "stage": stage,
         "mix_stage": "premaster" if premaster_mode else "master",
         "active_tracks": len(active),
@@ -1538,6 +1570,7 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
                                  else master_cfg.get("true_peak_dbfs", -2.0)),
         "peak_target_dbfs": (float(master_cfg.get("peak_target_dbfs", -3.0))
                              if premaster_mode else None),
+        "limiter": None if premaster_mode else _LIMITER_NAME,
         "integrated_lufs": round(loudness, 2) if np.isfinite(loudness) else None,
         "true_peak_dbtp": round(peak_final, 2),
         "sample_peak_dbfs": round(sample_peak_after, 2),
@@ -1556,14 +1589,24 @@ def render_mix(config_path: Path, output_wav: Path | None = None, render_stems: 
     print(f"Report: {report_path}")
 
     if render_stems:
-        stems_dir = output_wav.parent.parent / "stems"
+        # Always derive from the session dir, not the output WAV's path depth.
+        # output_wav lives one level deeper under --stage (mixes/stages/) and
+        # can be anywhere under a custom --output, so parent.parent would land
+        # the stems in the wrong place. output_dir is <session>/mixes.
+        # Stage renders get their own stems/<stage>/ folder so they never
+        # replace the stems that belong to the main mix.wav.
+        session_dir = config.get("session_dir") or str(
+            Path(config.get("output_dir", ".")).parent)
+        stems_dir = Path(session_dir) / "stems"
+        if stage:
+            stems_dir = stems_dir / stage
         stems_dir.mkdir(parents=True, exist_ok=True)
         print(f"\nStems -> {stems_dir}/")
         for bus_name, buf in processed.items():
             stem_path = stems_dir / f"stem_{bus_name}.wav"
             _write_stem(buf.copy(), stem_path, sr)
             lufs = pyln.Meter(sr).integrated_loudness(buf.T)
-            print(f"  stem_{bus_name}.wav  ({lufs:.1f} LUFS -> -18 LUFS)")
+            print(f"  stem_{bus_name}.wav  ({lufs:.1f} LUFS; bus level preserved)")
 
 
 # ---------------------------------------------------------------------------
@@ -1594,13 +1637,16 @@ Examples:
                              "and write auto_trim_db back. Preserves all other fields (active flags, "
                              "volume_db, pan, presets, sends). Use when active tracks change.")
     parser.add_argument("--output", default=None, help="Output WAV path (default: <output_dir>/mix.wav)")
-    parser.add_argument("--stems", action="store_true", help="Also write per-bus stem WAVs to <output_dir>/stems/")
+    parser.add_argument("--stems", action="store_true",
+                        help="Also write per-bus float stem WAVs (bus level preserved) to <session>/stems/, "
+                             "or <session>/stems/<stage>/ with --stage")
     parser.add_argument(
         "--stage",
         choices=STAGE_NAMES,
         default=None,
         help="Use stem files from this processing stage. raw=assembled, eq=after EQ, comp=after comp, fx=config file (default). Bus and master chain always run.",
     )
+    parser.add_argument("--auto-trim", action="store_true", help="Opt in to equal-LUFS bus calibration during config generation")
     args = parser.parse_args()
 
     if args.generate_config:
@@ -1608,7 +1654,7 @@ Examples:
         if not session_dir.is_dir():
             parser.error(f"Not a directory: {session_dir}")
         config_path = Path(args.config) if args.config else session_dir / "mix_config.json"
-        generate_config(session_dir, config_path, style=args.style)
+        generate_config(session_dir, config_path, style=args.style, auto_trim=args.auto_trim)
 
     elif args.recompute_autotrim:
         config_path = Path(args.input)

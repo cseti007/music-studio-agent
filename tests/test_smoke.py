@@ -11,7 +11,7 @@ field-test rounds revealed as easy to regress:
 - Each make-it-hit tool's relevance_check returns the expected skip/apply
   decision on simple synthetic inputs
 
-Run with:  conda run -n music-studio-agent pytest tests/ -v
+Run with:  conda run -n music-mix-agent pytest tests/ -v
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class TestTruePeak:
     def test_true_peak_exceeds_sample_peak_on_hf_content(self, hf_sine_1s):
         """At 19 kHz with phase that misses the peak, true peak must exceed
         sample peak by at least 0.1 dB — that's the whole point of ISP."""
-        from analyze import _true_peak_dbfs
+        from _dsp import true_peak_dbfs as _true_peak_dbfs
 
         sample_peak_db = 20 * np.log10(np.max(np.abs(hf_sine_1s)))
         true_peak_db = _true_peak_dbfs(hf_sine_1s)
@@ -97,7 +97,7 @@ class TestTruePeak:
 
     def test_true_peak_matches_sample_peak_on_lf_content(self):
         """At 100 Hz with no aliasing, true peak ~= sample peak (within 0.1 dB)."""
-        from analyze import _true_peak_dbfs
+        from _dsp import true_peak_dbfs as _true_peak_dbfs
 
         t = np.arange(SR) / SR
         sig = 0.5 * np.sin(2 * np.pi * 100 * t)
@@ -459,7 +459,7 @@ class TestRelevanceChecks:
         session = {
             "tracks": [
                 {"name": "KICK_OUT", "clips": [{"source_file": "/x/KICK_OUT.wav"}]},
-                {"name": "KICK_OUT.dup1", "clips": [{"source_file": "/y/KICK_OUT.wav"}]},
+                {"name": "KICK_OUT.dup1", "clips": [{"source_file": "/x/KICK_OUT.wav"}]},
                 {"name": "SNARE", "clips": [{"source_file": "/x/SNARE.wav"}]},
             ],
         }
@@ -560,8 +560,8 @@ class TestStyleCheck:
         # significantly outside → red
         assert _grade_range(measured=1.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "RED"
 
-    def test_overall_verdict_hard_fail_on_lufs(self):
-        """A RED LUFS verdict forces overall RED even if everything else is GREEN."""
+    def test_style_loudness_does_not_override_all_other_checks(self):
+        """A stylistic loudness mismatch is advisory, not a delivery failure."""
         from style_check import _verdict_for_checks
 
         checks = [
@@ -570,8 +570,8 @@ class TestStyleCheck:
             {"name": "crest_factor_db", "verdict": "GREEN"},
         ] + [{"name": f"band_{i}", "verdict": "GREEN"} for i in range(5)]
         verdict, score = _verdict_for_checks(checks)
-        assert verdict == "RED"
-        assert score <= 55, f"hard-fail should cap score, got {score}"
+        assert verdict == "GREEN"
+        assert score == 88
 
     def test_overall_verdict_all_green(self):
         from style_check import _verdict_for_checks
@@ -618,12 +618,13 @@ class TestStyleCheck:
 
     def test_all_profiles_have_default_bus_pan(self):
         """Every style profile must declare `default_bus_pan` for the standard
-        bus names (drums, bass, gtr_1, gtr_laci, gtr, vocal_lead). This is
-        the panning equivalent of `default_bus_volume_db`.
+        bus names (drums, bass, gtr, vocal_lead) plus `guitar_player_pans` for
+        the per-player guitar sub-buses. This is the panning equivalent of
+        `default_bus_volume_db`.
         """
         import json
         from pathlib import Path
-        required_buses = {"drums", "bass", "gtr_1", "gtr_laci", "gtr", "vocal_lead"}
+        required_buses = {"drums", "bass", "gtr", "vocal_lead"}
         profiles = list(Path("tools/style_profiles").glob("*.json"))
         assert profiles, "no style profiles found"
         for p in profiles:
@@ -637,31 +638,34 @@ class TestStyleCheck:
                     f"{p.name}.{name} pan must be numeric, got {type(v).__name__}"
                 assert -1.0 <= v <= 1.0, \
                     f"{p.name}.{name} pan {v} out of [-1.0, 1.0]"
+            players = d.get("guitar_player_pans")
+            assert players and all(-1.0 <= v <= 1.0 for v in players), \
+                f"{p.name} needs guitar_player_pans within [-1.0, 1.0]"
+            assert not any(k.startswith("gtr_") for k in pans), \
+                f"{p.name}: per-player keys belong in guitar_player_pans"
 
     def test_load_style_bus_pans_returns_correct_values(self):
         """`render_mix._load_style_bus_pans` returns the per-bus pan map for a
         known style, empty dict for unknown/None.
         """
-        from render_mix import _load_style_bus_pans
+        from render_mix import _load_style_bus_pans, _load_style_guitar_player_pans
 
         modern = _load_style_bus_pans("modern_rock")
-        # modern_rock convention: industry hard pan ≥ ±0.85
-        assert modern["gtr_1"] == -0.85
-        assert modern["gtr_laci"] == 0.85
         assert modern["bass"] == 0.0  # bass always center
         assert modern["drums"] == 0.0
+        # modern_rock convention: industry hard pan >= ±0.85
+        assert _load_style_guitar_player_pans("modern_rock")[:2] == [-0.85, 0.85]
 
         # hip_hop: rhythm guitars not panned (drum-led)
-        hh = _load_style_bus_pans("hip_hop")
-        assert hh["gtr_1"] == 0.0
-        assert hh["gtr_laci"] == 0.0
+        assert _load_style_guitar_player_pans("hip_hop")[:2] == [0.0, 0.0]
 
         # jazz_acoustic: narrower than rock
-        jazz = _load_style_bus_pans("jazz_acoustic")
-        assert -0.5 < jazz["gtr_1"] < -0.2, f"jazz gtr_1 pan {jazz['gtr_1']}"
+        jazz = _load_style_guitar_player_pans("jazz_acoustic")
+        assert -0.5 < jazz[0] < -0.2, f"jazz first-player pan {jazz[0]}"
 
         assert _load_style_bus_pans(None) == {}
         assert _load_style_bus_pans("not_a_genre") == {}
+        assert _load_style_guitar_player_pans(None) == []
 
     def test_detect_pan_routes_drumkit_pieces_to_audience_perspective(self):
         """`_detect_pan` returns audience-perspective default pans for drum-kit
@@ -704,22 +708,23 @@ class TestStyleCheck:
         """modern_rock convention (researched 2025): hard pan ≥ ±0.85 for
         double-tracked rhythm guitars. Earlier values (±0.6) were too
         conservative relative to industry standard."""
-        from render_mix import _load_style_bus_pans
-        pans = _load_style_bus_pans("modern_rock")
-        assert abs(pans["gtr_1"]) >= 0.8, (
-            f"modern_rock gtr_1 pan {pans['gtr_1']} too narrow — industry "
+        from render_mix import _load_style_guitar_player_pans
+        pans = _load_style_guitar_player_pans("modern_rock")
+        assert abs(pans[0]) >= 0.8, (
+            f"modern_rock first-player pan {pans[0]} too narrow — industry "
             f"hard-pan convention is ±0.85 or wider"
         )
         # punchy_modern_rock should be even harder (LCR full)
-        pans = _load_style_bus_pans("punchy_modern_rock")
-        assert abs(pans["gtr_1"]) >= 0.95, (
-            f"punchy_modern_rock gtr_1 pan {pans['gtr_1']} should be near LCR ±1.0"
+        pans = _load_style_guitar_player_pans("punchy_modern_rock")
+        assert abs(pans[0]) >= 0.95, (
+            f"punchy_modern_rock first-player pan {pans[0]} should be near LCR ±1.0"
         )
 
     def test_generate_config_applies_style_pan_to_buses(self, tmp_path):
         """A `--generate-config --style modern_rock` run with guitar tracks
-        produces a mix_config.json where gtr_1 / gtr_laci buses have pan
-        -0.6 / +0.6 (the modern_rock default).
+        produces a mix_config.json where the per-player guitar buses get the
+        profile's guitar_player_pans in sorted player order, and a GTR track
+        without a player token goes to the generic, centred gtr bus.
         """
         import json
         import soundfile as sf
@@ -728,7 +733,7 @@ class TestStyleCheck:
 
         # Make a tiny tracks layout with two guitars
         tracks_root = tmp_path / "tracks"
-        for name in ["GTR 1 FENDER.01", "GTR LACI 57.01", "BASS DI.01"]:
+        for name in ["GTR 1 FENDER.01", "GTR B 57.01", "GTR DI.01", "BASS DI.01"]:
             d = tracks_root / name
             d.mkdir(parents=True)
             # short noise stem
@@ -742,7 +747,10 @@ class TestStyleCheck:
         cfg = json.loads(out_cfg.read_text())
         # modern_rock pan defaults applied (industry hard pan)
         assert cfg["buses"]["gtr_1"]["pan"] == -0.85
-        assert cfg["buses"]["gtr_laci"]["pan"] == 0.85
+        assert cfg["buses"]["gtr_b"]["pan"] == 0.85
+        assert cfg["buses"]["gtr"]["pan"] == 0.0
+        bus_of = {t["name"]: t["bus"] for t in cfg["tracks"]}
+        assert bus_of["GTR B 57.01"] == "gtr_b" and bus_of["GTR DI.01"] == "gtr"
         assert cfg["buses"]["bass"]["pan"] == 0.0  # bass always center
         assert cfg["buses"]["drums"]["pan"] == 0.0  # drums always center
 
@@ -953,7 +961,6 @@ class TestChainRecall:
         assert chain["stems"][0]["name"] == "KICK"
 
     def test_replay_chain_dry_run_emits_argv_for_each_step(self, tmp_path):
-        import json
         from replay_chain import _build_argv
 
         session_json = tmp_path / "session.json"
@@ -1474,7 +1481,6 @@ class TestPremasterMode:
         import json as _json
         from render_mix import render_mix
         import soundfile as sf
-        import pyloudnorm as pyln
 
         # Make a synthetic drum stem with high crest (transient hits + noise)
         stem = tmp_path / "stem.wav"
@@ -1672,7 +1678,6 @@ class TestApplyGainCrossfade:
 
         assembled, _ = sf.read(str(out_dir / "TEST" / "assembled.wav"))
         # The clip boundary is at sample sr (1 sec). Inspect a window around it.
-        boundary = sr
         # With a 5 ms crossfade (240 samples at 48k), the discontinuity should
         # be spread over the boundary window — no single-sample 1.0-magnitude
         # jump. The actual jump magnitude at any single sample should be much

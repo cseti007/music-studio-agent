@@ -30,6 +30,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from _recall import record_operation
+
 
 PRESETS: dict[str, dict] = {
     "haas_guitar": {
@@ -39,13 +41,13 @@ PRESETS: dict[str, dict] = {
         "wet": 0.85,
     },
     "haas_vocal_doubler": {
-        "description": "Vocal doubler effect — short delay, both sides",
+        "description": "Vocal doubler effect — 18ms delay on the right channel",
         "delay_ms": 18.0,
         "side": "right",
         "wet": 0.6,
     },
     "haas_synth_pad": {
-        "description": "Wide pad — longer delay, both sides, lower mix",
+        "description": "Wide pad — 22ms delay on the left channel, lower mix",
         "delay_ms": 22.0,
         "side": "left",
         "wet": 0.75,
@@ -153,6 +155,7 @@ def _relevance_check(data: np.ndarray, sr: int, file_path: Path | None = None) -
 # Core processing
 # ---------------------------------------------------------------------------
 
+@record_operation("apply_haas")
 def apply_haas(
     input_path: Path,
     output_dir: Path,
@@ -214,14 +217,15 @@ def apply_haas(
 
     output_data = np.stack([L_out, R_out], axis=1)
 
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output_data)))
     if peak > 1.0:
-        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS — scaling down", file=sys.stderr)
-        output_data = output_data / peak
+        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_haas.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),
@@ -230,6 +234,8 @@ def apply_haas(
         "settings": {"delay_ms": delay_ms, "side": side, "wet": wet},
         "relevance_check": rel,
         "applied": True,
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
         "mono_compatibility_warning": (
             "Haas effect comb-filters when summed to mono — verify on a mono speaker"
