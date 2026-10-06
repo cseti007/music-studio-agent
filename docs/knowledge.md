@@ -348,9 +348,14 @@ This canonical session.json is the input for `apply_gain --per-clip`.
 ### Targets and presets
 
 `tools/master_mix.py` contains delivery presets. Streaming LUFS defaults and the
-CD/vinyl loudness values are recommendations or creative starting points, not
-acceptance tests. Broadcast uses the selected EBU loudness requirement. Its
--2 dBTP ceiling is a conservative project choice within the EBU production ceiling.
+CD loudness value is a creative starting point, not an acceptance test (the
+Red Book has no loudness specification). `vinyl_pre` has no LUFS target: it is
+peak-normalized to -3 dBTP with no limiter, and sub-mono is opt-in
+(`--vinyl-elliptical`), because the cutting engineer decides those. Broadcast
+uses the selected EBU loudness requirement. Its -2 dBTP ceiling is a
+conservative project choice within the EBU R128 -1 dBTP maximum. When a master
+target is louder than -14 LUFS, the default ceiling drops to -2 dBTP
+(Spotify/SoundCloud guidance for loud masters).
 CD export is 44.1 kHz/16-bit; Apple stereo export preserves supported native
 sample rates. Verify destination-specific requirements before delivery.
 
@@ -385,8 +390,9 @@ Bus processing changes loudness, so dry calibration is not a final-output invari
 ### Mix vs master separation — premaster handoff
 
 **Invariant:** `render_mix` produces a clean **premaster**, NOT a finished
-master. The master phase (`master_mix.py`) owns LUFS normalization, brick-
-wall limiting, clipper, ISP correction, M/S processing, and dither.
+master: 32-bit float, peak-normalized (default -3 dBFS), no limiter. The master
+phase (`master_mix.py`) owns LUFS normalization, true-peak limiting, clipper,
+M/S processing, and dither.
 
 **Why.** Stacking mastering moves at the mix stage and then running them
 again at the master stage produces a **two-stage limiter cascade**: every
@@ -429,7 +435,7 @@ The `master_mix.py` `MASTERING_PRESETS` dict has a family of `modern_rock_spatia
 | Preset | Sub-mono on side | Top side EQ | Stereo width | Exciter mix | Clipper | Use when |
 |---|---|---|---|---|---|---|
 | `modern_rock` | none | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | baseline modern rock master |
-| `modern_rock_spatial` | HP @ 150 Hz | +1 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | first spatial increment — adds sub-mono for vinyl compat |
+| `modern_rock_spatial` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | 0.10 | soft -2 dB | first spatial increment — adds side high-pass (sub-mono) |
 | `modern_rock_spatial_v9` | HP @ 150 Hz | +2 dB shelf @ 8k | 1.0 | **0.12** | soft -2 dB | Leprous/Wheel crisp top direction |
 | `modern_rock_spatial_v10` | HP @ 200 Hz | **+1 dB peak @ 2.5k + 3 dB shelf @ 8k** | **1.05** | 0.10 | soft -2 dB | full spatial: wider sub-mono, presence boost on side, stereo width bump |
 | `modern_rock_spatial_dark` | HP @ 200 Hz | +1 dB shelf @ 8k only | 1.05 | **0.05** | soft -2 dB | spatial benefits BUT top dialed back — for ear-fatigue cases |
@@ -677,7 +683,7 @@ it is the distorted guitar's sustained amp character between notes.
 | `lowshelf` | boosts/cuts all below hz | body/warmth control, sub weight |
 | `highshelf` | boosts/cuts all above hz | air/sparkle, high-end rolloff |
 
-**Phase mode:** `sosfiltfilt` (zero-phase, forward+backward) — no phase shift. Correct for offline mixing. Linear phase avoids pre-ringing artifacts on transients vs zero-latency minimum phase modes — for offline processing they are equivalent.
+**Phase mode:** minimum phase (`sosfilt`) is the default. `--phase zero` runs the filter forward and backward with half the dB gain per pass, so the magnitude matches the requested filter with no phase shift. Zero-phase filtering is non-causal and therefore pre-rings ahead of transients; minimum-phase filtering does not pre-ring but shifts phase. Neither is universally better: compare on transient-rich material.
 
 **Parameter notation:**
 - `q` — bandwidth control. High Q (20-50) = narrow/surgical. Low Q (0.5-2) = broad/musical.
@@ -930,10 +936,10 @@ This project treats mix and master as **two separate phases**:
 | Mix | stems + mix_config.json | mix.wav | `render_mix.py` |
 | Master | mix.wav | master_<format>.wav | `master_mix.py` |
 
-The `render_mix.py` master chain (glue comp + guarded clipper + guarded
-M/S + EQ + LUFS norm + ISP-aware limiter) is **the mix engineer's
-polish**, not the master pass. It runs inside the render to give the mix
-a coherent shape. The actual mastering pass is `master_mix.py`, run
+In premaster mode (default) the `render_mix.py` master chain is only glue
+comp + EQ + peak normalization: **the mix engineer's polish**, not the master
+pass. The legacy chain (`premaster_mode: false`) adds guarded clipper, guarded
+M/S, LUFS norm and a true-peak limiter; avoid it when the mix will be mastered. The actual mastering pass is `master_mix.py`, run
 separately on the bounced stereo file with format-specific delivery
 targets.
 
@@ -964,8 +970,9 @@ the contracted delivery specification and permitted tolerance.
 
 ### Mastering chain presets
 
-`master_mix.py` ships six chain templates (the *what to do* part, distinct
-from the format target *how loud* part):
+`master_mix.py` ships eleven chain templates (the *what to do* part, distinct
+from the format target *how loud* part): the six below plus the
+`modern_rock_spatial*` family described earlier.
 
 | Preset | Chain | Use when |
 |---|---|---|
@@ -974,7 +981,7 @@ from the format target *how loud* part):
 | `modern_rock_mb` | EQ + 3-band multiband + exciter + M/S side highshelf + stereo width 1.05 + soft clip | Modern rock with tighter band-by-band dynamics. Replaces glue comp with multiband — better controlled low end. |
 | `pop` | EQ (bright) + comp + exciter + M/S side highshelf + width 1.1 + soft clip | Bright top, present mids, slightly wider image. |
 | `hip_hop` | EQ (sub boost) + comp + exciter + width 0.95 (slightly narrower) + hard clip | Sub weight, impact, mono-leaning width to keep the 808 centred. |
-| `transparent` | LUFS norm + limit only | When the mix doesn't need master tone. |
+| `transparent` | LUFS norm + true-peak limiter only | When the mix doesn't need master tone. |
 
 ### Optional chain steps and when to use them
 
@@ -993,10 +1000,9 @@ any of them via a custom preset JSON:
   1.0 = no change. 1.05-1.15 = subtle widening. 0.95 = slightly narrower
   (good for sub-heavy genres). 0.0 = mono. Width > 1.3 risks
   mono-compatibility.
-- **Vinyl elliptical EQ**: sub-mono filter below ~150 Hz. Automatic on
-  the `vinyl_pre` format (cuts side energy below 150 Hz so the vinyl
-  cutter head doesn't leave the groove on wide bass). Not configurable
-  per chain preset — driven by the format's `vinyl_elliptical_hz` field.
+- **Vinyl elliptical EQ**: zero-phase side high-pass (sub-mono) below
+  ~150 Hz. Opt-in with `--vinyl-elliptical [HZ]` on the `vinyl_pre` format;
+  off by default because the cutting engineer normally decides it.
 
 ### Waveform true peak and codec audition
 
@@ -1050,8 +1056,10 @@ certify standards conformance, codec safety, or listening approval.
 
 ## Master Bus Chain Order
 
-Processing order matters. This is the current `render_mix.py` master chain
-(each step optional, guarded ones skip if their relevance_check fails):
+Processing order matters. This is the `render_mix.py` master chain in the
+legacy `premaster_mode: false` mode (each step optional, guarded ones skip if
+their relevance_check fails). Premaster mode stops after step 7 and
+peak-normalizes instead of steps 8-9:
 
 1. **Bus saturation** (per bus, before summing to master)
 2. **Bus parallel saturation** (guarded, drum bus only — relevance_check: crest > 10 dB AND LRA > 4 LU)
@@ -1061,7 +1069,7 @@ Processing order matters. This is the current `render_mix.py` master chain
 6. **M/S processing** (guarded — independent mid/side EQ + gain — relevance_check: width ≥ 0.05)
 7. **Master EQ** (zero-phase — HP@30Hz + gentle high shelf typical)
 8. **LUFS normalization** (target -14 LUFS for streaming)
-9. **ISP-aware true peak limiter** (-2 dBTP — pedalboard.Limiter + second-pass 4x-oversampled ISP scale-down)
+9. **True-peak brickwall limiter** (pedalboard `BrickwallLimiter`: stereo-linked, 5 ms lookahead, 4x true-peak detection, no makeup gain) followed by an 8x true-peak verification and static safety trim. pedalboard's older `Limiter` class is not used: it adds a fixed 4:1 stage above -10 dBFS, automatic makeup gain and a 0 dBFS hard clip.
 
 For the **master_mix.py** pass on a finished stereo mix, the chain is
 slightly different (more aggressive, format-aware) — see "Mastering
@@ -1069,7 +1077,7 @@ Workflow and Philosophy" above.
 
 ### Master glue compressor settings (pedalboard Compressor notes)
 
-Pedalboard's Compressor uses peak detection. With slow attack (>20ms), short transients pass through and the measured peak GR appears 0. For program material compression, use:
+Pedalboard's Compressor uses peak detection per channel; the tools derive one stereo-linked gain curve from it (`_dsp.linked_gain`) so a one-sided hit does not shift the image. With slow attack (>20ms), short transients pass through and the measured peak GR appears 0. For program material compression, use:
 - threshold: -10 dBFS (works with typical -12 to -9 LUFS pre-norm signals)
 - attack: 10ms (catches sustained peaks while letting some transient through)
 - ratio: 2:1
@@ -1141,7 +1149,7 @@ If the conclusion is "musical pulse, not artifact": **say so explicitly and do N
 
 The difference is the inter-sample peak (ISP). For low-frequency signals they are nearly identical. For HF content (cymbals, distorted guitar, snare crack) the true peak can sit 0.5-3 dB above the sample peak. After codec encoding (Spotify Ogg/Vorbis, Apple AAC), the encoded signal's inter-sample peak can climb further, occasionally pushing samples above 0 dBFS.
 
-**For stems: the difference rarely matters.** For master delivery: target `-2 dBTP` (the true peak, not the sample peak) as a conservative margin; actual codec playback still needs testing. `render_mix.py` does a second-pass true peak measurement after its limiter and scales the master down if the oversampled value exceeds the ceiling.
+**For stems: the difference rarely matters.** For master delivery: -1 dBTP is the common streaming recommendation, -2 dBTP for masters louder than -14 LUFS; actual codec playback still needs testing. The limiters in `master_mix.py` and the legacy `render_mix.py` chain verify the result at 8x oversampling and apply a static trim if the ceiling is exceeded.
 
 ### onsets_sec, tempo_bpm, estimated_key (rhythm & tonal context)
 
@@ -1151,7 +1159,7 @@ Three top-level fields in `analysis.json` that give time-domain and tonal contex
 |---|---|---|---|
 | `onsets_sec` | list of float seconds | Onset times from librosa onset detection. Same detector as `transient_density_per_sec`, exposed as a raw list. | Identify rhythmic structure; pair-wise stem alignment; precise "uneven playing" detection per onset; visual debugging. |
 | `tempo_bpm` | float (or `null`) | librosa `beat_track` estimate. Returns `null` for clips shorter than ~4 s or when the estimate is unstable / out of range (30–300 BPM). | Pick BPM-synced division for `apply_reverb --pre-delay-division` or `apply_delay --bpm`. Sanity-check against the human-known tempo (drummer's clicktrack). |
-| `estimated_key` | `{key, mode, confidence}` | Krumhansl-Schmuckler key estimation on `chroma_stft`. Confidence is 0..1 (cosine sim against the reference profile). | Decide whether a tonal mid-EQ move should track the song's key (e.g. boosting 220 Hz on an A-minor track lines up with the root). Drums / overheads / noise will give a low-confidence answer — `< 0.5` means "no reliable key", ignore. |
+| `estimated_key` | `{key, mode, confidence}` | Krumhansl-Schmuckler key estimation on `chroma_stft`. Confidence is the Pearson correlation (-1..1) with the best reference profile; white noise scores about 0.25. | Decide whether a tonal mid-EQ move should track the song's key (e.g. boosting 220 Hz on an A-minor track lines up with the root). Drums / overheads / noise give low values — `< 0.5` means "no reliable key", ignore. |
 
 The cost of computing these is modest (~+10% on `analyze.py`). They are computed unconditionally on every analyze pass — no opt-in flag needed.
 
@@ -1416,12 +1424,12 @@ parameters automatically.
 
 | Field | Meaning | Action |
 |---|---|---|
-| `sibilance.peak_db` | 5-8 kHz transient peak in dBFS | > -25 dBFS: run `apply_deesser` after the comp step. -25 to -35: borderline, default `deesser_smooth` is enough. < -35: relevance_check will skip (nothing to de-ess). |
+| `sibilance.peak_db` | 5-8 kHz transient peak in dBFS | > -25 dBFS: listen for harsh esses; `apply_deesser` after the comp step is a candidate. -25 to -35: borderline, `deesser_smooth` if anything. < -35: relevance_check will skip (nothing to de-ess). |
 | `sibilance.density_per_sec` | sibilant events per second | > 4/sec is dense — use `deesser_aggressive`. Sparse takes are fine with `deesser_smooth`. |
-| `plosive.events_count` | sub-100 Hz transient bursts | > 10 in a 3-minute take: tighten the HP filter (subtractive EQ) from 80 to 100-120 Hz, or use a high-pass at 150 Hz on the BG vocal preset. |
+| `plosive.events_per_minute` | sub-100 Hz bursts (20 ms envelope) within 12 dB of the stem's loud level, 150 ms refractory; `events_count` is the total | > 10 per minute: audition a tighter HP (100-120 Hz) or clip-gain on the worst bursts; BG vocals tolerate a higher HP. |
 | `pitch.mean_hz` | average fundamental | < 200 Hz typically male (use `deesser_male_lead` detection band 4-7 kHz); > 250 Hz typically female (use `deesser_female_lead` 6-9 kHz). |
-| `pitch.cents_std` | std-dev of cents-deviation from nearest semitone | < 25 cents: in tune. 25-40: minor wobble — `pitch_correct_subtle` (strength 0.3). > 40: noticeable drift — ask the user before applying pitch correction; the take may have intentional bends. |
-| `vibrato.rate_hz` | 4-7 Hz pitch modulation | 5-6 Hz is healthy controlled vibrato. < 4 Hz = wobble (often a sign of a tired voice). > 7 Hz = "warble" (often unwanted from a forced effect). |
+| `pitch.cents_std` | RMS cents from per-note semitone targets after removing the global tuning offset (`tuning_offset_cents`); notes split at > 80-cent jumps and smoothed over 200 ms; random notes give about 29 | < 15: well intoned. 15-25: noticeable — listen to the phrases with high `fraction_over_25_cents`. > 25: surface to the user; the take may have intentional bends. Correction is the artist's choice. |
+| `vibrato.rate_hz` / `vibrato.extent_cents` | 4-7 Hz pitch modulation per sustained note (>= 0.5 s); extent is the semi-extent (± cents) | Extent under ~10 cents: no meaningful vibrato. Rate and extent describe the performance; whether they suit the song is a listening judgment. |
 | `breath.silence_ratio` | fraction of frames below -45 dBFS | > 0.4: a lot of breaths/silence between phrases — consider gating between phrases, or accept it as part of the intimate character. |
 
 ### Reverb-bus architecture (shared sends vs. insert)
@@ -1497,7 +1505,7 @@ Researched against the 2026 vocal-mixing consensus:
 
 ## Style Profiles - Project Preference Similarity
 
-`tools/style_check.py mix.wav --style NAME` grades a finished mix against one of five built-in profiles in `tools/style_profiles/`: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference audio is supplied, the profile remains a numerical preference and cannot replace listening references.
+`tools/style_check.py mix.wav --style NAME` measures similarity of a finished master to one of seven project profiles in `tools/style_profiles/`: `classic_rock`, `hip_hop`, `jazz_acoustic`, `modern_rock`, `pop`, `punchy_modern_rock`, `tool_inspired`. On premaster input (`--input-kind premaster`, or auto-detected when worst-channel TP <= -2.5 dBTP) loudness, LRA and crest checks are N/A. The profile fixes loudness, dynamics, and 5-band tonal-balance targets — when no reference audio is supplied, the profile remains a numerical preference and cannot replace listening references.
 
 ### What's in a profile
 
@@ -1607,8 +1615,9 @@ post-limiter attenuation over 3 dB, or peak difference over 1 dB. These are
 conservative project heuristics, not evidence of audible damage or standards.
 A green peak result does not clear these listening questions.
 
-Post-limiter attenuation includes the limiter's internal makeup behavior; it
-must not be described entirely as intersample overshoot. Compressor input/output
+The brickwall limiter applies no makeup gain, so post-limiter attenuation is the
+limiter's gain reduction plus any 8x safety trim; it is not all intersample
+overshoot. Compressor input/output
 LUFS difference is a loudness change, not measured instantaneous gain reduction.
 Whole-file crest is sensitive to arrangement; use matched section comparisons
 before choosing a corrective action.
@@ -1670,6 +1679,30 @@ for the general rationale, not equivalence to that product.
   plate and hall are not distinct physical models, and their approximate decay
   notes are not measurements. For a timed-room experiment, report a measured
   impulse-response decay estimate, including the fit interval and filters.
+
+Delivery and premaster conventions, verified 2026-10-06 (repository review):
+
+- Spotify ([loudness normalization](https://support.spotify.com/us/artists/article/loudness-normalization/)):
+  playback at -14 LUFS (Normal), -11 (Loud), -19 (Quiet); keep true peak below
+  -1 dBTP, or -2 dBTP when the master is louder than -14 LUFS. Official
+  platform guidance; high confidence.
+- SoundCloud ([help center](https://help.soundcloud.com/hc/en-us/articles/360053660014))
+  now normalizes to -14 LUFS with the same -1 / -2 dBTP advice. Older
+  "no normalization" claims are outdated.
+- AES TD1008 (2021): -16 LUFS music distribution loudness with album
+  normalization; deliberately not a mastering target. ITU-R BS.1770-5 (2023)
+  is current; ATSC A/85 is -24 LKFS / -2 dBTP.
+- Premaster handoff: Abbey Road (2021) asks for 2-3 dB of peak headroom with
+  limiting removed; the Metropolis preparation guide (2026-05) asks for 32-bit
+  float at the native sample rate and no clipping, and de-emphasizes headroom.
+  "Premaster -18..-20 LUFS / LRA >= 6 LU / crest 14-18 dB" targets appear only in
+  blogs and are folklore, not standards; mix_health treats LRA as advisory.
+- pyloudnorm 0.2.0 (2026-01) provides `loudness_range()`; it has no true-peak
+  meter, so true peak is measured in `tools/_dsp.py` by polyphase oversampling
+  (4x/8x estimates, not certified against the BS.1770 conformance set).
+- pedalboard 0.9.25 adds `BrickwallLimiter` (lookahead, true-peak option, no
+  makeup gain). Its documentation does not guarantee the reconstructed ceiling,
+  hence the 8x verification step.
 
 Source register, verified 2026-09-09:
 

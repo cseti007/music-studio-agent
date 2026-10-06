@@ -1,0 +1,6 @@
+# Lint for real defects only (pyflakes + syntax errors); formatting is not enforced.
+target-version = "py311"
+src = ["tools", "tests"]
+
+[lint]
+select = ["F", "E9"]
