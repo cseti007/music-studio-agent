@@ -1,6 +1,6 @@
 """Apply parametric EQ to an assembled stem.
 
-Supported filter types (all minimum-phase, zero-phase via sosfiltfilt):
+Supported filter types (minimum-phase default, optional zero-phase):
   notch     - narrow band removal (hum, resonances). Infinite attenuation at center.
               params: hz, q (default 30)
   highpass  - Butterworth high-pass
@@ -127,6 +127,14 @@ def _highshelf_sos(hz: float, db_gain: float, slope: float, sr: int) -> np.ndarr
 
 
 def _build_sos(f: dict, sr: int) -> np.ndarray:
+    for key in ("hz", "hz_low", "hz_high"):
+        if key in f and not 0 < float(f[key]) < sr / 2:
+            raise ValueError(f"{key} must be finite and between 0 and Nyquist")
+    for key in ("q", "slope", "order"):
+        if key in f and (not np.isfinite(float(f[key])) or float(f[key]) <= 0):
+            raise ValueError(f"{key} must be finite and positive")
+    if "db" in f and not np.isfinite(float(f["db"])):
+        raise ValueError("EQ gain must be finite")
     ftype = f.get("type", "")
     if ftype == "notch":
         return _notch_sos(float(f["hz"]), float(f.get("q", 30.0)), sr)
@@ -137,13 +145,28 @@ def _build_sos(f: dict, sr: int) -> np.ndarray:
     if ftype == "bandpass":
         return _bp_sos(float(f["hz_low"]), float(f["hz_high"]), int(f.get("order", 2)), sr)
     if ftype == "peak":
-        return _peak_sos(float(f["hz"]), float(f["q"]), float(f["db"]), sr)
+        return _peak_sos(float(f["hz"]), float(f.get("q", 1.0)), float(f["db"]), sr)
     if ftype == "lowshelf":
         return _lowshelf_sos(float(f["hz"]), float(f["db"]), float(f.get("slope", 1.0)), sr)
     if ftype == "highshelf":
         return _highshelf_sos(float(f["hz"]), float(f["db"]), float(f.get("slope", 1.0)), sr)
     valid = "notch, highpass, lowpass, bandpass, peak, lowshelf, highshelf"
     raise ValueError(f"Unknown filter type: {ftype!r}. Valid: {valid}")
+
+
+def filter_signal(data: np.ndarray, sr: int, spec: dict, phase: str = "minimum", axis: int = -1) -> np.ndarray:
+    """Apply one EQ. Zero-phase gain is the requested total, not per pass.
+
+    In zero mode, pass/notch filters retain forward/backward filtering's
+    doubled order. Peak and shelf gains are divided between the two passes.
+    """
+    if phase not in ("minimum", "zero"):
+        raise ValueError("phase must be 'minimum' or 'zero'")
+    resolved = dict(spec)
+    if phase == "zero" and resolved.get("type") in ("peak", "lowshelf", "highshelf"):
+        resolved["db"] = float(resolved["db"]) / 2
+    sos = _build_sos(resolved, sr)
+    return (sosfiltfilt if phase == "zero" else sosfilt)(sos, data, axis=axis)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +222,10 @@ def _filters_from_analysis(analysis_path: Path) -> list[dict]:
 # Core processing
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_eq")
 def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str = "minimum") -> dict:
     if not filters:
         print(json.dumps({"error": "No filters specified — nothing to apply"}), file=sys.stderr)
@@ -215,13 +242,12 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str
 
     # minimum phase = causal sosfilt (preserves transients, adds group delay)
     # zero phase   = sosfiltfilt (pre-rings transients, no net delay)
-    filt_fn = sosfilt if phase == "minimum" else sosfiltfilt
 
     result_channels = []
     for ch in range(data.shape[1]):
         signal = data[:, ch].astype(np.float64)
         for f in filters:
-            signal = filt_fn(_build_sos(f, sr), signal)
+            signal = filter_signal(signal, sr, f, phase)
         result_channels.append(signal)
 
     output_data = np.stack(result_channels, axis=1)
@@ -238,7 +264,7 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_eq.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

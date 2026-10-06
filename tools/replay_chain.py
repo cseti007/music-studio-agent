@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import inspect
 import shlex
 import subprocess
 import sys
@@ -66,9 +67,19 @@ def _argv_gain_per_clip(step: dict, session_json: Path) -> list[str]:
         "--output-dir", output_dir,
         "--peak-ceiling", str(args.get("peak_ceiling_db", -1.0)),
     ]
+    argv += ["--source-mode", args.get("source_mode", "per-clip"),
+             "--crossfade-ms", str(args.get("crossfade_ms", 5.0)),
+             "--source-target-lufs", str(args.get("source_target_lufs", -18.0))]
+    for key in ("interloper_head_ms", "interloper_tail_ms"):
+        if args.get(key) is not None:
+            argv += ["--" + key.replace("_", "-"), str(args[key])]
+    if args.get("normalize_per_source"):
+        argv.append("--normalize-per-source")
     if not args.get("normalize", True):
         argv.append("--no-normalize")
-    elif args.get("target_lufs") is not None:
+    else:
+        argv.append("--normalize")
+    if args.get("target_lufs") is not None:
         argv += ["--clip-target-lufs", str(args["target_lufs"])]
     return argv
 
@@ -91,7 +102,7 @@ def _argv_gain_per_channel(step: dict) -> list[str]:
 
 def _argv_align(step: dict) -> list[str]:
     args = step["args"]
-    output_dir = str(Path(step["output"]).parent)
+    output_dir = str(Path(step["output"]).parent.parent)
     return [
         sys.executable, str(TOOLS_DIR / "align_phase.py"),
         "--reference", args["reference"],
@@ -213,6 +224,12 @@ def _argv_reverb(step: dict) -> list[str]:
     if args.get("send"):
         argv.append("--send")
     for k_cli, k_json in (
+        ("--room-size", "room_size"),
+        ("--damping", "damping"),
+        ("--width", "width"),
+        ("--dry", "dry"),
+        ("--gate-hold", "gate_hold_ms"),
+        ("--gate-release", "gate_release_ms"),
         ("--pre-delay", "pre_delay_ms"),
         ("--wet",       "wet"),
         ("--hp",        "hp_hz"),
@@ -225,6 +242,9 @@ def _argv_reverb(step: dict) -> list[str]:
         argv += ["--sidechain", sc.get("file", "")]
         if sc.get("depth_db") is not None:
             argv += ["--sc-depth", str(sc["depth_db"])]
+        for key, flag in (("hp_hz", "--sc-hp"), ("lp_hz", "--sc-lp")):
+            if sc.get(key) is not None:
+                argv += [flag, str(sc[key])]
     return argv
 
 
@@ -336,6 +356,12 @@ def _call_gain_per_clip(step: dict, session_json: Path):
         "target_lufs": args.get("target_lufs"),
         "peak_ceiling_db": float(args.get("peak_ceiling_db", -1.0)),
         "normalize": bool(args.get("normalize", True)),
+        "source_mode": args.get("source_mode", "per-clip"),
+        "crossfade_ms": args.get("crossfade_ms", 5.0),
+        "interloper_head_ms": args.get("interloper_head_ms"),
+        "interloper_tail_ms": args.get("interloper_tail_ms"),
+        "normalize_per_source": args.get("normalize_per_source", False),
+        "source_target_lufs": args.get("source_target_lufs", -18.0),
     }
 
 
@@ -357,7 +383,7 @@ def _call_gain_per_channel(step: dict):
 
 def _call_align(step: dict):
     args = step["args"]
-    output_dir = Path(step["output"]).parent
+    output_dir = Path(step["output"]).parent.parent
     mod = _lazy_import("align_phase")
     return mod.align_phase, {
         "reference_path": Path(args["reference"]),
@@ -421,6 +447,12 @@ def _call_comp(step: dict):
             "makeup_db": args.get("makeup_db"),
             "mix": float(args.get("mix", 1.0)),
         }
+    for key in ("threshold_db", "ratio", "attack_ms", "release_ms", "makeup_db", "mix"):
+        if args.get(key) is not None:
+            kwargs[key] = args[key]
+    if isinstance(args.get("sidechain"), dict):
+        sc = args["sidechain"]
+        kwargs.update(sidechain_path=Path(sc["file"]), sc_hp_hz=sc.get("sc_hp_hz"), sc_lp_hz=sc.get("sc_lp_hz"))
     return mod.apply_compression, kwargs
 
 
@@ -455,6 +487,9 @@ def _call_gate(step: dict):
             "release_ms": float(args["release_ms"]),
             "hysteresis_db": float(args.get("hysteresis_db", 6.0)),
         }
+    for key in ("threshold_db", "range_db", "attack_ms", "hold_ms", "release_ms", "hysteresis_db"):
+        if args.get(key) is not None:
+            kwargs[key] = args[key]
     return mod.apply_gate, kwargs
 
 
@@ -489,19 +524,17 @@ def _call_reverb(step: dict):
         "file_path": Path(step["input"]),
         "output_dir": output_dir,
     }
-    if "preset" in args:
-        # apply_reverb has a PRESETS dict — let the callable resolve it via preset_name kwarg
-        kwargs["preset_name"] = args["preset"]
-    for k_json, k_kwarg in (
-        ("pre_delay_ms", "pre_delay_ms"),
-        ("wet", "wet"),
-        ("hp_hz", "hp_hz"),
-        ("lp_hz", "lp_hz"),
-        ("ir", "ir_path"),
-        ("send", "send"),
-    ):
-        if k_json in args and args[k_json] is not None:
-            kwargs[k_kwarg] = args[k_json]
+    for key in ("room_size", "damping", "width", "pre_delay_ms", "wet", "dry",
+                "hp_hz", "lp_hz", "gate_hold_ms", "gate_release_ms"):
+        if args.get(key) is not None:
+            kwargs[key] = args[key]
+    if args.get("ir"):
+        kwargs["ir_path"] = Path(args["ir"])
+    kwargs["send_mode"] = bool(args.get("send"))
+    if isinstance(args.get("sidechain"), dict):
+        sc = args["sidechain"]
+        kwargs.update(sidechain_path=Path(sc["file"]), sc_depth_db=sc.get("depth_db", -12.0),
+                      sc_hp_hz=sc.get("hp_hz"), sc_lp_hz=sc.get("lp_hz"))
     return mod.apply_reverb, kwargs
 
 
@@ -512,7 +545,6 @@ def _call_transient(step: dict):
     kwargs = {
         "input_path": Path(step["input"]),
         "output_dir": output_dir,
-        "preset": args.get("preset"),
     }
     for k in ("attack_db", "sustain_db", "fast_ms", "slow_ms"):
         if k in args and args[k] is not None:
@@ -604,106 +636,126 @@ def _resolve_chain_path(arg: Path) -> Path:
     return arg
 
 
-def replay(
-    chain_path: Path,
-    dry_run: bool,
-    stem_filter: str | None,
-    use_subprocess: bool = False,
-) -> int:
-    """Replay a mix_chain.json. Default = in-process dispatch (fast). Set
-    `use_subprocess=True` to spawn one Python per step (legacy / debugging).
-    """
-    chain = json.loads(chain_path.read_text(encoding="utf-8"))
-    session_json = Path(chain.get("session_json", ""))
-    mix_config = Path(chain.get("mix_config", ""))
+def _recorded_callable(step):
+    from _recall import CALLS
+    args = step["args"]
+    module, name = args["module"], args["function"]
+    if name not in CALLS.get(module, ()) or step.get("schema_version") != 1:
+        raise ValueError("Unsupported recorded operation")
+    function = getattr(_lazy_import(module), name)
+    kwargs = dict(args["kwargs"])
+    for key in args["path_keys"]:
+        kwargs[key] = Path(kwargs[key])
+    inspect.signature(function).bind(**kwargs)
+    return function, kwargs
 
-    if not dry_run:
-        if not session_json.exists():
-            print(f"FATAL: session.json not found at {session_json}", file=sys.stderr)
-            return 2
 
-    mode_label = "subprocess" if (use_subprocess or dry_run) else "in-process"
-    print(f"Replay mode: {mode_label}")
+def _run_recorded(step):
+    from _recall import content_hash
+    for path, digest in step["dependencies"].items():
+        if not Path(path).is_file() or content_hash(path) != digest:
+            raise ValueError(f"Recall dependency changed or missing: {path}")
+    function, kwargs = _recorded_callable(step)
+    function(**kwargs)
+    if not Path(step["output"]).is_file() or content_hash(step["output"]) != step["output_hash"]:
+        raise ValueError(f"Replayed output differs from recorded audio: {step['output']}")
 
-    n_stems = 0
-    n_steps_total = 0
-    n_steps_failed = 0
-    n_steps_skipped = 0
-    t0 = time.time()
 
-    for stem in chain["stems"]:
-        if stem_filter and stem["name"] != stem_filter:
-            continue
-        if not stem.get("active", True):
-            print(f"[skip inactive] {stem['name']}")
-            continue
-        n_stems += 1
-        print(f"\n=== {stem['name']} ({len(stem['chain'])} steps) ===")
-        for i, step in enumerate(stem["chain"], 1):
-            argv = _build_argv(step, session_json)
-            if argv is None:
-                print(f"  [{i}] {step['step']}: UNSUPPORTED — skipping")
-                n_steps_skipped += 1
-                continue
-            n_steps_total += 1
-            quoted = " ".join(shlex.quote(a) for a in argv)
-            print(f"  [{i}] {step['step']}  → {Path(step['output']).name}")
+def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
+           use_subprocess: bool = False, allow_legacy: bool = False) -> int:
+    """Preflight the entire selected chain, then stop on the first failure."""
+    from _recall import content_hash
+    try:
+        chain = json.loads(chain_path.read_text(encoding="utf-8"))
+        stems = [stem for stem in chain["stems"] if stem.get("active", True)
+                 and (stem_filter is None or stem["name"] == stem_filter)]
+        if not stems:
+            raise ValueError("No matching active stems")
+        steps = [step for stem in stems for step in stem["chain"]]
+        if not steps:
+            raise ValueError("No processing operations in selected chain")
+        outputs = {str(Path(step["output"]).resolve()): step for step in steps}
+        if len(outputs) != len(steps):
+            raise ValueError("Ambiguous recall: multiple operations write the same output")
+        session_json = Path(chain.get("session_json") or "session.json")
+        mix_config = Path(chain["mix_config"]) if chain.get("mix_config") else None
+        if stem_filter is None and (mix_config is None or not mix_config.is_file()):
+            raise ValueError("Full replay requires an existing mix_config")
+        if stem_filter is None:
+            _lazy_import("render_mix").validate_mix_config(
+                json.loads(mix_config.read_text(encoding="utf-8")), pending_files=outputs)
+        prepared = {}
+        for step in steps:
+            if step["step"] == "recorded_call":
+                function, kwargs = _recorded_callable(step)
+                dependencies = step["dependencies"]
+                for path, digest in dependencies.items():
+                    if str(Path(path).resolve()) not in outputs:
+                        if not Path(path).is_file() or content_hash(path) != digest:
+                            raise ValueError(f"Recall dependency changed or missing: {path}")
+            else:
+                if step["step"] not in _STEP_TO_CALLABLE:
+                    raise ValueError(f"Unsupported recall step: {step['step']}")
+                if not allow_legacy:
+                    raise ValueError("Legacy reports lack verified recall metadata; regenerate operations or explicitly use --allow-legacy for best-effort replay")
+                function, kwargs = _build_inproc(step, session_json)
+                inspect.signature(function).bind(**kwargs)
+                dependencies = {str(value): None for key, value in kwargs.items()
+                                if isinstance(value, Path) and key != "output_dir"}
+                for path in dependencies:
+                    if str(Path(path).resolve()) not in outputs and not Path(path).is_file():
+                        raise ValueError(f"Missing recall input: {path}")
+            prepared[id(step)] = (function, kwargs, dependencies)
+
+        # Include sidechains and references in the graph, including across stems.
+        ordered, seen, visiting = [], set(), set()
+        def visit(step):
+            key = id(step)
+            if key in visiting:
+                raise ValueError("Recall dependency cycle")
+            if key in seen:
+                return
+            visiting.add(key)
+            for path in prepared[key][2]:
+                producer = outputs.get(str(Path(path).resolve()))
+                if producer is not None:
+                    visit(producer)
+            visiting.remove(key)
+            seen.add(key)
+            ordered.append(step)
+        for step in steps:
+            visit(step)
+        for step in ordered:
+            print(f"{step['step']} -> {step['output']}")
             if dry_run:
-                print(f"      $ {quoted}")
                 continue
-            if use_subprocess:
-                proc = subprocess.run(argv, capture_output=True, text=True)
-                if proc.returncode != 0:
-                    n_steps_failed += 1
-                    print(f"      FAIL ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
-                continue
-            # In-process dispatch
-            func, kwargs = _build_inproc(step, session_json)
-            if func is None:
-                # Fall back to subprocess for unsupported in-process
-                proc = subprocess.run(argv, capture_output=True, text=True)
-                if proc.returncode != 0:
-                    n_steps_failed += 1
-                    print(f"      FAIL ({proc.returncode}): {proc.stderr.strip()[:200]}", file=sys.stderr)
-                continue
-            try:
-                func(**kwargs)
-            except Exception as exc:
-                n_steps_failed += 1
-                print(f"      FAIL (in-process): {exc}", file=sys.stderr)
-                traceback.print_exc(limit=4)
-
-    if not dry_run and mix_config.exists():
-        print(f"\n=== Rendering mix ({mix_config}) ===")
-        if use_subprocess:
-            argv = [
-                sys.executable, str(TOOLS_DIR / "render_mix.py"),
-                str(mix_config), "--render", "--stems",
-            ]
-            proc = subprocess.run(argv)
-            if proc.returncode != 0:
-                print("FAIL: render_mix returned non-zero", file=sys.stderr)
-                n_steps_failed += 1
-        else:
-            try:
-                render_mix_mod = _lazy_import("render_mix")
-                render_mix_mod.render_mix(mix_config, output_wav=None, render_stems=True)
-            except Exception as exc:
-                n_steps_failed += 1
-                print(f"FAIL: render_mix (in-process): {exc}", file=sys.stderr)
-                traceback.print_exc(limit=4)
-
-    elapsed = time.time() - t0
-    print(f"\nReplay done in {elapsed:.1f}s — {n_stems} stems, {n_steps_total} steps run, "
-          f"{n_steps_failed} failed, {n_steps_skipped} unsupported")
-    return 1 if n_steps_failed else 0
+            if step["step"] == "recorded_call":
+                if use_subprocess:
+                    subprocess.run([sys.executable, str(Path(__file__).resolve()),
+                                    "--operation", json.dumps(step)], check=True)
+                else:
+                    _run_recorded(step)
+            elif use_subprocess:
+                subprocess.run(_build_argv(step, session_json), check=True)
+            else:
+                function, kwargs, _ = prepared[id(step)]
+                function(**kwargs)
+            if not dry_run and not Path(step["output"]).is_file():
+                raise ValueError(f"Processing did not create {step['output']}")
+        if not dry_run and stem_filter is None:
+            _lazy_import("render_mix").render_mix(mix_config, render_stems=True)
+        print(f"Replay {'validated' if dry_run else 'completed'}: {len(ordered)} operations")
+        return 0
+    except (Exception, SystemExit) as exc:
+        print(f"Replay stopped: {exc}", file=sys.stderr)
+        return 1
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Replay a mix_chain.json recall sheet — rebuild the mix from scratch.",
     )
-    parser.add_argument("chain", type=Path,
+    parser.add_argument("chain", type=Path, nargs="?",
                         help="Path to mix_chain.json (or the session directory containing it)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print every command without executing")
@@ -713,7 +765,14 @@ def main() -> None:
                         help="Force per-step subprocess dispatch (legacy / debugging). "
                              "Default is in-process: tool modules are imported once and "
                              "called directly, skipping the ~3-5s Python cold-start per step.")
+    parser.add_argument("--allow-legacy", action="store_true", help="Allow best-effort legacy replay without verified parameters or hashes")
+    parser.add_argument("--operation", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.operation:
+        _run_recorded(json.loads(args.operation))
+        return
+    if args.chain is None:
+        parser.error("chain is required")
 
     chain_path = _resolve_chain_path(args.chain)
     if not chain_path.exists():
@@ -725,6 +784,7 @@ def main() -> None:
         dry_run=args.dry_run,
         stem_filter=args.stem,
         use_subprocess=args.subprocess,
+        allow_legacy=args.allow_legacy,
     )
     sys.exit(rc)
 

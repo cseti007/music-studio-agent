@@ -381,7 +381,7 @@ def _render_text(report: dict) -> str:
     lines.append(f"  {L['true_peak_verdict']} True peak        : {L['true_peak_dbtp']:+.2f} dBTP  "
                  f"(ceiling {L['true_peak_ceiling']})")
     lines.append(f"  {L['lra_verdict']} LRA              : {L['lra_lu']:.1f} LU  "
-                 f"(target >= {_TARGETS['lra_min_lu']} LU)")
+                 f"(style suggestion >= {_TARGETS['lra_min_lu']} LU; not proof of compression)")
 
     S = report["stereo"]
     lines.append("")
@@ -438,30 +438,22 @@ def _render_text(report: dict) -> str:
             lines.append(f"  {tag} {b['bus']:<10}  : {detail}")
 
     # Overall
-    verdicts = [L["lufs_verdict"], L["true_peak_verdict"], L["lra_verdict"]]
-    if S.get("ms_width_ratio") is not None:
-        verdicts += [S["width_verdict"], S["mono_compat_verdict"]]
-    if T["available"]:
-        verdicts.append(T["verdict"])
-    if M["available"]:
-        verdicts.append(M["verdict"])
-    if P["available"]:
-        verdicts.append(P["verdict"])
-
+    verdicts = [L["true_peak_verdict"]]
     n_green = verdicts.count(GREEN)
     n_yellow = verdicts.count(YELLOW)
     n_red = verdicts.count(RED)
     total = len(verdicts)
-    overall = GREEN if n_red == 0 and n_yellow <= 1 else (YELLOW if n_red == 0 else RED)
+    overall = L["true_peak_verdict"]
 
     lines += ["", "=" * 60,
-              f"OVERALL: {overall}  {n_green} green, {n_yellow} yellow, {n_red} red  ({total} checks)"]
+              f"TECHNICAL PEAK CHECK: {overall}  {n_green} green, {n_yellow} yellow, {n_red} red  ({total} checks)",
+              "LISTENING REVIEW: PENDING (this tool does not audition audio)"]
     if overall == GREEN:
-        lines.append("  Mix is ready.")
+        lines.append("  Measured peak check passed. Balance, dynamics, and listening approval remain open.")
     elif overall == YELLOW:
-        lines.append("  Mix is close — address the yellow items.")
+        lines.append("  Review peak headroom. Other diagnostics are advisory.")
     else:
-        lines.append("  Mix needs work — red items must be fixed before delivery.")
+        lines.append("  Peak check failed for the selected ceiling; review the render before delivery.")
     return "\n".join(lines)
 
 
@@ -485,15 +477,13 @@ def _detect_mix_stage(mix_path: Path) -> str:
         return "master"
 
 
-# Stage-specific gates. The premaster gates match modern industry handoff
-# practice (SOS, LANDR, iZotope, Major Mixing): integrated ~-18 LUFS with
-# ±2 LU tolerance, peak headroom at -3 dBFS, no brick-wall expected.
+# Project suggestions for diagnostics, not universal premaster requirements.
 _STAGE_TARGETS = {
     "premaster": {
         "lufs_target": -18.0,
         "lufs_tolerance_green": 2.0,
         "lufs_tolerance_yellow": 4.0,
-        "tp_ceiling_dbtp": -3.0,
+        "tp_ceiling_dbtp": 0.0,
         "tp_yellow_band_db": 2.0,
     },
     "master": {
@@ -552,6 +542,9 @@ def mix_health(session_dir: Path, output_dir: Path,
 
     report = {
         "session_dir": str(session_dir),
+        "delivery_ready": False,
+        "listening_review": {"status": "pending", "performed_by_tool": False},
+        "assessment_scope": "Peak safety; LUFS, LRA, width and masking are advisory",
         "mix_file": str(mix_path),
         "loudness": loudness,
         "stereo": stereo,
@@ -585,7 +578,7 @@ def main() -> None:
                              "mix_report.json (premaster -> -18, master -> -14).")
     parser.add_argument("--tp-ceiling", type=float, default=None,
                         help="Override true peak ceiling in dBTP. Default: "
-                             "autodetected (premaster -> -3, master -> -1.0).")
+                             "autodetected (premaster -> 0, master -> -1.0).")
     parser.add_argument("--target-stage", choices=["premaster", "master"], default=None,
                         help="Force the stage gates (skips autodetect from "
                              "mix_report.json). 'premaster' = pre-mastering "

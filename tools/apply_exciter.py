@@ -133,6 +133,10 @@ def _excite(signal: np.ndarray, sr: int, hp_hz: float, drive: float) -> np.ndarr
     return sosfilt(sos_hp, saturated)
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_exciter")
 def apply_exciter(
     input_path: Path,
     output_dir: Path,
@@ -177,7 +181,7 @@ def apply_exciter(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_exciter.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

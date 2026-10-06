@@ -165,6 +165,10 @@ def _relevance_check(signal: np.ndarray, sr: int, detect_low_hz: float, detect_h
     }
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_deesser")
 def apply_deesser(
     input_path: Path,
     output_dir: Path,
@@ -222,7 +226,7 @@ def apply_deesser(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / (input_path.stem + "_deessed.wav")
-    sf.write(str(output_path), out, sr, subtype="PCM_24")
+    sf.write(str(output_path), out, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

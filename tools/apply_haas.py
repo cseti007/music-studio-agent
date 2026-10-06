@@ -153,6 +153,10 @@ def _relevance_check(data: np.ndarray, sr: int, file_path: Path | None = None) -
 # Core processing
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_haas")
 def apply_haas(
     input_path: Path,
     output_dir: Path,
@@ -221,7 +225,7 @@ def apply_haas(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_haas.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

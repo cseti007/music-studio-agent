@@ -121,6 +121,8 @@ class TestRenderPipeline:
         # Loudness section present with the worst-channel true peak
         assert "true_peak_dbtp" in report["loudness"]
         assert report["loudness"]["true_peak_verdict"] in ("[OK]", "[!] ", "[X] ")
-        # The scorecard text carries an overall verdict line
+        # Technical success remains separate from listening approval.
         txt = (out_dir / "mix_health.txt").read_text()
-        assert "OVERALL:" in txt
+        assert "TECHNICAL PEAK CHECK:" in txt
+        assert "LISTENING REVIEW: PENDING" in txt
+        assert report["delivery_ready"] is False

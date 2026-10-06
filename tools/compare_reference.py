@@ -177,12 +177,16 @@ def _filters_from_delta(
     return filters
 
 
+from _recall import record_operation
+
+
+@record_operation("compare_reference")
 def _apply_eq_to_target(
     target_path: Path,
     output_path: Path,
     filters: list[dict],
     phase: str = "minimum",
-) -> None:
+) -> dict:
     """Run the generated EQ filter chain on the target file via apply_eq.
 
     Imports apply_eq from the same directory so we don't duplicate the
@@ -190,17 +194,15 @@ def _apply_eq_to_target(
     bypass apply_eq's stem-based naming).
     """
     sys.path.insert(0, str(Path(__file__).parent))
-    from apply_eq import _build_sos  # noqa: E402
-    from scipy.signal import sosfilt, sosfiltfilt  # noqa: E402
+    from apply_eq import filter_signal  # noqa: E402
 
     data, sr = sf.read(str(target_path), always_2d=True)
-    filt_fn = sosfilt if phase == "minimum" else sosfiltfilt
 
     out_channels = []
     for ch in range(data.shape[1]):
         signal = data[:, ch].astype(np.float64)
         for f in filters:
-            signal = filt_fn(_build_sos(f, sr), signal)
+            signal = filter_signal(signal, sr, f, phase)
         out_channels.append(signal)
     output_data = np.stack(out_channels, axis=1)
 
@@ -209,7 +211,8 @@ def _apply_eq_to_target(
         output_data = output_data / peak
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(output_path), output_data, sr, subtype="FLOAT")
+    return {"input": str(target_path), "output": str(output_path)}
 
 
 def _ascii_chart(delta_bands: list[dict], threshold_db: float) -> str:

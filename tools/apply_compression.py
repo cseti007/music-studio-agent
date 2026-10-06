@@ -158,6 +158,10 @@ def _sidechain_gain_envelope(
 # Core processing
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_compression")
 def apply_compression(
     input_path: Path,
     output_dir: Path,
@@ -257,7 +261,7 @@ def apply_compression(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_comp.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     in_peak = float(20 * np.log10(max(float(np.max(np.abs(data))), 1e-10)))
     out_peak = float(20 * np.log10(max(float(np.max(np.abs(output_data))), 1e-10)))

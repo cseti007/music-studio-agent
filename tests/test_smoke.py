@@ -459,7 +459,7 @@ class TestRelevanceChecks:
         session = {
             "tracks": [
                 {"name": "KICK_OUT", "clips": [{"source_file": "/x/KICK_OUT.wav"}]},
-                {"name": "KICK_OUT.dup1", "clips": [{"source_file": "/y/KICK_OUT.wav"}]},
+                {"name": "KICK_OUT.dup1", "clips": [{"source_file": "/x/KICK_OUT.wav"}]},
                 {"name": "SNARE", "clips": [{"source_file": "/x/SNARE.wav"}]},
             ],
         }
@@ -560,8 +560,8 @@ class TestStyleCheck:
         # significantly outside → red
         assert _grade_range(measured=1.0, target=7.0, range_min=4.0, range_max=9.0)[0] == "RED"
 
-    def test_overall_verdict_hard_fail_on_lufs(self):
-        """A RED LUFS verdict forces overall RED even if everything else is GREEN."""
+    def test_style_loudness_does_not_override_all_other_checks(self):
+        """A stylistic loudness mismatch is advisory, not a delivery failure."""
         from style_check import _verdict_for_checks
 
         checks = [
@@ -570,8 +570,8 @@ class TestStyleCheck:
             {"name": "crest_factor_db", "verdict": "GREEN"},
         ] + [{"name": f"band_{i}", "verdict": "GREEN"} for i in range(5)]
         verdict, score = _verdict_for_checks(checks)
-        assert verdict == "RED"
-        assert score <= 55, f"hard-fail should cap score, got {score}"
+        assert verdict == "GREEN"
+        assert score == 88
 
     def test_overall_verdict_all_green(self):
         from style_check import _verdict_for_checks

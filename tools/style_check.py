@@ -1,5 +1,4 @@
-"""Grade a mix against a named style profile — quantitative answer to
-"is this a modern_rock mix" without needing a reference track.
+"""Measure similarity to a project style profile; never grade musical quality.
 
 Reads a stereo mix.wav, measures integrated LUFS, LRA, crest factor, and
 5-band spectral RMS, then compares each value to the targets in a style
@@ -135,24 +134,18 @@ def _verdict_for_checks(checks: list[dict]) -> tuple[str, int]:
 
     Score: each GREEN check = full points, YELLOW = half, RED = 0.
     Total normalised to 100. Verdict: GREEN if score >= 85, YELLOW 60-84,
-    RED below 60. Hard-fail: a RED on LUFS or LRA forces overall RED.
+    RED below 60. This measures profile similarity, not delivery readiness.
     """
     n = len(checks)
     if n == 0:
         return ("RED", 0)
     pts = 0
-    hard_red = False
     for c in checks:
         if c["verdict"] == "GREEN":
             pts += 100
         elif c["verdict"] == "YELLOW":
             pts += 50
-        else:
-            if c["name"] in ("integrated_lufs", "lra_lu"):
-                hard_red = True
     score = int(round(pts / n))
-    if hard_red:
-        return ("RED", min(score, 55))
     if score >= 85:
         return ("GREEN", score)
     if score >= 60:
@@ -244,6 +237,9 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
 
     result = {
         "mix_file": str(mix_path),
+        "assessment_scope": "Style preference similarity; not a quality or delivery gate",
+        "delivery_ready": False,
+        "listening_review": {"status": "pending", "performed_by_tool": False},
         "style_profile": profile["name"],
         "profile_version": profile.get("version", "?"),
         "score": score,
@@ -299,7 +295,8 @@ def _format_text_report(result: dict, profile: dict) -> str:
     borderline_part = ""
     if result['counts'].get('borderline'):
         borderline_part = f"   [{result['counts']['borderline']} borderline]"
-    lines.append(f"Verdict: {result['verdict']}    Score: {result['score']}/100    "
+    lines.append("Profile similarity only; genre authenticity and listening quality are not assessed.")
+    lines.append(f"Similarity: {result['verdict']}    Score: {result['score']}/100    "
                  f"({result['counts']['green']} green / "
                  f"{result['counts']['yellow']} yellow / "
                  f"{result['counts']['red']} red){borderline_part}")
@@ -378,7 +375,7 @@ def _format_text_report(result: dict, profile: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Grade a stereo mix against a named style profile.",
+        description="Measure similarity to a project style preference; not musical quality.",
     )
     parser.add_argument("mix", nargs="?", type=Path, help="Path to mix WAV (e.g. mix.wav, master_spotify.wav)")
     parser.add_argument("--style", type=str, help="Style profile name (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic)")
@@ -406,7 +403,8 @@ def main() -> None:
     print(f"Style check: {result['style_profile']}  →  {result['verdict']}  ({result['score']}/100)")
     print(f"  {result['counts']['green']} green / {result['counts']['yellow']} yellow / {result['counts']['red']} red")
     print(f"  Report: {args.output_dir / 'style_check.txt'}")
-    sys.exit(0 if result["verdict"] != "RED" else 1)
+    # A preference mismatch is a successful measurement, not a failed delivery.
+    sys.exit(0)
 
 
 if __name__ == "__main__":

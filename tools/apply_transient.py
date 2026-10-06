@@ -104,6 +104,10 @@ def _load_preset(name: str) -> dict:
 # CLI
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_transient")
 def apply_transient_file(
     input_path: Path,
     output_dir: Path,
@@ -137,7 +141,7 @@ def apply_transient_file(
     out_name = f"{input_path.stem}_transient.wav"
     out_path = output_dir / out_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    sf.write(str(out_path), shaped, sr, subtype="PCM_24")
+    sf.write(str(out_path), shaped, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),
@@ -213,41 +217,8 @@ Examples:
     if attack_db == 0.0 and sustain_db == 0.0:
         print("Warning: both attack and sustain are 0 dB — no shaping applied", file=sys.stderr)
 
-    data, sr = sf.read(str(args.file), always_2d=True)
-    channels = data.shape[1]
-
-    print(f"Input:   {args.file.name}  ({data.shape[0]/sr:.1f}s, {channels}ch, {sr}Hz)")
-    print(f"Shaping: attack {attack_db:+.1f} dB  sustain {sustain_db:+.1f} dB  "
-          f"(fast {fast_ms}ms / slow {slow_ms}ms)")
-
-    shaped = apply_transient(data, sr, attack_db, sustain_db, fast_ms, slow_ms)
-
-    peak_in = float(20 * np.log10(np.max(np.abs(data)) + 1e-10))
-    peak_out = float(20 * np.log10(np.max(np.abs(shaped)) + 1e-10))
-    print(f"Peak:    {peak_in:.1f} dBFS -> {peak_out:.1f} dBFS")
-
-    stem = args.file.stem
-    out_name = f"{stem}_transient.wav"
-    out_path = args.output_dir / out_name
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    sf.write(str(out_path), shaped, sr, subtype="PCM_24")
-
-    report = {
-        "input": str(args.file),
-        "output": str(out_path),
-        "preset": args.preset,
-        "attack_db": attack_db,
-        "sustain_db": sustain_db,
-        "fast_ms": fast_ms,
-        "slow_ms": slow_ms,
-        "peak_in_dbfs": round(peak_in, 2),
-        "peak_out_dbfs": round(peak_out, 2),
-    }
-    report_path = args.output_dir / "transient_report.json"
-    report_path.write_text(json.dumps(report, indent=2))
-
-    print(f"Output:  {out_path}")
-    print(f"Report:  {report_path}")
+    report = apply_transient_file(args.file, args.output_dir, attack_db,
+                                  sustain_db, fast_ms, slow_ms)
     print(json.dumps(report, indent=2))
 
 

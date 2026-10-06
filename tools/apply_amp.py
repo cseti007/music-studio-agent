@@ -188,6 +188,10 @@ def _peak(data: np.ndarray, sr: int, hz: float, gain_db: float, q: float) -> np.
     return sosfilt(sos, data, axis=0)
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_amp")
 def apply_amp(
     file_path: Path,
     output_dir: Path,
@@ -227,7 +231,7 @@ def apply_amp(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (file_path.stem + "_amp.wav")
-    sf.write(str(out_path), out, sr, subtype="PCM_24")
+    sf.write(str(out_path), out, sr, subtype="FLOAT")
 
     result = {
         "input": str(file_path),

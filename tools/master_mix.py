@@ -30,6 +30,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -37,11 +38,11 @@ import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
 from pedalboard import Compressor, Gain, Limiter, Pedalboard
-from scipy.signal import butter, resample_poly, sosfilt, sosfiltfilt
+from scipy.signal import butter, resample_poly, sosfilt
 
 # Reuse pieces already in the project
 sys.path.insert(0, str(Path(__file__).parent))
-from apply_eq import _build_sos  # noqa: E402
+from apply_eq import filter_signal  # noqa: E402
 from apply_multiband_comp import _compress_band, _lr4_split  # noqa: E402
 from render_mix import (  # noqa: E402
     _hard_clip,
@@ -59,35 +60,38 @@ from render_mix import (  # noqa: E402
 
 FORMAT_PRESETS: dict[str, dict] = {
     "spotify": {
-        "description": "Spotify streaming target (Ogg Vorbis encode)",
+        "description": "Spotify mastering recommendation; outputs WAV, no codec encode",
+        "loudness_policy": "recommendation",
         "target_lufs": -14.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 24,
         "dither": False,
     },
     "apple": {
-        "description": "Apple Music streaming target (AAC encode)",
+        "description": "Apple Music house preset; -16 LUFS is a preference, no codec encode",
+        "loudness_policy": "preference",
         "target_lufs": -16.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 24,
         "dither": False,
     },
     "youtube": {
-        "description": "YouTube streaming target",
+        "description": "YouTube house loudness preset; confirm the requested delivery",
         "target_lufs": -14.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 24,
         "dither": False,
     },
     "tidal": {
-        "description": "Tidal streaming target (HiFi tier)",
+        "description": "Tidal house loudness preset; confirm the requested delivery",
         "target_lufs": -14.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 24,
         "dither": False,
     },
     "cd": {
-        "description": "CD delivery — louder, 16-bit dithered",
+        "description": "CD delivery: 44.1 kHz, 16-bit dithered; loudness is a creative default",
+        "sample_rate": 44100,
         "target_lufs": -9.0,
         "tp_ceiling_dbtp": -1.0,
         "bit_depth": 16,
@@ -104,7 +108,8 @@ FORMAT_PRESETS: dict[str, dict] = {
         "vinyl_elliptical_hz": 150.0,
     },
     "broadcast": {
-        "description": "Broadcast EBU R128 target",
+        "description": "Broadcast EBU R128; conservative -2 dBTP house ceiling",
+        "loudness_policy": "requirement",
         "target_lufs": -23.0,
         "tp_ceiling_dbtp": -2.0,
         "bit_depth": 24,
@@ -292,14 +297,40 @@ MASTERING_PRESETS: dict[str, dict] = {
 # Chain helpers
 # ---------------------------------------------------------------------------
 
+def _crest_db(audio: np.ndarray) -> float:
+    peak = max(float(np.max(np.abs(audio))), 1e-12)
+    rms = max(float(np.sqrt(np.mean(np.square(audio), dtype=np.float64))), 1e-12)
+    return float(20 * np.log10(peak / rms))
+
+
+def _dynamics_review(input_crest: float, output_crest: float, normalization_gain: float,
+                     peak_attenuation: float, peak_gap: float) -> dict:
+    """Project heuristics flag audition needs, never establish audible damage."""
+    warnings = []
+    if output_crest - input_crest < -4:
+        warnings.append("Crest factor fell by more than 4 dB; compare attack and sustain at matched loudness")
+    if normalization_gain > 6:
+        warnings.append("More than 6 dB added before limiting; inspect how the limiter handles transient peaks")
+    if peak_attenuation < -3:
+        warnings.append("More than 3 dB attenuation after limiting; investigate limiter behavior and reconstructed peaks")
+    if peak_gap > 1:
+        warnings.append("True peak exceeds sample peak by more than 1 dB; inspect overshoots and codec round trips")
+    return {"input_crest_db": round(input_crest, 2), "output_crest_db": round(output_crest, 2),
+            "crest_change_db": round(output_crest - input_crest, 2),
+            "normalization_gain_db": round(normalization_gain, 2),
+            "post_limiter_peak_attenuation_db": round(peak_attenuation, 2),
+            "output_true_peak_minus_sample_peak_db": round(peak_gap, 2),
+            "warnings": warnings, "threshold_policy": "Project review heuristics, not quality requirements",
+            "note": "Whole-file crest changes depend on arrangement; attenuation includes limiter makeup, not just intersample overshoot"}
+
+
 def _master_eq(stereo: np.ndarray, sr: int, filters: list) -> np.ndarray:
     """Apply EQ chain to a (2, N) master buffer. Zero-phase for mastering."""
     if not filters:
         return stereo
     out = stereo.copy()
     for f in filters:
-        sos = _build_sos(f, sr)
-        out = sosfiltfilt(sos, out, axis=1)
+        out = filter_signal(out, sr, f, "zero", axis=1)
     return out
 
 
@@ -442,7 +473,9 @@ def _load_master_input(input_path: Path) -> tuple[np.ndarray, int, float, float]
     if data.shape[1] == 1:
         data = np.repeat(data, 2, axis=1)
     elif data.shape[1] > 2:
-        data = data[:, :2]
+        raise ValueError("Mastering supports mono or stereo; supply an explicit downmix")
+    if len(data) < int(sr * 0.4) or not np.isfinite(data).all():
+        raise ValueError("Mastering requires at least 400 ms of finite audio")
     master = data.T.astype(np.float32)
     meter = pyln.Meter(sr)
     lufs_before = float(meter.integrated_loudness(master.T))
@@ -494,14 +527,28 @@ def master_mix(
 
     print(f"  Input: LUFS {lufs_before:.2f}, sample peak {peak_before:.2f} dBFS")
 
+    if not np.isfinite(actual_target_lufs) or not np.isfinite(actual_tp) or actual_tp > 0:
+        raise ValueError("Loudness must be finite and true-peak ceiling must be <= 0 dBTP")
+    if not np.isfinite(lufs_before):
+        raise ValueError("Input is silent or below the loudness measurement gate")
+    if not np.isfinite(master).all() or master.ndim != 2 or master.shape[0] != 2:
+        raise ValueError("Mastering requires finite stereo audio")
     chain_applied: list[str] = []
-    # `current_lufs` threads forward: each stage's POST measurement becomes the
-    # next stage's PRE without re-measuring. The original code measured 7
-    # times (~2s each); this drops it to ~4 measurements at the stages that
-    # actually transform the buffer.
+    input_crest = _crest_db(master)
+    normalization_gain = 0.0
+    peak_attenuation = 0.0
+    output_sr = int(fmt.get("sample_rate", sr))
+    if output_sr != sr:
+        factor = math.gcd(sr, output_sr)
+        master = resample_poly(master, output_sr // factor, sr // factor, axis=1).astype(np.float32)
+        chain_applied.append(f"resample({sr} -> {output_sr} Hz)")
+        sr = output_sr
+        meter = pyln.Meter(sr)
+
+    # Track loudness for stage summaries; measure again before normalization.
     current_lufs = lufs_before
 
-    # 1. EQ — LUFS shift is usually negligible from EQ alone; skip measurement.
+    # 1. EQ. Loudness is remeasured before normalization.
     if mp["eq"]:
         master = _master_eq(master, sr, mp["eq"])
         chain_applied.append(f"eq({len(mp['eq'])} filters)")
@@ -510,21 +557,21 @@ def master_mix(
     #    Sits before glue comp so per-band dynamics are controlled first.
     if mp.get("multiband"):
         mb = mp["multiband"]
-        lufs_pre = current_lufs
+        lufs_pre = float(meter.integrated_loudness(master.T))
         master = _master_multiband(master, sr, mb)
         current_lufs = float(meter.integrated_loudness(master.T))
         chain_applied.append(
             f"multiband(LR4 {mb['low_high_hz']}/{mb['mid_high_hz']} Hz, "
-            f"GR={current_lufs - lufs_pre:+.2f} LU)"
+            f"loudness_change={current_lufs - lufs_pre:+.2f} LU)"
         )
 
     # 3. Glue comp
     if mp["comp"]:
-        lufs_pre = current_lufs
+        lufs_pre = float(meter.integrated_loudness(master.T))
         master = _master_comp(master, sr, mp["comp"])
         current_lufs = float(meter.integrated_loudness(master.T))
         chain_applied.append(
-            f"comp(thr={mp['comp']['threshold_db']}, ratio={mp['comp']['ratio']}, GR={current_lufs - lufs_pre:+.2f} LU)"
+            f"comp(thr={mp['comp']['threshold_db']}, ratio={mp['comp']['ratio']}, loudness_change={current_lufs - lufs_pre:+.2f} LU)"
         )
 
     # 4. Exciter
@@ -568,18 +615,18 @@ def master_mix(
     elif skip_clipper:
         chain_applied.append("clipper(SKIPPED for format)")
 
-    # 5. LUFS normalization — use the cached current_lufs (matches a fresh
-    # measurement here; exciter / clipper / EQ are small LUFS shifts the
-    # cache absorbs into the next mandatory measurement after limiter).
+    # Measure the actual signal after every tonal/dynamics stage.
+    current_lufs = float(meter.integrated_loudness(master.T))
     if np.isfinite(current_lufs):
         gain_db = actual_target_lufs - current_lufs
+        normalization_gain = gain_db
         master = master * 10.0 ** (gain_db / 20.0)
         # Track approximately so the post-limiter measurement is the only
         # follow-up. Linear gain shifts LUFS by the same dB.
         current_lufs = current_lufs + gain_db
         chain_applied.append(f"lufs_norm({gain_db:+.2f} dB → target {actual_target_lufs})")
 
-    # 6. True peak limiter (oversampled — ISP-aware)
+    # 6. Sample-peak limiter followed by measured true-peak attenuation
     if not skip_limiter:
         board = Pedalboard([Limiter(threshold_db=float(actual_tp), release_ms=100.0)])
         master = board(master.astype(np.float32), sr).astype(np.float32)
@@ -587,8 +634,9 @@ def master_mix(
         tp_measured = _measure_true_peak_dbfs(master)
         if tp_measured > actual_tp:
             scale_db = actual_tp - tp_measured
+            peak_attenuation = scale_db
             master *= 10.0 ** (scale_db / 20.0)
-            chain_applied.append(f"limiter(ISP corrected {scale_db:+.2f} dB)")
+            chain_applied.append(f"limiter(post_limiter_peak_attenuation={scale_db:+.2f} dB)")
         else:
             chain_applied.append(f"limiter(TP {tp_measured:.2f} dBTP)")
 
@@ -608,6 +656,15 @@ def master_mix(
     else:
         chain_applied.append("limiter(SKIPPED for format)")
 
+    # A non-limited format still needs a safe PCM export. Leave a small
+    # margin for quantization/dither and prioritize peak safety over loudness.
+    tp_measured = _measure_true_peak_dbfs(master)
+    safe_tp = actual_tp - 0.01
+    if tp_measured > safe_tp:
+        attenuation_db = safe_tp - tp_measured
+        master *= 10.0 ** (attenuation_db / 20.0)
+        chain_applied.append(f"export_headroom({attenuation_db:+.2f} dB)")
+
     # 7. Dither (only for 16-bit output)
     if do_dither:
         master = _dither_to_16bit(master)
@@ -619,18 +676,21 @@ def master_mix(
     subtype = "PCM_16" if bit_depth == 16 else "PCM_24"
     sf.write(str(out_path), master.T, sr, subtype=subtype)
 
-    # Final measurements — `lufs_final` matches `current_lufs` from the cache
-    # (no transformative stages after the post-limiter measurement). Skip the
-    # redundant measurement; loudness_range still needs its own call. Explicit
-    # `float()` casts ensure JSON-serialisable scalars (float32 numpy scalars
-    # leak otherwise and break the report writer).
-    lufs_final = float(current_lufs) if np.isfinite(current_lufs) else float(meter.integrated_loudness(master.T))
-    lra_final = round(float(meter.loudness_range(master.T)), 2)
-    tp_final = float(_measure_true_peak_dbfs(master))
-    sample_peak_final = float(20.0 * np.log10(max(float(np.max(np.abs(master))), 1e-12)))
+    # Delivery measurements describe the decoded file, including quantization.
+    delivered, delivered_sr = sf.read(str(out_path), always_2d=True)
+    lufs_final = float(pyln.Meter(delivered_sr).integrated_loudness(delivered))
+    lra_final = (round(float(pyln.Meter(delivered_sr).loudness_range(delivered)), 2)
+                 if len(delivered) >= 3 * delivered_sr else None)
+    tp_final = float(_measure_true_peak_dbfs(delivered.T))
+    sample_peak_final = float(20.0 * np.log10(max(float(np.max(np.abs(delivered))), 1e-12)))
+    loudness_target_met = abs(lufs_final - actual_target_lufs) <= 0.5
 
     report = {
         "input": str(input_path),
+        "delivery_ready": False,
+        "listening_review": {"status": "pending", "performed_by_tool": False},
+        "dynamics_review": _dynamics_review(input_crest, _crest_db(delivered), normalization_gain,
+                                             peak_attenuation, tp_final - sample_peak_final),
         "output": str(out_path),
         "format": format_name,
         "format_description": fmt["description"],
@@ -640,6 +700,10 @@ def master_mix(
         "input_lufs": round(lufs_before, 2),
         "output_lufs": round(lufs_final, 2),
         "target_lufs": actual_target_lufs,
+        "loudness_target_met": loudness_target_met,
+        "true_peak_target_met": bool(tp_final <= actual_tp),
+        "measurement_source": "decoded_output",
+        "loudness_note": None if loudness_target_met else "Peak safety or processing prevented the requested loudness; audition before changing dynamics",
         "lufs_delta_from_target": round(lufs_final - actual_target_lufs, 2),
         "output_lra_lu": lra_final,
         "output_true_peak_dbtp": round(tp_final, 2),

@@ -79,19 +79,19 @@ def _lr4_split(signal: np.ndarray, sr: int, lo_hz: float, hi_hz: float) -> tuple
     LR4 = two cascaded 2nd-order Butterworth filters. The crossover sum is
     flat (Linkwitz-Riley's defining property).
     """
-    nyq = sr / 2.0
-    # Low band: LR4 low-pass at lo_hz
-    sos_lp_low = butter(2, lo_hz / nyq, btype="low", output="sos")
-    low = sosfilt(sos_lp_low, signal)
-    low = sosfilt(sos_lp_low, low)
+    if not 0 < lo_hz < hi_hz < sr / 2:
+        raise ValueError("Crossovers must satisfy 0 < low < high < Nyquist")
 
-    # High band: LR4 high-pass at hi_hz
-    sos_hp_high = butter(2, hi_hz / nyq, btype="high", output="sos")
-    high = sosfilt(sos_hp_high, signal)
-    high = sosfilt(sos_hp_high, high)
+    def split(data, hz):
+        lp = butter(2, hz, fs=sr, btype="low", output="sos")
+        hp = butter(2, hz, fs=sr, btype="high", output="sos")
+        return sosfilt(lp, sosfilt(lp, data)), sosfilt(hp, sosfilt(hp, data))
 
-    # Mid band: signal - low - high (so the crossover sum stays flat)
-    mid = signal - low - high
+    low, upper = split(signal, lo_hz)
+    mid, high = split(upper, hi_hz)
+    # Match the second crossover's all-pass phase on the low branch.
+    low_lp, low_hp = split(low, hi_hz)
+    low = low_lp + low_hp
     return low, mid, high
 
 
@@ -120,7 +120,11 @@ def _relevance_check(signal: np.ndarray, sr: int, lo_hz: float, hi_hz: float) ->
         "mid_crest_db": round(_band_crest_db(mid), 1),
         "high_crest_db": round(_band_crest_db(high), 1),
     }
-    bands_with_dyn = sum(1 for v in crests.values() if v >= _MIN_BAND_CREST_DB)
+    total_rms = np.sqrt(np.mean(signal ** 2))
+    bands_with_dyn = sum(
+        crest >= _MIN_BAND_CREST_DB and np.sqrt(np.mean(band ** 2)) > total_rms * 0.03
+        for crest, band in zip(crests.values(), (low, mid, high))
+    )
 
     issues = []
     if duration < _MIN_DURATION_SEC:
@@ -158,6 +162,10 @@ def _compress_band(band: np.ndarray, sr: int, params: dict) -> np.ndarray:
     return board(band.astype(np.float32), sr).astype(np.float64)
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_multiband_comp")
 def apply_multiband_comp(
     input_path: Path,
     output_dir: Path,
@@ -207,7 +215,7 @@ def apply_multiband_comp(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_mbcomp.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

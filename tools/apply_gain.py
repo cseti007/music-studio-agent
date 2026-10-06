@@ -3,9 +3,9 @@
 Two modes:
 
   --per-clip session.json
-      Reads the clip layout from session.json, applies clip gain to normalize
-      each clip to a consistent LUFS level, then assembles the full-length stem.
-      This is the primary gain-staging step — always run this first.
+      Reads the clip layout from session.json and assembles the full-length
+      stem at original levels. Normalize only with --normalize; boundary
+      crossfades are opt-in via --crossfade-ms.
       Output: output_dir/<track_name>/assembled.wav
 
       Use --no-normalize to assemble clips at their original recording levels
@@ -87,8 +87,8 @@ def _read_clip(source_file: str, offset_session: int, length_session: int, sessi
     Returns samples ndarray shape (n, channels).
     """
     path = Path(source_file)
-    if not path.exists():
-        return np.zeros((length_session, 1), dtype=np.float64)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing audio source: {path}")
 
     info = sf.info(str(path))
     file_sr = info.samplerate
@@ -100,11 +100,15 @@ def _read_clip(source_file: str, offset_session: int, length_session: int, sessi
         file_offset = int(offset_session * file_sr / session_sr)
         file_frames = int(length_session * file_sr / session_sr) + 1
 
+    if file_offset < 0 or file_offset >= info.frames:
+        raise ValueError(f"Source offset outside audio: {path}")
     file_frames = min(file_frames, info.frames - file_offset)
     if file_frames <= 0:
-        return np.zeros((length_session, 1), dtype=np.float64)
+        raise ValueError("Clip length must be positive")
 
     data, _ = sf.read(str(path), start=file_offset, frames=file_frames, always_2d=True, dtype="float64")
+    if data.shape[1] not in (1, 2) or not np.all(np.isfinite(data)):
+        raise ValueError(f"Expected finite mono or stereo audio: {path}")
 
     if file_sr != session_sr:
         if not _LIBROSA:
@@ -192,8 +196,8 @@ def _assemble_track_with_clip_gain(
     output_dir: Path,
     target_lufs: float,
     peak_ceiling_db: float,
-    normalize: bool = True,
-    crossfade_ms: float = 5.0,
+    normalize: bool = False,
+    crossfade_ms: float = 0.0,
 ) -> dict:
     sr = session["sample_rate"]
     duration = session["duration_samples"]
@@ -203,12 +207,7 @@ def _assemble_track_with_clip_gain(
     if not clips:
         return {"track": track_name, "error": "no clips"}
 
-    n_channels = 1
-    for clip in clips:
-        p = Path(clip["source_file"])
-        if p.exists():
-            n_channels = sf.info(str(p)).channels
-            break
+    n_channels = max(sf.info(clip["source_file"]).channels for clip in clips)
 
     output = np.zeros((duration, n_channels), dtype=np.float64)
 
@@ -216,10 +215,8 @@ def _assemble_track_with_clip_gain(
     skipped = 0
     clips_limited = 0
 
-    # Constant-power crossfade envelopes for butt-up clip boundaries (no overlap
-    # in the source, just adjacent timeline positions). The DAW (Pro Tools/Logic/
-    # etc.) applies these by default — without them, slip-edit boundaries leave
-    # a sample-level discontinuity that the ear hears as a click.
+    # Optional equal-power crossfades can smooth discontinuous edits. They may
+    # boost correlated material and do not reconstruct the DAW's fade settings.
     xfade_samples = max(0, int(round(crossfade_ms * sr / 1000.0)))
     if xfade_samples > 0:
         _xf_t = np.linspace(0.0, 1.0, xfade_samples)
@@ -310,7 +307,7 @@ def _assemble_track_with_clip_gain(
     stem_dir = output_dir / track_name
     stem_dir.mkdir(parents=True, exist_ok=True)
     out_path = stem_dir / "assembled.wav"
-    sf.write(str(out_path), output, sr, subtype="PCM_24")
+    sf.write(str(out_path), output, sr, subtype="FLOAT")
 
     boundary_warnings = _check_clip_boundaries(output, sr, clips_sorted)
     for w in boundary_warnings:
@@ -327,6 +324,7 @@ def _assemble_track_with_clip_gain(
         "track": track_name,
         "output": str(out_path),
         "mode": "per-clip" if normalize else "per-clip-no-normalize",
+        "crossfade_ms": crossfade_ms,
         "clip_gain_target_lufs": target_lufs if normalize else None,
         "peak_ceiling_db": peak_ceiling_db,
         "duration_sec": round(duration / sr, 2),
@@ -399,11 +397,10 @@ def _assemble_track_continuous(
                 clusters.append([])
             clusters[-1].append(c)
 
-        try:
-            n_frames = sf.info(src_file).frames
-        except Exception as exc:
-            print(f"  WARN: skip {src_file} ({exc})", file=sys.stderr)
-            continue
+        info = sf.info(src_file)
+        if info.samplerate != sr:
+            raise ValueError("Continuous assembly requires sources at the session sample rate")
+        n_frames = info.frames
 
         for cluster in clusters:
             anchors = [c["timeline_start_sample"] - c["source_offset_sample"]
@@ -443,10 +440,7 @@ def _assemble_track_continuous(
             if j != i
         )
         if is_interloper and (head_xfade_samples > 0 or tail_xfade_samples > 0):
-            try:
-                n_frames = sf.info(src_file).frames
-            except Exception:
-                n_frames = src_hi
+            n_frames = sf.info(src_file).frames
             new_src_lo = max(0, src_lo - head_xfade_samples)
             new_src_hi = min(n_frames, src_hi + tail_xfade_samples)
             placements_extended.append((src_file, anchor, new_src_lo, new_src_hi,
@@ -459,32 +453,22 @@ def _assemble_track_continuous(
     if not placements_extended:
         return {"track": track_name, "error": "no placements"}
 
-    timeline_end = max(anchor + src_hi for _, anchor, _, src_hi, _, _, _
-                       in placements_extended)
-    output = np.zeros(timeline_end, dtype=np.float64)
+    timeline_end = session["duration_samples"]
+    n_channels = max(sf.info(clip["source_file"]).channels for clip in clips)
+    output = np.zeros((timeline_end, n_channels), dtype=np.float64)
 
     placement_log: list[dict] = []
     for src_file, anchor, src_lo, src_hi, is_interloper, head_xf, tail_xf in placements_extended:
-        try:
-            data, _sr = sf.read(src_file, start=src_lo, frames=src_hi - src_lo,
-                                always_2d=True)
-        except Exception as exc:
-            print(f"  WARN: skip read {src_file} ({exc})", file=sys.stderr)
-            continue
-        if _sr != sr:
-            print(f"  WARN: sr mismatch on {src_file} ({_sr} vs {sr})",
-                  file=sys.stderr)
-            continue
-        # Force mono
-        if data.shape[1] > 1:
-            data = data.mean(axis=1)
-        else:
-            data = data[:, 0]
+        data = _read_clip(src_file, src_lo, src_hi - src_lo, sr)
+        if data.shape[1] == 1 and n_channels == 2:
+            data = np.repeat(data, 2, axis=1)
 
         tl_start = anchor + src_lo
         tl_end_this = tl_start + len(data)
         tl_start_c = max(0, tl_start)
         tl_end_c = min(timeline_end, tl_end_this)
+        if tl_end_c <= tl_start_c:
+            continue
         data_start = tl_start_c - tl_start
         data_end = data_start + (tl_end_c - tl_start_c)
         data_slice = data[data_start:data_end].copy()
@@ -517,13 +501,13 @@ def _assemble_track_continuous(
 
         new_segment = data_slice.copy()
         if head_has:
-            fade_in = np.sqrt(np.linspace(0.0, 1.0, head_eff))
-            fade_out = np.sqrt(np.linspace(1.0, 0.0, head_eff))
+            fade_in = np.sqrt(np.linspace(0.0, 1.0, head_eff))[:, None]
+            fade_out = np.sqrt(np.linspace(1.0, 0.0, head_eff))[:, None]
             new_segment[:head_eff] = (existing[:head_eff] * fade_out
                                      + new_segment[:head_eff] * fade_in)
         if tail_has:
-            fade_in = np.sqrt(np.linspace(0.0, 1.0, tail_eff))
-            fade_out = np.sqrt(np.linspace(1.0, 0.0, tail_eff))
+            fade_in = np.sqrt(np.linspace(0.0, 1.0, tail_eff))[:, None]
+            fade_out = np.sqrt(np.linspace(1.0, 0.0, tail_eff))[:, None]
             new_segment[-tail_eff:] = (new_segment[-tail_eff:] * fade_out
                                       + existing[-tail_eff:] * fade_in)
 
@@ -541,29 +525,29 @@ def _assemble_track_continuous(
             "gain_applied_db": round(placement_gain_db, 2),
         })
 
-    output_2d = output[:, None]
+    output_2d = output
     peak = float(np.max(np.abs(output_2d)))
     if peak > 1.0:
         print(f"WARNING: {track_name}: peak {20*np.log10(peak):.1f} dBFS — "
-              f"scaling down to -0.1 dBFS", file=sys.stderr)
-        output_2d = output_2d * (0.99 / peak)
-        peak = 0.99
+              f"preserved in floating-point output", file=sys.stderr)
 
     stem_dir = output_dir / track_name
     stem_dir.mkdir(parents=True, exist_ok=True)
     out_path = stem_dir / "assembled.wav"
-    sf.write(str(out_path), output_2d, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_2d, sr, subtype="FLOAT")
 
     report = {
         "track": track_name,
         "output": str(out_path),
         "mode": "continuous",
+        "normalize_per_source": normalize_per_source,
+        "source_target_lufs": source_target_lufs,
         "default_crossfade_ms": crossfade_ms,
         "interloper_head_ms": interloper_head_ms,
         "interloper_tail_ms": interloper_tail_ms,
         "cluster_gap_sec": cluster_gap_sec,
         "duration_sec": round(timeline_end / sr, 3),
-        "channels": 1,
+        "channels": n_channels,
         "placements_total": len(placements_extended),
         "placements_interloper": sum(1 for p in placements_extended if p[4]),
         "peak_dbfs": round(20.0 * np.log10(max(peak, 1e-10)), 2),
@@ -575,6 +559,10 @@ def _assemble_track_continuous(
     return report
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_gain")
 def apply_gain_per_clip(
     session_json: Path,
     output_dir: Path,
@@ -582,8 +570,8 @@ def apply_gain_per_clip(
     all_tracks: bool = False,
     target_lufs: float | None = None,
     peak_ceiling_db: float = DEFAULT_PEAK_CEILING,
-    normalize: bool = True,
-    crossfade_ms: float = 5.0,
+    normalize: bool = False,
+    crossfade_ms: float = 0.0,
     source_mode: str = "per-clip",
     interloper_head_ms: float | None = None,
     interloper_tail_ms: float | None = None,
@@ -607,10 +595,34 @@ def apply_gain_per_clip(
         selected = [t for t in tracks if t["name"] in track_names]
         missing = set(track_names) - {t["name"] for t in selected}
         if missing:
-            print(f"WARNING: tracks not found: {missing}", file=sys.stderr)
+            raise ValueError(f"Tracks not found: {missing}")
     else:
         selected = tracks
 
+    if source_mode not in ("per-clip", "continuous"):
+        raise ValueError("Unsupported source mode")
+    if data["sample_rate"] <= 0 or data["duration_samples"] <= 0:
+        raise ValueError("Session sample rate and duration must be positive")
+    for value in (crossfade_ms, interloper_head_ms, interloper_tail_ms):
+        if value is not None and (not np.isfinite(value) or value < 0):
+            raise ValueError("Crossfade lengths must be finite and nonnegative")
+    for track in selected:
+        name = track["name"]
+        if not name or name in (".", "..") or Path(name).name != name or "\\" in name:
+            raise ValueError(f"Track name cannot be used as a directory: {name!r}")
+        for clip in track["clips"]:
+            if any(clip[k] < 0 for k in ("timeline_start_sample", "source_offset_sample", "length_samples")):
+                raise ValueError("Clip positions and lengths must be nonnegative")
+            if not Path(clip["source_file"]).is_file():
+                raise FileNotFoundError(f"Missing audio source: {clip['source_file']}")
+            info = sf.info(clip["source_file"])
+            source_end = (clip["source_offset_sample"] + clip["length_samples"]) * info.samplerate / data["sample_rate"]
+            if clip["length_samples"] == 0 or source_end > info.frames + 1:
+                raise ValueError("Clip range exceeds source audio or has zero length")
+            if info.channels not in (1, 2):
+                raise ValueError("Assembly supports only mono or stereo sources")
+            if source_mode == "continuous" and info.samplerate != data["sample_rate"]:
+                raise ValueError("Continuous assembly requires sources at the session sample rate")
     results = []
     for track in selected:
         if source_mode == "continuous":
@@ -654,6 +666,7 @@ def apply_gain_per_clip(
 # Per-channel mode
 # ---------------------------------------------------------------------------
 
+@record_operation("apply_gain")
 def apply_gain_per_channel(
     file_path: Path,
     output_dir: Path,
@@ -700,7 +713,7 @@ def apply_gain_per_channel(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{file_path.stem}_gained.wav"
-    sf.write(str(out_path), processed, sr, subtype="PCM_24")
+    sf.write(str(out_path), processed, sr, subtype="FLOAT")
 
     lufs_after = _measure_lufs(processed, sr)
 
@@ -765,16 +778,16 @@ def main() -> None:
         "--clip-target-lufs", type=float, default=None, metavar="LUFS",
         help="Per-clip LUFS target (default: from config.toml [gain] per_clip_target_lufs, fallback -18.0)",
     )
+    clip_group.add_argument("--normalize", action="store_true", help="Opt in to per-clip loudness normalization")
     clip_group.add_argument(
         "--no-normalize", action="store_true", dest="no_normalize",
         help="Assemble clips at original recording levels without per-clip LUFS normalization. "
              "Use for drums (single continuous take); follow up with --per-channel for uniform gain.",
     )
     clip_group.add_argument(
-        "--crossfade-ms", type=float, default=5.0, metavar="MS",
-        help="Crossfade length in ms at butt-up clip boundaries (default: 5.0 ms — matches "
-             "Pro Tools / Logic default). Smooths source-discontinuity clicks at engineer "
-             "slip-edits. Set to 0 to disable.",
+        "--crossfade-ms", type=float, default=0.0, metavar="MS",
+        help="Opt-in crossfade length at adjacent clip boundaries (default: 0 ms). "
+             "Changes the audio around joins; does not reproduce DAW fade settings.",
     )
     clip_group.add_argument(
         "--source-mode", choices=("per-clip", "continuous"), default="per-clip",
@@ -839,7 +852,7 @@ def main() -> None:
             all_tracks=args.all_tracks,
             target_lufs=args.clip_target_lufs,
             peak_ceiling_db=args.peak_ceiling,
-            normalize=not args.no_normalize,
+            normalize=args.normalize and not args.no_normalize,
             crossfade_ms=args.crossfade_ms,
             source_mode=args.source_mode,
             interloper_head_ms=args.interloper_head_ms,

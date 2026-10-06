@@ -25,6 +25,10 @@ def _design_bandpass(sr, hp_hz, lp_hz, order=2):
     return butter(order, [hp_hz / nyq, lp_hz / nyq], btype="band", output="sos")
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_octaver")
 def apply_octaver(input_path: Path, output_path: Path,
                   octaves: float = -1.0,
                   hp_hz: float = 30.0,
@@ -63,7 +67,7 @@ def apply_octaver(input_path: Path, output_path: Path,
         output = output * scale
         safety_scale_db = 20 * np.log10(scale)
 
-    sf.write(str(output_path), output, sr, subtype="PCM_24")
+    sf.write(str(output_path), output, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

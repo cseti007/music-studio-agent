@@ -110,6 +110,10 @@ def _echo_series(
 # Core
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_delay")
 def apply_delay(
     input_path: Path,
     output_dir: Path,
@@ -183,7 +187,7 @@ def apply_delay(
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_delay_send" if send else "_delay"
     out_path = output_dir / (input_path.stem + suffix + ".wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     in_peak = float(20 * np.log10(max(float(np.max(np.abs(data))), 1e-10)))
     out_peak = float(20 * np.log10(max(float(np.max(np.abs(output_data))), 1e-10)))

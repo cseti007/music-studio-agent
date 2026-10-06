@@ -1,3 +1,11 @@
+# Current policy
+
+Follow the current workflow below and `docs/knowledge.md` before historical
+session examples. Existing instrument recipes and relevance thresholds are
+heuristics, not industry requirements or evidence of perceived quality. Never
+let a green score replace listening approval. Project/user instructions take
+precedence over this guidance.
+
 # music-studio-agent — Claude session instructions
 
 ## What this project is
@@ -8,13 +16,69 @@ All processing happens via Python CLI tools in `tools/`. Claude orchestrates the
 
 ## Session start checklist
 
-1. Read `docs/knowledge.md` — domain knowledge base (LUFS targets, per-instrument guidelines, trends).
-2. Ask the user what session/folder they are working with today.
-3. Check `output/` for any previous analysis runs on that session.
-4. **Run `tools/audit_session.py output/<session>/session.json --output-dir output/<session>/analysis`** — surfaces tracks that share identical source files (phase-coherent duplicates). Show the flagged groups to the user and ASK which to keep before generating mix_config. Common patterns: `<name>` + `<name>.L` + `<name>.R` triples (one stereo wav referenced three times), or `<name>` + `<name>.dup1.XX` pairs (editor accidentally cloned a track). Setting `active: false` on the suggested deactivate-list in mix_config prevents +6 dB phase-coherent doubling.
-5. Ask the user which takes / mic-blend / dup-versions to use in the render (per `mix_config.json` `active` field). Don't decide unilaterally — the `render_mix --generate-config` output explicitly says "Set active=false for alternate takes you don't want (dup versions)"; surface that decision to the user.
-6. **Ask the user what genre/style** the song is (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic / other). Use `--style NAME` on `--generate-config` so the style profile's `default_bus_volume_db` ends up in `volume_db` (modern_rock: drums 0, bass 0, guitar -3, vocal_lead +2, vocal_bg -2). **The agent should NOT hand-edit `volume_db` away from style defaults to compensate for "drum bus too hot / bass too quiet" — that's what `auto_trim_db` is for, and it's already computed by `--generate-config`.** Effective bus gain at render time = `auto_trim_db + volume_db`; the calibration lifts every bus's dry sum to -18 LUFS regardless of stem count, and `volume_db` is just the style/taste delta on top. If `active: true/false` changes after the config was generated, refresh with `python tools/render_mix.py mix_config.json --recompute-autotrim` — surgical, only `auto_trim_db` is touched.
-7. Ask what the goal is before running anything (delivery-ready master, demo, mix-health gate against a reference, etc).
+1. Read `docs/knowledge.md`. Distinguish requirements, recommendations,
+   heuristics, preferences, and observations from an earlier session.
+2. Declare listening capability: direct audition available, external human
+   feedback available, or measurements only. A playback link or an audio file
+   on disk does not mean the agent heard it. Record the tool and excerpts when
+   direct audition succeeds; report failures accurately.
+3. Establish source session, artistic intent, takes, reference versions, and
+   requested deliverables. Carry forward existing approvals within their scope.
+4. Prefer consolidated, time-aligned stems. DAW parsing preserves a limited
+   clip layout and cannot reproduce plugins, routing automation, or all fades.
+   Audit paths and layouts before processing. Do not infer redundant takes
+   from names, or switch to continuous reconstruction from clip counts.
+5. Preserve original levels, channel relationships, and edits. Normalization,
+   auto-trim, new crossfades, and editorial changes need a stated purpose.
+6. Make a section map: intro, representative quiet/dense passages, transitions,
+   solos, and ending, with actual timestamps. Describe intended contrast and
+   list uncertain judgments rather than pretending to know the arrangement.
+7. Render an initial balance as a draft. Style profiles and presets provide
+   optional hypotheses; they cannot demonstrate genre authenticity or quality.
+
+## Listening, evidence, and completion
+
+- Separate three evidence types in every decision: measured observation,
+  inferred cause, and heard/user-reported result. Never describe an inference
+  as something heard. Tests verify software behavior, not musical success.
+- Without direct audition, use the user's listening feedback to guide musical
+  revisions. Continue independent analysis and render reviewable alternatives;
+  do not stall authorized work, but keep subjective conclusions provisional.
+- Compare representative sections at matched loudness with
+  `tools/prepare_audition.py`. State offsets when comparing trimmed versions.
+  The tool uses linear gain and common peak attenuation, with no limiting.
+  It rejects incompatible sample rates, silence, and out-of-range excerpts.
+- For each consequential change, record the problem, timestamp, hypothesis,
+  intervention, measurements, matched comparison, feedback, and keep/revert
+  decision. Change one coherent group of settings per comparison. A technical
+  repair may proceed on objective evidence; an unreviewed creative move stays
+  provisional. Do not stack effects just because a metric suggests relevance.
+- Evaluate kick/snare/toms with overheads and rooms as one kit; inspect bass
+  interaction, guitar microphone blends, vocal phrase consistency, depth, and
+  transitions in context. Full-song LUFS and correlation cannot resolve these.
+- A comment such as "balance feels right" approves that balance in the heard
+  excerpt. It does not approve timbre, dynamics, the full song, or a later master.
+  Preserve Take 2/double preferences across revisions, but renew audio approval
+  when the actual render changes. Record criticism as a revision request.
+- First renders are drafts. Use `tools/review_delivery.py` on the exact export
+  before reporting delivery readiness. Technical reports always leave listening
+  pending; only scoped, externally supplied human feedback can satisfy the
+  listening portion of delivery review. Direct agent audition remains useful
+  evidence for decisions but cannot impersonate user/engineer sign-off.
+- Exporting drafts is allowed while feedback is pending. Say "rendered for
+  review" or "technical checks passed; listening pending" as appropriate.
+  Never claim professional quality, commercial success, or artist equivalence
+  from a preset, score, export, or test suite.
+
+Listening evidence is a JSON list, oldest first. Each record has `artifact_hash`
+(from the reviewed source), `reviewer` (the actual person), `source` (message or
+session-note identifier), `quote` (their actual words), `scope`, and `decision`.
+Scopes are `vocal_balance`, `section`, `full_song`, and `codec_roundtrip`.
+Decisions are `approved` or `revision_requested`. No default positive answer is
+allowed. Feedback on an excerpt is associated with its source hash from
+`audition.json` and stays narrow. Whole-song approval applies to the full file.
+The tool validates scope and version, not whether the evidence is authentic;
+never manufacture a quote, reviewer, or approval source to pass the check.
 
 ## Python environment
 
@@ -50,9 +114,13 @@ python tools/batch_analyze.py output/<session> --workers 8
 
 | Tool | What it does | Key args |
 |---|---|---|
+| `tools/apply_dynamic_eq.py` | Blend a bounded bell cut under a linked RMS detector. External sidechain must match the input timeline; no trigger means dry bypass. Use for an auditioned frequency-overlap hypothesis, not automatic spectral matching. | `input.wav --output-dir DIR --frequency-hz N [--sidechain-path trigger.wav] [--max-cut-db N] [--threshold-db N]` |
+| `tools/prepare_audition.py` | Export paired excerpts with matched loudness and source hashes; linear gain only, no audition performed. | `before.wav after.wav --output-dir NEW_DIR [--start S] [--after-start S] [--duration S]` |
+| `tools/review_delivery.py` | Check exact export plus scoped human feedback; missing/stale/narrow approval cannot complete delivery. Exit 1 means review is incomplete or failed. | `audio.wav --output-dir DIR --tp-ceiling N [--sample-rate N] [--bit-depth N] [--evidence records.json] [--target-lufs CONTRACTUAL_N] [--require-codec-review]` |
+| `tools/apply_automation.py` | Apply explicit channel-linked gain rides with linear interpolation in dB, preserving timing and floating-point headroom. Records replay metadata. | `<input.wav> --output-dir DIR --points curve.json` |
 | `tools/parse_session.py` | Parse DAW session file (.ptx, .als) into canonical session.json | `<session_file> --output-dir output/<session> --audio-dir <audio_dir>` |
-| `tools/audit_session.py` | Audit session.json for tracks that share identical source files (phase-coherent duplicates). Groups tracks by their source-file set, recommends a primary to keep and the rest to deactivate. Run at session start before generating mix_config. Outputs audit_report.json + audit_report.txt. | `<session.json> --output-dir output/<session>/analysis` |
-| `tools/apply_gain.py --per-clip` | Clip gain: normalize each clip to consistent LUFS, then assemble full stem. **`--source-mode continuous`** bypasses the session.json slip-edit clips: groups clips by source file + timeline-proximity cluster, plays each cluster as ONE continuous chunk at its median anchor with REPLACE-not-sum interloper handling and optional asymmetric edge crossfades (`--interloper-head-ms` / `--interloper-tail-ms`). Use for sustained instruments (bass DI, sustained vocals/synth) when the source has 100s of slip-edits — they cause 5 ms-crossfade comb-filter warble in the default per-clip mode. Detection threshold: `clips_per_source ≥ 5 AND total_clips ≥ 20`. **`--normalize-per-source --source-target-lufs -18`** (refined default for slip-edited sustained instruments) normalizes each placement to target LUFS BEFORE crossfade-blending. Solves the same inter-section-consistency goal as per-clip normalize but with 5-15 normalization points instead of 100+, AND preserves natural intra-take performance dynamics. Field measurement (horgonyt 2026-05-25): 21.5 LU → 15.9 LU range without flattening loud chorus, only lifting quiet breakdowns. | `--per-clip session.json --track "NAME" --output-dir output/<session>/tracks [--source-mode per-clip\|continuous] [--crossfade-ms MS] [--interloper-head-ms MS] [--interloper-tail-ms MS] [--normalize-per-source --source-target-lufs LUFS]` |
+| `tools/audit_session.py` | Audit session.json for identical resolved source paths and clip layouts. Findings are duplicate candidates for review, not proof that a track should be muted. Run at session start before generating mix_config. Outputs audit_report.json + audit_report.txt. | `<session.json> --output-dir output/<session>/analysis` |
+| `tools/apply_gain.py --per-clip` | Assemble clips at original levels and positions. `--normalize` and crossfades are opt-in. Continuous mode reconstructs source takes and changes edits; use only as an approved editorial alternative. `--normalize-per-source` levels those placements only when requested. | `--per-clip session.json --track "NAME" --output-dir output/<session>/tracks [--normalize] [--source-mode per-clip\|continuous] [--crossfade-ms MS] [--interloper-head-ms MS] [--interloper-tail-ms MS] [--normalize-per-source --source-target-lufs LUFS]` |
 | `tools/apply_gain.py --per-channel` | Stem gain: apply single gain to assembled stem to reach LUFS target | `--per-channel assembled.wav --preset stem\|premix\|spotify\|apple\|amazon\|broadcast` |
 | `tools/analyze.py` | Analyze a stem: LUFS, LRA, crest factor, transient density, spectral centroid, stereo balance/correlation/M-S width, 1/3-octave freq response, hum detection, 10-band text spectrogram + RMS waveform + PNG | `<file> --output-dir output/<session>/tracks/<track>` |
 | `tools/batch_analyze.py` | Parallel wrapper around `analyze.py` using `multiprocessing.Pool`. Scans `<session>/tracks/*/assembled.wav` (or accepts an explicit `--files` list) and runs analyses across N workers. Output is identical to running `analyze.py` per stem. 5-6× faster than the serial loop on an 8-core machine. | `output/<session> [--workers N] [--skip-existing]` or `--files a.wav b.wav --output-dir DIR` |
@@ -64,24 +132,24 @@ python tools/batch_analyze.py output/<session> --workers 8
 | `tools/apply_gate.py` | Noise gate for drum bleed control. State machine (CLOSED/ATTACK/OPEN/HOLD/RELEASE) with RMS envelope follower and hysteresis. Presets: gate_kick, gate_snare_top, gate_snare_bottom, gate_tom, gate_room. | `<file> --output-dir DIR [--preset NAME] [--threshold DB] [--range DB] [--attack MS] [--hold MS] [--release MS] [--hysteresis DB]` |
 | `tools/apply_transient.py` | Transient shaping: independently controls attack (+sharper/-softer) and sustain (+longer/-tighter) using fast/slow RMS envelope pair. Only meaningful on percussive stems — use analysis `transient_profile` to decide. Presets: transient_kick_punch, transient_kick_tight, transient_snare_crack, transient_snare_tight, transient_tom_tight. | `<file> --preset NAME [--attack DB] [--sustain DB] --output-dir DIR` |
 | `tools/apply_amp.py` | Tube amp simulation + cabinet EQ for bass DI. Asymmetric soft clipping (even harmonics) + cabinet frequency response. Presets: ampeg_svt, ampeg_svt_driven, ampeg_slap, slap_bass, di_clean. | `<file> --preset NAME [--drive 0-1] [--asymmetry 0-1] [--hp HZ] [--lp HZ] [--low-shelf-hz HZ] [--low-shelf-db DB] [--mid-hz HZ] [--mid-db DB] [--mid-q Q] --output-dir DIR` |
-| `tools/apply_saturation.py` | Harmonic saturation: tape (symmetric tanh, even+odd), tube (asymmetric tanh, even harmonics → warmth), clipper (cubic soft clip, odd harmonics → presence). RMS-normalized output. Parallel mode via --mix. Presets: sat_tape_subtle, sat_tape_drums, sat_tube_bass, sat_tube_guitar, sat_clipper_parallel. | `<file> --output-dir DIR [--preset NAME] [--mode tape\|tube\|clipper] [--drive 0-1] [--asymmetry 0-1] [--mix 0-1]` |
+| `tools/apply_saturation.py` | Harmonic saturation: tape (symmetric tanh, odd harmonics), tube (asymmetric tanh, even harmonics → warmth), clipper (cubic soft clip, odd harmonics → presence). RMS-normalized output. Parallel mode via --mix. Presets: sat_tape_subtle, sat_tape_drums, sat_tube_bass, sat_tube_guitar, sat_clipper_parallel. | `<file> --output-dir DIR [--preset NAME] [--mode tape\|tube\|clipper] [--drive 0-1] [--asymmetry 0-1] [--mix 0-1]` |
 | `tools/apply_delay.py` | Delay/echo: normal (slapback, single echo, multi-tap with feedback) and pingpong (alternating L/R, mono→stereo). BPM-synced via --bpm + --division. HP/LP on wet signal. Send mode (--send) for bus return routing. Presets: delay_slapback_snare, delay_slapback_guitar, delay_pingpong_send, delay_pre_delay. | `<file> --output-dir DIR [--preset NAME] [--mode normal\|pingpong] [--delay-ms MS] [--feedback 0-0.95] [--mix 0-1] [--bpm BPM] [--division eighth\|dotted-eighth\|...] [--hp HZ] [--lp HZ] [--send]` |
 | `tools/apply_deesser.py` | Frequency-specific sidechain compressor for vocal sibilance control. Detection band is 5-8 kHz (5500-8500 default), gain reduction is full-band. Chain placement: AFTER compression (the comp amplifies sibilance peaks, so the de-esser catches them at the comp's output). Presets: deesser_smooth, deesser_aggressive, deesser_male_lead, deesser_female_lead. `relevance_check` skips when the sibilance band peak is below -25 dBFS (nothing to de-ess). | `<file> --output-dir DIR [--preset NAME] [--threshold DB] [--ratio N] [--attack MS] [--release MS] [--detect-low HZ] [--detect-high HZ] [--force]` |
 | `tools/apply_pitch_correct.py` | Vocal pitch correction via librosa.pyin + psola PSOLA shifting + scale quantisation. Detects voice f0 frame-by-frame, snaps to the nearest scale degree of the chosen key/mode, blends original→quantised by `strength` (0=no correction, 1=full Auto-Tune snap). 7 modes: major, minor, harmonic_minor, dorian, mixolydian, chromatic, natural_minor. Presets: pitch_correct_subtle, pitch_correct_pop, pitch_correct_hard_tune. Requires the `psola` package. | `<file> --output-dir DIR --scale-root NOTE --scale-mode MODE [--strength 0-1] [--preset NAME] [--fmin HZ] [--fmax HZ]` |
 | `tools/compare_reference.py` | Compare target mix against reference: 1/3-octave spectral delta (loudness-matched), LUFS/LRA/crest factor delta, spectral balance by region, ASCII two-sided bar chart, EQ recommendations for bands above --threshold. Optional `--apply WAV` bakes the inverse-delta peak EQ chain (max 6 filters, ±6 dB cap) into a corrected WAV. Outputs comparison.json + comparison.txt. | `reference.wav target.wav --output-dir DIR [--threshold DB] [--apply OUT.wav] [--apply-phase minimum\|zero]` |
 | `tools/detect_masking.py` | Frequency masking detector: finds stem pairs competing in the same 1/3-octave band. All stems LUFS-normalized to -18 LUFS before comparison; PSD is computed only on active frames (RMS > -45 dBFS) and pairs are time-gated (Jaccard co-activity < 0.15 suppressed). Severity: CRITICAL (<3 dB gap), HIGH (3-6 dB), MODERATE (6-10 dB). **NOTE:** the CLI `--threshold` default is 6.0, which reports only HIGH+CRITICAL — pass `--threshold 10` to surface the MODERATE band too. Auto-discovers stems from session output dir by stage. Outputs masking_report.json + masking_report.txt with heatmap and ranked pair list. | `output/<session> --output-dir DIR [--stage raw\|eq\|comp\|fx] [--threshold DB]` or `stem1.wav stem2.wav ... --output-dir DIR` |
-| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. **Per-bus auto-trim:** every bus carries `auto_trim_db` (calibration) alongside `volume_db` (style/user taste). Effective gain = `auto_trim_db + volume_db`. Calibration is computed during `--generate-config` (and refreshable via `--recompute-autotrim`) by measuring each bus's dry-sum LUFS in topological order so every bus's dry-sum output lands at -18 LUFS regardless of stem count. `volume_db` then layers a pure relative offset on top — drum dry-sum still sits at -18, but `vocal_lead` with `+2.0` sits at -16. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (**guarded — tape sat refuses if bus crest < 8 dB or LRA < 4 LU**), parallel_saturation (guarded), reverb_send. **Master chain — premaster mode (default):** glue comp + EQ + peak normalize to `peak_target_dbfs` (default -3 dBFS). NO clipper, NO M/S, NO LUFS-target normalization, NO brick-wall limiter. Industry handoff: mastering (`master_mix.py`) owns those moves. Legacy combined mix+master chain via `master.premaster_mode: false` opt-in (clipper / M/S / lufs_target / true_peak_dbfs only applied in this mode). Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]`. After flipping `active: true/false` on tracks, re-run `mix_config.json --recompute-autotrim` — surgical, only refreshes the per-bus calibration. |
-| `tools/mix_health.py` | Session-level mix scorecard. Runs after render_mix and produces a green/yellow/red verdict across 7 checks: integrated LUFS vs target, true peak vs ceiling, LRA, M/S width, low-freq mono compatibility, tonal balance vs reference (optional), masking pairs (from masking_report.json), and stem pumping detection (from stems/). Outputs mix_health.json + mix_health.txt. **Run this last in the MIX phase — gate to the master phase.** | `output/<session> [--reference ref.wav] [--lufs-target -14] [--tp-ceiling -1.0] [--output-dir DIR]` |
-| `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 11 chain presets: **base** (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent) + **spatial family** (modern_rock_spatial = sub-mono <150 Hz + +1 dB side @ 8k; **modern_rock_spatial_v10** = sub-mono <200 Hz + +1 dB peak @ 2.5k side + +3 dB shelf @ 8k side + stereo_width 1.05 — best for prog metal width; **modern_rock_spatial_v9** = +1.5 dB top shelf + exciter mix 0.12 for crisp Leprous/Wheel direction; **modern_rock_spatial_dark** = SAME spatial benefits as v10 but ALL top emphasis dialed back, for ear-fatigue cases; **modern_rock_spatial_noclip** = diagnostic preset to isolate clipper-induced distortion). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_spatial\|modern_rock_spatial_dark\|...] [--target-lufs N] [--tp-ceiling N]` |
-| `tools/style_check.py` | Grade a stereo mix against a named style profile — quantitative answer to "is this a modern_rock mix" without needing a reference track. Built-in profiles: `modern_rock`, `classic_rock`, `pop`, `hip_hop`, `jazz_acoustic`, plus specialized `punchy_modern_rock` and `tool_inspired` (the list is globbed from `tools/style_profiles/*.json` at runtime — run `--list-styles` for the authoritative set). Measures integrated LUFS, LRA, crest factor, and 5-band spectral RMS (tonal balance) at the profile's LUFS target, returns a traffic-light verdict (GREEN/YELLOW/RED) + 0-100 score + per-check deltas + EQ recommendations for off-target bands. Hard-fail rule: a RED on LUFS or LRA forces overall RED. | `mix.wav --style NAME --output-dir DIR` or `--list-styles` |
+| `tools/render_mix.py` | Sum processed stems into a stereo mix. Hierarchical bus routing. Blend normalization for multi-mic guitars. **Optional per-bus auto-trim (`--auto-trim`):** every bus carries `auto_trim_db` (calibration) alongside `volume_db` (style/user taste). Effective gain = `auto_trim_db + volume_db`. Calibration is computed during `--generate-config --auto-trim` (and refreshable via `--recompute-autotrim`) by measuring each bus's dry-sum LUFS in topological order so every bus's dry-sum output lands at -18 LUFS regardless of stem count. `volume_db` then layers a pure relative offset on top — drum dry-sum still sits at -18, but `vocal_lead` with `+2.0` sits at -16. Per-bus: volume, pan, **eq (zero-phase)**, comp_preset, saturation (**guarded — tape sat refuses if bus crest < 8 dB or LRA < 4 LU**), parallel_saturation (guarded), reverb_send. **Master chain — premaster mode (default):** glue comp + EQ + peak normalize to `peak_target_dbfs` (default -3 dBFS). NO clipper, NO M/S, NO LUFS-target normalization, NO brick-wall limiter. Project default: mastering (`master_mix.py`) handles delivery processing; intentional artistic mix processing may differ. Legacy combined mix+master chain via `master.premaster_mode: false` opt-in (clipper / M/S / lufs_target / true_peak_dbfs only applied in this mode). Stage rendering: `--stage raw\|eq\|comp\|fx` renders the mix using stem files from that processing stage (bus+master chain always runs). Output: `mix_stage_<stage>.wav`. **`--generate-config --style NAME`** loads genre-appropriate `default_bus_volume_db` from `tools/style_profiles/<name>.json` (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic) — without it, every bus starts at 0 dB which rarely matches modern conventions. | `output/<session> --generate-config [--style NAME]` then `mix_config.json --render [--output mix.wav] [--stems] [--stage raw\|eq\|comp\|fx]`. Use `mix_config.json --recompute-autotrim` only for intentional recalibration; it changes the balance. |
+| `tools/mix_health.py` | Technical peak check plus advisory loudness, phase, masking, and dynamics measurements. Listening stays pending. | `output/<session> [--reference ref.wav] [--lufs-target N] [--tp-ceiling N] [--output-dir DIR]` |
+| `tools/master_mix.py` | Mastering pass on a finished stereo mix.wav. Full chain: EQ → optional multiband → glue comp → exciter → optional M/S processing → optional stereo width → optional vinyl elliptical EQ → clipper → LUFS norm → ISP-aware limiter → post-limiter LUFS correction → optional dither. 7 format presets (spotify, apple, youtube, tidal, cd, vinyl_pre, broadcast) and 11 chain presets: **base** (gentle, modern_rock, modern_rock_mb, pop, hip_hop, transparent) + **spatial family** (modern_rock_spatial = sub-mono <150 Hz + +1 dB side @ 8k; **modern_rock_spatial_v10** = sub-mono <200 Hz + +1 dB peak @ 2.5k side + +3 dB shelf @ 8k side + stereo_width 1.05 — historical spatial experiment; **modern_rock_spatial_v9** = +1.5 dB top shelf + exciter mix 0.12 for crisp Leprous/Wheel direction; **modern_rock_spatial_dark** = SAME spatial benefits as v10 but ALL top emphasis dialed back, for ear-fatigue cases; **modern_rock_spatial_noclip** = no-clipper variant; compare actual settings before attributing differences). `--all-formats` produces all delivery variants from one input. | `mix.wav --output-dir DIR [--format spotify\|...] [--all-formats] [--master-preset modern_rock\|modern_rock_spatial\|modern_rock_spatial_dark\|...] [--target-lufs N] [--tp-ceiling N]` |
+| `tools/style_check.py` | Measure similarity to project style preferences. Scores cannot establish musical quality or genre authenticity. CLI succeeds when measurement completes, even for a red similarity score. | `mix.wav --style NAME --output-dir DIR` or `--list-styles` |
 | `tools/build_chain.py` | Aggregate every `*_report.json` in a session's `tracks/<stem>/` folders into a single `mix_chain.json` recall sheet — the canonical record of what processing was applied to each stem, in what order, with what parameters. Non-invasive (only reads existing reports). Topo-sorts steps by input→output filename matching so a buggy historical path doesn't break ordering. | `output/<session>` |
-| `tools/replay_chain.py` | Replay a `mix_chain.json` recall sheet — rebuild the entire mix from scratch by re-running every step (via subprocess) in recorded order, then `render_mix --render --stems`. Default behaviour is overwrite-in-place (back up first if you need the previous run). `--dry-run` prints the commands without executing; `--stem NAME` replays a single stem for debugging. | `<mix_chain.json \| session_dir> [--dry-run] [--stem NAME]` |
-| `tools/master_health.py` | Master-level scorecard, complementary to mix_health. Checks: format conformance (LUFS / TP / codec-ISP estimate), per-band phase coherence (sub-mono / top-wide), per-band M/S width profile, punch index, compression-history detection, reference-deck comparison. `--all-formats` batch mode scans `master_<format>.wav` files in the output dir and produces a cross-format scorecard. Vinyl/no-limiter formats are handled correctly (TP > ceiling is expected and not flagged as red). | `[master.wav] --output-dir DIR [--format spotify\|...] [--all-formats] [--reference ref1.wav ...]` |
+| `tools/replay_chain.py` | Replay a `mix_chain.json` recall sheet — rebuild the entire mix from scratch by validating and re-running supported operations in dependency order, then `render_mix --render --stems`. Default behaviour is overwrite-in-place (back up first if you need the previous run). `--dry-run` prints the commands without executing; `--stem NAME` replays a single stem for debugging. | `<mix_chain.json \| session_dir> [--dry-run] [--stem NAME]` |
+| `tools/master_health.py` | Master-level scorecard, complementary to mix_health. Checks: delivery properties, loudness and 4x/8x waveform true-peak estimates, per-band phase coherence (sub-mono / top-wide), per-band M/S width profile, punch index, compression-history detection, reference-deck comparison. `--all-formats` batch mode scans `master_<format>.wav` files in the output dir and produces a cross-format scorecard. Peak safety also applies to vinyl/no-limiter formats. Codec encode/decode is unavailable; artistic metrics remain advisory. | `[master.wav] --output-dir DIR [--format spotify\|...] [--all-formats] [--reference ref1.wav ...]` |
 | `tools/bus_balance.py` | Per-bus loudness contribution report. For a `--render --stems` output, loads each `stems/stem_<bus>.wav`, applies bus volume_db (incl. parent chain) and measures effective LUFS in the mix. Marks top-level buses (the ones that actually sum into master). Use to answer "is the bass too loud vs drums?" with data instead of vibes. | `<mix_config.json>` |
 | `tools/level_notes.py` | Per-note volume leveling on a target time range. Detects onsets, measures each note's attack peak, applies a short 95 ms boost envelope (5 ms pre-fade + 30 ms hold + 60 ms fade-out — fits between onsets so boosts don't overlap and overshoot). Only lifts quiet notes (peak below `--quiet-threshold-db`), never reduces loud ones. Safety scale is segment-only. Intended for uneven slap/finger bass takes where the player swings dynamically and per-clip gain can't help (multiple notes per clip). | `<input.wav> --output <out.wav> --end SEC [--start SEC] [--target-peak-db -4] [--quiet-threshold-db -6] [--max-boost-db 15]` |
 | `tools/find_clicks.py` | Click / sharp-transient forensic. **Sweep mode** scans `mixes/mix.wav` for high inter-sample steps (>= 0.10 default) and lists them ranked by magnitude (with clustering to collapse nearby clicks into single events). **Trace mode** (`--time <sec>`) walks every chain stage at the given timestamp (source → assembled → stem → mix) and prints the max inter-sample step at each, so you can attribute an audible click to the exact stage that introduces it — engineer slip-edit at a clip boundary, polarity inversion, comp ceiling clipping, or a real source recording issue. Always trace BEFORE blaming the chain; many "clicks" turn out to be the source itself (pre-limited bounce, recording clip, or a known anti-phase pedal DI). | `output/<session> [--time SEC] [--threshold 0.10] [--top 20]` |
 
-### Make-it-hit tools — DATA-GATED, NOT DEFAULT
+### Optional creative tools - measurement prompts, audition required
 
 These tools add perceived loudness, weight, or width. **They are NOT default
 processing steps.** Each one ships with a built-in `relevance_check` that
@@ -134,7 +202,7 @@ output/
     │       ├── align_report.json
     │       ├── eq_report.json
     │       └── comp_report.json
-    ├── stems/                        <- render_mix --stems output (per-bus submixes at -18 LUFS)
+    ├── stems/                        <- render_mix --stems output (float bus submixes preserving their rendered levels)
     │   ├── stem_drums.wav
     │   ├── stem_bass.wav
     │   ├── stem_vocal_lead.wav      <- only when vocal_lead bus has active tracks
@@ -302,7 +370,9 @@ in `render_mix.py` and `_headroom_verdict` in `analyze.py`):
 
 - `[OK]` — peak < -6 dBFS AND true peak < -6 dBTP
 - `[WARN]` — -6 ≤ peak < -1 dBFS OR -6 ≤ true peak < -1 dBTP
-- `[CLIP]` — peak ≥ -1 dBFS OR true peak ≥ -1 dBTP
+- `[CLIP]` — legacy warning label for peak >= -1 dBFS or true peak >= -1 dBTP.
+  This threshold is not proof of clipping; floating-point buses may exceed
+  0 dBFS without clipping. Inspect source/export samples and nonlinear stages.
 
 `phase_warnings` fires for any pair of active tracks on the same bus with
 `|corr| ≥ 0.4` over their mutual activity window. Most warnings are
@@ -310,139 +380,37 @@ expected multi-mic patterns (overhead L/R, kick-in + kick-sub, guitar
 amp + cab on the same DI). The interesting case is two tracks of the
 same instrument signal split between paths (e.g. DI clean + pedal chain
 DI of a bass) — `audit_session.py` cannot see those because the source
-files differ. Run `align_phase.py target --reference clean.wav` to
-time-align (and auto-flip polarity if needed), then update the track's
-`file` to the new `assembled_*_aligned.wav` and re-render.
+files differ. Compare polarity and timing alternatives against the original
+blend in context. Use `align_phase.py` only for a supported alignment hypothesis;
+a large absolute correlation alone does not justify changing timing.
 
 ## Workflow
 
-The full pipeline is two phases — MIX, then MASTER. **They are SEPARATE.**
-The MIX phase produces a clean **premaster** (`mix.wav` at peak -3 dBFS, no
-limiter, no LUFS norm to -14, no clipper). The MASTER phase (`master_mix.py`)
-takes that premaster and applies the full mastering chain (LUFS-norm,
-limiter, clipper, ISP correction) per delivery format. **Do not bake
-mastering moves into the mix render** — that's the cascaded-limiter bug
-this pipeline used to have. Industry references: SOS, LANDR, iZotope,
-Major Mixing; see docs/knowledge.md "Mix vs master separation".
+1. Validate inputs and preserve the DAW edit or consolidated-stem timeline.
+2. Assemble at original levels. Level clips only to correct identified accidental
+   recording-level differences; link related microphone/stereo decisions.
+3. Analyze, then establish balance and pan. EQ, dynamics, alignment and effects
+   are optional interventions with specific hypotheses, not mandatory stages.
+4. Render and inspect `mix_health`. Technical failures must be resolved; LUFS,
+   LRA, width, masking and tonal targets are advisory. Compare matched excerpts
+   and obtain listening feedback before treating the mix as approved.
+5. Master to the requested delivery profile. Preserve creative bus processing
+   where intended and avoid accidental duplicate limiting. Do not automatically
+   generate one loudness-normalized master for every streaming service.
+6. Run `master_health` on the exported WAV. Verify file format, measured peaks,
+   and any contractual loudness requirement. Read `loudness_target_met` from the
+   mastering report; a missed preference is not permission to overcompress.
+7. Health tools do not encode codecs. If required, use an available encoder,
+   decode and measure the actual result, and arrange codec listening review.
+   An 8x waveform peak estimate is not an encoder simulation or codec audition.
+8. Build and validate recall. Run `tools/review_delivery.py` with the agreed
+   ceiling, format requirements, and actual listening records. Full-song human
+   approval must match the export hash; a green style score never grants it.
 
-Each phase ends with a required scorecard (mix_health, master_health). The
-master phase only starts when mix_health is green or 1-yellow.
-
-```
-[MIX PHASE — analysis triggers in <brackets>]
-parse_session
-  -> apply_gain --per-clip
-     <analyze each new assembled.wav>                                       [Required]
-     <compare_reference if user gave a reference, once>                     [Required if ref]
-     <detect_masking --stage raw to set EQ priorities>                      [Required]
-  -> align_phase (drums)
-     <analyze each new assembled_aligned.wav>                               [Required]
-  -> apply_eq
-     <analyze each *_eq.wav — confirm spectral move>                        [Required]
-  -> apply_compression
-     <analyze each *_eq_comp.wav — confirm crest + pumping flag>            [Required]
-     <detect_masking --stage comp — compare to baseline>                    [Optional]
-  -> (make-it-hit, only if data justifies it: subharm / haas / exciter
-      / multiband / clipper / parallel_sat / M/S — see decision rules)
-     <analyze after each — verify metric + pumping>                         [Required]
-  -> (vocal stems only — 2026 best-practice chain order)
-     apply_eq subtractive (HP, mud cut)       -> assembled_eq.wav           [Required for vocals]
-       <analyze>                                                            [Required]
-     apply_compression (vocal preset)         -> assembled_eq_comp.wav
-       <analyze — confirm crest>                                            [Required]
-     apply_deesser                            -> assembled_eq_comp_deessed.wav
-       <analyze — vocal.sibilance.peak_db should drop 3+ dB>                [Required if not skipped]
-     apply_eq additive (presence, air)        -> ..._deessed_eq.wav
-       <analyze>                                                            [Required]
-     [apply_pitch_correct — optional, only if cents_std > 30]               [Optional, ask user]
-  -> render_mix                                              -> mix.wav
-     <mix_health.py output/<session> [--reference ref.wav]>                 [Required]
-     <if not green: address issues, re-render, re-run mix_health>           [Required loop]
-
-[MASTER PHASE — runs on mix.wav after mix_health passed]
-  -> master_mix mix.wav --format <preset>   OR   --all-formats
-     <master_health.py master_<fmt>.wav --format <fmt> [--reference deck...]>  [Required per format]
-     <if not green: tweak --master-preset or chain settings, re-master>        [Required loop]
-  -> delivery: ship master_<format>.wav files
-
-[mix render commands]
-1. render_mix output/<session> --generate-config  -> edit mix_config.json
-2. render_mix mix_config.json --render --stems    -> mix.wav + stems/stem_<bus>.wav  (ALWAYS --stems)
-3. mix_health.py output/<session>                 -> scorecard (REQUIRED)
-
-[master commands]
-4. master_mix mix.wav --output-dir output/<session>/masters --all-formats
-                                                  -> master_<format>.wav per format
-5. master_health.py master_<fmt>.wav --format <fmt> --output-dir DIR
-                                                  -> scorecard per format (REQUIRED)
-```
-
-**Gain staging logic:**
-- `--per-clip` is the primary gain-staging step. It normalizes clip-level inconsistencies
-  (different recording gain settings across sessions) AND assembles the full stem.
-  Target: -18 LUFS per clip (set in config.toml [gain] per_clip_target_lufs).
-- `--per-channel` is only needed on top of that for delivery normalization (Spotify, Apple Music, etc.)
-  or when receiving pre-assembled stems. After a correct --per-clip pass, the stem is already
-  at mix-ready levels — a second --per-channel pass is optional.
-
-**DRUMS: never use per-clip normalization for gain staging.**
-A drummer records in one continuous take; editorial clip cuts are the editor's work, not
-separate recordings. Per-clip normalization on drum tracks creates artificial level jumps at
-edit boundaries (e.g. stereo collapse at cut points from OH level mismatch).
-Correct drum workflow: use `--per-clip` only to assemble the stem (for region placement),
-then apply `--per-channel` on the assembled result for a single uniform gain pass.
-
-**BASS DI tracks: same rule as drums.**
-A bassist also records a continuous take; the studio splits it into many clips for editorial
-slip-edits (small rhythmic adjustments where chunks of the take get nudged ±10-50 ms relative
-to the click). Per-clip LUFS normalisation amplifies those tiny edits into audible level jumps
-and the comp downstream then clips the boundary peaks. Correct bass workflow:
-`apply_gain --per-clip --no-normalize` (assembles at source levels — apply_gain's default 5 ms
-crossfade smooths the slip-edit boundaries), then `apply_gain --per-channel --target-lufs -22`
-for uniform gain. The -22 LUFS target leaves the comp 4 dB of headroom so the +5 dB auto
-makeup doesn't push the post-comp peak into the ceiling — pass `--makeup 0` on
-`apply_compression` if it still hits 0 dBFS (autotrim compensates the lost level at the bus).
-
-**Bass DI PEDAL polarity inversion is common.**
-Many bass pedal chains (overdrive, fuzz, transformer-output DI boxes) invert the polarity of
-the signal relative to the clean DI. If both are recorded in parallel, they sum
-**destructively** at the bus — fundamentals cancel, only the high-frequency *difference*
-between the two takes survives → sounds bright and clicky. Detection: load both tracks, after
-EQ + comp measure the correlation. Correlation near **-1.0** → polarity inversion. Fix: add
-`"polarity_flip": true` to the PEDAL track in mix_config.json. Tell-tale: bus dry-sum LUFS
-20+ dB below the per-track LUFS in the autotrim recompute output. (Note: `align_phase.py`'s
-polarity detector can MISS this when the two tones differ heavily because the cross-
-correlation peak gets weak — set polarity_flip manually.)
-
-**Click / "reccsenés" forensic workflow.**
-When the user reports an audible click at a specific time:
-
-1. **DO NOT default-blame the chain.** Some recordings have pre-existing issues (pre-limited
-   bounces, slip-edit clicks from the DAW session, recording clipping). Trace forward from
-   the source first.
-2. Run `tools/find_clicks.py output/<session> --time <SEC>` — walks every chain stage at the
-   given timestamp and reports max inter-sample step per stage. The stage where the step
-   first jumps from ~0.07 (normal music) to ≥ 0.10 is the introducer.
-3. If the source recording itself has the click: check whether one of these patterns matches:
-   - Single-sample ceiling-hits at 0 dBFS scattered uniformly across the file (e.g. 1 per
-     5 sec) → engineer's pre-bounce went through a limiter, the ticks are baked in. Either
-     deactivate the track or use de-click restoration.
-   - Real recording clipping (sustained ceiling-hit runs of 5+ samples) → bad take, no
-     restoration tool in the project can hide it cleanly; deactivate and use alternative.
-4. If the click appears at `assembled.wav` but not in the source: it's a clip-boundary edit.
-   `apply_gain` should apply the 5 ms crossfade by default; if it's still there, check the
-   `--crossfade-ms` value and the clip overlap tolerance.
-5. If the click appears at `assembled_eq_comp.wav` but not at `assembled.wav`: the comp's
-   makeup gain is pushing the peak to the ceiling. Re-run with `--makeup 0`.
-6. If the click appears only in the SUM (bus stem or mix) but not in any individual track:
-   suspect destructive polarity interaction between two correlated tracks on the same bus
-   (bass CLEAN + bass PEDAL is the classic case).
-
-- Never apply processing without reading the analysis first.
-- Always read `spectrogram.txt` from output — it is the primary way to understand what is in a stem.
-  The STATS SUMMARY block at the bottom of spectrogram.txt contains the new metrics — always read it.
-- After applying any processing, re-analyze the output file to verify the result.
-- Ask before processing multiple stems in bulk — do one first and confirm it is correct.
+When investigating a click, compare the source, assembled stem, processed stem,
+contributing buses, and final export at the same timestamp. A peak or correlation
+threshold identifies a candidate cause, not a diagnosis. Preserve source material
+and audition the smallest corrective change.
 
 ## Analysis interpretation — what to say after reading analysis.json
 
@@ -478,83 +446,36 @@ Do not invent problems. Do not recommend processing without a specific reason fr
 
 ### Interpreting pumping_detected
 
-The pumping detector measures low-frequency envelope modulation (1-5 Hz). It
-fires on both real comp artifacts AND on naturally periodic musical material
-(strumming, hi-hat patterns, repeated kick hits at song tempo). It cannot
-distinguish them from envelope statistics alone — that's the agent's job.
+The detector measures envelope modulation and can flag strumming, repeating
+hits, vocal phrasing, or compression artifacts. It cannot distinguish those
+from statistics alone. A new flag after processing is a threshold crossing,
+not proof that processing introduced an audible defect.
 
-When `pumping_detected: true` appears, before reverting or softening any
-upstream step, run this checklist:
+Compare the same passage before/after at matched loudness. Examine the groove,
+active notes, gain envelope, and release behavior. Tempo-related modulation may
+be intentional or compressor-driven; the tempo match alone settles neither.
+Use direct listening or actual human feedback to decide whether to keep, soften,
+or revert the change. If listening is unavailable, report the candidate cause
+and the excerpt to review without declaring an artifact or a clean result.
 
-1. **Did the flag appear AFTER a compression / multiband / clipper step?**
-   Compare the analysis JSON from before and after that step. If pumping
-   was `false` before and `true` after, the step caused it — soften the
-   release or reduce the ratio and retry.
+## Analysis tool decision tree - when to run what
 
-2. **Is `pump_rate_hz` close to the song tempo's quarter or eighth note?**
-   At 120 BPM: quarter = 2.0 Hz, eighth = 4.0 Hz, dotted quarter = 1.33 Hz.
-   At 82 BPM (typical rock ballad): quarter = 1.37 Hz. If pump_rate matches
-   the groove pulse, it's likely musical — strumming, kick-snare backbeat,
-   or hi-hat pattern showing up in the envelope, NOT a comp artifact.
+Use analysis to answer a specific question. Numerical thresholds generate
+hypotheses; they do not authorize automatic corrective processing.
 
-3. **What stem is it on?**
-   - Guitar (especially rhythm): periodic strumming pulse — usually musical
-   - Bass: usually follows the kick pattern — musical pulse
-   - Drum buses (per-stem mode): kick pattern — musical pulse
-   - Vocal, master mix, sustained pad: more suspect — comp artifact more likely
-   - Per-instrument with clearly uniform decay everywhere: comp artifact
+| Trigger | Check | Decision |
+|---|---|---|
+| New session | Source/clip audit and assembled-stem analysis | Confirm layout, channel relationships, usable inputs and duplicate candidates. |
+| User supplies references | Loudness-matched comparison of corresponding passages | Establish intended tone and dynamics; account for arrangement differences. |
+| Suspected masking, sibilance, pitch or pumping issue | Relevant analysis plus audition | Process only an identified audible problem; preserve intentional effects. |
+| Processing changed audio | Before/after measurement and matched audition | Keep, revise or bypass the treatment according to the stated goal. |
+| Mix rendered | `mix_health.py` and the exported audio | Resolve technical failures; treat musical metrics as advisory. |
+| Master exported | `master_health.py` with the agreed format | Verify file properties, peaks and any contracted loudness requirement. |
+| Health report is yellow or red | Inspect the named check | Fix technical violations; investigate artistic differences without chasing an all-green score. |
 
-4. **Does the `modulation_depth_db` exceed `lf_excess_db` by a lot?**
-   - High depth + moderate excess (e.g. depth 18 dB, excess 5 dB) often = musical
-   - High depth + high excess (e.g. depth 8 dB, excess 30 dB) = comp artifact
-   - Synthetic continuous-noise pumping test signals show excess > 20 dB.
-
-If the conclusion is "musical pulse, not artifact": **say so explicitly in the
-verdict and do not revert**. Note it in the session summary so the next
-analysis pass doesn't re-flag it as a problem.
-
-If the conclusion is "comp artifact": revert or soften the offending step,
-re-render, re-analyze, confirm the flag clears.
-
-## Analysis tool decision tree — when to run what
-
-This is the source of truth for when each analysis tool MUST run vs. when it's
-optional. Do not wait for the user to ask — these are obligations triggered by
-events in the workflow. "Required" means you stop and run it before doing
-anything else; "optional" means run it if there's a specific question to answer.
-
-| Trigger event | Required / Optional | Run this | What to read |
-|---|---|---|---|
-| Session opened — `session.json` exists, mix_config not yet generated | **Required, once** | `audit_session.py session.json` | Duplicate groups → which tracks to set `active: false` in mix_config. Always show the report to the user and ASK before deciding which copy to keep. |
-| A new `assembled.wav` (or `assembled_aligned.wav`) just landed | **Required** | `analyze.py` on that file | LUFS, hum, transient_profile, frequency_bands, frequency_bands_crest_db, stereo, pumping |
-| User provided a reference mix at session start | **Required**, once | `compare_reference.py reference target_or_raw_mix` | LUFS delta (target), spectral balance deltas (EQ goals), LRA delta (compression target) |
-| Session opened, before any EQ work | **Required** | `detect_masking.py output/<session> --stage comp` (or `--stage raw` if no comp yet) | CRITICAL + HIGH pairs → primary EQ cut targets |
-| Output from `apply_eq` / `apply_compression` / `apply_gate` / `apply_amp` / `apply_saturation` / `apply_transient` / `apply_reverb` / `apply_delay` / `apply_deesser` / `apply_pitch_correct` just landed | **Required** | `analyze.py` on that output | Did the targeted metric move the right way? `pumping_detected` flipped? For de-esser: `vocal.sibilance.peak_db` should drop by 3+ dB. For pitch correct: `vocal.pitch.cents_std` should drop. |
-| Vocal stem just had analyze.py run AND `vocal.sibilance.peak_db > -25` | **Required** | `apply_deesser.py` AFTER the comp step | Sibilance is loud enough to be a problem. Default preset `deesser_smooth`. The chain order matters: de-esser AFTER comp, not before. |
-| Vocal stem just had analyze.py run AND `vocal.pitch.cents_std > 30` | Optional, ask user first | `apply_pitch_correct.py --scale-root NOTE --scale-mode MODE` | Intonation drift is over 30 cents standard deviation. Above 50 cents always ask the user — the take may have intentional bending that pitch correction would flatten. |
-| Output from a make-it-hit tool just landed (`apply_subharm`, `apply_haas`, `apply_exciter`, `apply_multiband_comp`, or a render with `master.clipper` / `master.ms` / `buses.*.parallel_saturation`) | **Required, double check** | `analyze.py` on the output **AND** verify the tool's own `relevance_check` result | (a) targeted metric moved in the intended direction, (b) `pumping.pumping_detected` is still false, (c) `relevance_check.recommend_skip` was honoured |
-| `render_mix --render` finished (mix.wav written) | **Required** | `mix_health.py output/<session> [--reference ref.wav if user gave one]` | Green/yellow/red verdict across LUFS, true peak, LRA, M/S width, mono compat, tonal balance, masking, stem pumping |
-| `mix_health` returned yellow or red verdicts | **Required loop** | Address each non-green item, re-render, re-run `mix_health.py` | Same — until green or "1 yellow max" |
-| `mix_health` passed (green or 1-yellow) — moving from mix to master | **Required transition** | `master_mix mix.wav --output-dir output/<session>/masters --format <preset>` (or `--all-formats`) | Mastering pass per delivery target |
-| `master_mix` finished (per format) | **Required** | `master_health.py master_<fmt>.wav --format <fmt>` | format conformance + phase + punch + compression history per delivery |
-| `master_health` returned yellow or red | **Required loop, but read which section** | Tweak `--master-preset` or chain params, re-run `master_mix`, re-run `master_health`. **Hard gates** (LUFS, true peak, phase, punch) red = must fix. **Reference deck red** alone = tonal advisory only; ship if the hard gates are green (see knowledge.md "Reference deck is a tonal GUIDE"). | Same — until green on hard gates |
-| Between processing stages (eq → comp → fx), want to see if masking improved | Optional | `detect_masking.py output/<session> --stage <stage>` | Compare critical/high counts to the earlier run |
-| After rendering, want to compare against reference for master EQ tweaks | Optional | `compare_reference.py reference mixes/mix.wav --output-dir output/<session>/analysis [--apply ...]` | Spectral delta in the rendered mix — feeds master EQ |
-| Mix or master is "done" but no reference track was provided; want a style-aware sanity check (does this sound like the intended genre) | Optional | `style_check.py mix.wav --style <modern_rock\|classic_rock\|pop\|hip_hop\|jazz_acoustic> --output-dir output/<session>/analysis` | 0-100 score + GREEN/YELLOW/RED verdict + per-band EQ recommendations vs. the genre's expected tonal balance, LUFS, LRA, and crest. **Read borderline ([OK*]) bands explicitly** — these are GREEN but at severity ≥ 0.7 (within 30% of the YELLOW threshold). A band sitting at +2.3 dB delta with ±2.5 dB tolerance is GREEN, but it's also "barely GREEN" — call it out so the user knows the verdict is on the edge, not comfortably inside spec. |
-| After `render_mix --render --stems`, want objective per-bus loudness data (e.g. "is the bass actually too loud relative to drums?") | Optional | `bus_balance.py <mix_config.json>` | Effective LUFS contribution per bus (volume_db applied + parent-chain summed). Top-level buses (`[T]`) are the ones summed into master; sub-buses shown for reference. Use to settle perception arguments with measurement. |
-| Source stem has uneven per-note dynamics (slap/finger bass take with wildly varying note levels — per-clip gain can't help because each clip has many notes) | Optional | `level_notes.py <input.wav> --output <out.wav> --end SEC [--start SEC]` | Detects onsets, lifts only the quiet notes via a short ~95 ms boost envelope (no overlap between notes, no reduction of loud notes). Safety-scaled to the modified segment only. Run on the assembled stem before EQ/comp. |
-| Process budget hit (4 processing steps on the same stem) | **Required STOP** | `analyze.py` on current state | Stop. Read what the chain actually achieved. Ask the user before adding a 5th step. |
-| `render_mix --render` finished — `mix_report.json` carries `bus_peaks` / `master_peaks` / `phase_warnings` | **Required** (zero extra cost — already in the report) | Read `mix_report.json` and surface any non-`[OK]` verdict | (a) Per-bus chain stages flagged `[WARN]` ≥ -6 dBFS or `[CLIP]` ≥ -1 dBFS — usually means bus volume_db is too high or per-stem files are hot. Lower the offender and re-render. (b) `master_peaks.verdict` = `[CLIP]` — limiter is doing too much work, dynamics collapse. Same fix: lower contributing buses. (c) `phase_warnings` non-empty — pairs of tracks on the same bus with `\|corr\| ≥ 0.4`. Two flavours: **expected** (overhead L/R stereo pair, kick-in + kick-sub on the same drum, guitar amp + cab on the same DI) — leave alone; **anomaly** (DI clean + pedal-output of the same instrument, polarity-flipped duplicate not caught by `audit_session.py` because the source files differ) — use `align_phase.py` to time-align and let it auto-detect polarity flip, then point the track at `assembled_*_aligned.wav`. |
-| **User reports an audible click / "reccsenés" / tick at a specific time in the mix or master** | **Required** | `find_clicks.py output/<session> --time <SEC>` (trace mode) and walk source → assembled → stem → mix at that timestamp | The stage where the max inter-sample step first crosses 0.10 is the introducer. Source-side issue (already-clipped recording, pre-limited bounce with 1-sample ceiling-hits) → can't fix in the chain; deactivate or restore. Assembled-side issue (per-clip boundary discontinuity) → check `apply_gain --crossfade-ms` value. Comp-side issue (comp output peak at 0 dBFS) → re-run with `--makeup 0`. Sum-only issue (only mix has the click, no individual track does) → suspect destructive polarity between two correlated tracks on the same bus (CLEAN + PEDAL bass with -0.9 correlation is the canonical case). See **Click / "reccsenés" forensic workflow** below for the full decision tree. |
-| **User reports balance feels wrong, "túl forró" / "túl halk" on a bus** | Required | `bus_balance.py <mix_config.json>` + read `mix_report.json` `bus_peaks` | Verify with measurement before reaching for `volume_db`. The autotrim already calibrates each bus to -18 LUFS — perception arguments are best settled with the bus_balance numbers. If a bus genuinely needs a relative offset, edit `volume_db` (NOT `auto_trim_db`). |
-| **`render_mix --render` finished — audit the pan distribution of guitar buses** | **Required** | Read `mix_config.json` `buses.*.pan`. Are 2+ rhythm guitar buses (e.g. `gtr_1` + `gtr_laci`) both at pan 0 (center)? | If yes, the mix has the "everything in center, bass dominates" problem — suggest the style profile's `default_bus_pan` was not applied OR the user opted out. Propose adopting the genre conventions: modern_rock pans gtr_1 -0.6 / gtr_laci +0.6, classic_rock ±0.5, jazz_acoustic ±0.3. **Bass + drums always stay at pan 0** (mono foundation). This was the root cause of the "bass dominates" feel in the May 2026 terido session — 2 active rhythm guitars panned 0/0 left the bass alone in the center, perceptually loud. **DO NOT pan rhythm guitars wide if they're a single-take continuous performance with no second guitarist** (check timeline-overlap with `tools/find_clicks.py` style activity reports — if no overlap, panning has nothing to separate). See "Panning convention by band size" in docs/knowledge.md. |
-
-**Operational rules that follow from the table:**
-
-1. **Never skip a "Required" trigger.** If the trigger fires and you didn't run the analysis, you are guessing — that is the failure mode this table exists to prevent.
-2. **Always read the JSON, not just the .txt summary.** The .txt is for the user to skim; the JSON is what your decisions must reference.
-3. **Quote specific fields when proposing a next step.** "I see `loudness.crest_factor_db: 4.1` and `pumping.pumping_detected: true` — the comp went too hard, reverting and retrying with a 2:1 ratio" beats "the comp seems too much".
-4. **Re-run analysis even if you "know" what changed.** The point of the re-analyze loop is to catch the cases where you were wrong about what changed.
+Preserve an approved bus balance. Recompute auto-trim only when intentional
+recalibration is requested, since it changes relative levels. Export bus stems
+when needed for deliverables or diagnostics; their levels are preserved.
 
 ## Progress reporting during long operations
 
@@ -573,46 +494,26 @@ Never run a batch silently. The user cannot see tool call progress, only your te
 
 ## Reference comparison workflow
 
-Use `tools/compare_reference.py` whenever a reference mix is available or after rendering a mix.
+Use a user-provided or otherwise authorized reference when available. Record
+its exact version, comparison passage, and what it demonstrates (for example,
+drum impact or vocal depth). Research articles cannot replace audio references.
+If no reference is available, state that limitation; do not invent one.
 
-**When to run it:**
-- User provides a reference track ("sound like this") — run immediately before processing starts.
-  Establishes baseline targets for spectral balance, LUFS, and LRA.
-- After rendering a mix (`render_mix.py --render`) — compare the rendered mix against the reference.
-  Use the EQ recommendations to guide master EQ adjustments in mix_config.json.
-- After a stage render (`--stage eq|comp|fx`) — compare stages A/B to hear what each processing
-  step added or removed spectrally. Reference can be the raw stage or an external reference.
+`tools/compare_reference.py` measures loudness and spectral differences.
+Compare similar musical sections at matched loudness. Differences can come
+from arrangement, tuning, instrumentation, or production intent. Its suggested
+EQ filters are hypotheses: do not apply inverse spectral matching automatically.
+A quieter mix is not inherently worse, and playback normalization does not
+establish an artistic loudness target.
 
-**How to interpret comparison.txt:**
-- LUFS delta: the single most important number. If target is > 2 dB quieter than reference,
-  the mix will sound worse on streaming platforms even with correct processing.
-- Spectral balance (bottom/mids/top): quick three-number check. Delta > ±2 dB in any region
-  means a clear tonal imbalance vs. the reference.
-- [!] flagged bands in the chart: direct EQ targets. Translate directly into apply_eq.py
-  `--filter` arguments or add to mix_config.json master EQ chain.
-- The comparison is loudness-matched before computing the spectral delta — report the LUFS
-  delta separately from the spectral recommendations, not as part of the EQ advice.
+Use `tools/detect_masking.py` to locate possible overlap, then check simultaneous
+activity and the actual mix balance. Its normalized stem comparison changes
+relative levels and cannot by itself establish audible masking or required EQ.
 
-**Standard reference comparison command:**
-```bash
-python3 tools/compare_reference.py \
-  <reference.wav> output/<session>/mixes/mix.wav \
-  --output-dir output/<session>/analysis
-```
-
-**Frequency masking — run before EQ decisions:**
-Use `tools/detect_masking.py` at the start of a session (before EQ) to see which stems
-compete in the same frequency bands. Run on the comp stage for the most accurate picture.
-The CRITICAL and HIGH pairs directly inform which stems need EQ cuts and where.
-
-```bash
-python3 tools/detect_masking.py \
-  output/<session> --output-dir output/<session>/analysis --stage comp
-```
-
-Read `masking_report.txt` and state the top CRITICAL/HIGH pairs before proposing any EQ.
-Classic rock mix patterns to expect: kick mics vs. bass DI at 60-120 Hz, snare vs. guitar
-body at 200-400 Hz, guitar vs. vocal at 2-4 kHz.
+Use `tools/prepare_audition.py` for audible A/B files. Compare a minimally
+processed baseline and each candidate at a common loudness. Inspect kick/snare
+attacks, bass articulation, vocal consonants, cymbal decay, mono translation,
+and quiet-to-dense transitions. Collect focused feedback on unresolved choices.
 
 ## Progress checklist
 
@@ -637,161 +538,135 @@ Example:
 
 ## Session end summary
 
-At the end of a mix session (after the final render and analysis), always write a stage
-summary to `output/<session>/session_summary.md`. Create or overwrite the file using the
-Write tool. Do this unprompted — no need to ask.
+Report the current state clearly: draft, technically checked with listening
+pending, revision requested, or approved for the specified delivery. Include:
 
-The file should contain three sections:
+- Actual source/take decisions, applied processing, and retained preferences.
+- Links to the exact rendered versions and any matched audition excerpts.
+- Measured results and contractual checks, separately from artistic judgments.
+- Direct audition performed, human feedback and its scope, and unresolved issues.
+- Recall validation performed (dry-run or actual replay), including engine-version
+  mismatches. New tool code invalidates old engine hashes; do not rewrite old
+  manifests to pretend a prior render used the new engine.
 
-**1. Per-stem-group processing table** — what was applied at each stage:
+Do not automatically create a narrative document unless the user requested one.
+Keep machine-readable processing, audition, and delivery-review records with the
+session. Show test results as software verification, never as a sound-quality score.
 
-| Stage | Stem group | What was done |
-|---|---|---|
-| eq | KICK IN | HP 80Hz, +3dB@3.5kHz click |
-| comp | KICK IN | 4:1, att 4ms, rel 80ms, makeup 4dB |
-| ... | ... | ... |
+## Creative processing decision rules
 
-**2. Bus and master chain** — separate table for bus-level and master processing.
+Start from a stated listening problem or artistic intention. Relevance checks
+are conservative tool safeguards, not evidence that an effect improves music.
+A documented override may be justified within existing user authorization;
+never force a process solely to pass a score or a downstream tool's guard.
 
-**3. Key metric deltas** — before vs. after for the most important metrics:
-- Low/mid frequency gap
-- LUFS target achieved
-- Stereo width (ms_width_ratio, lr_correlation)
-- Any hum eliminated
+Compare before/after metrics and matched audio for each consequential change.
+A new pumping flag means the detector crossed its threshold; it does not prove
+an audible artifact. Check whether the signal follows the musical pulse and
+whether the change improved the intended result. Without listening, describe
+candidate causes and keep the choice provisional.
 
-After writing the file, tell the user where it was saved.
+Keep chains as simple as the job permits. There is no universal four-process
+limit, and processing should not be added to satisfy a genre recipe. If further
+processing is needed, review the earlier choices before stacking another effect.
+Low LRA alone cannot identify an upstream compressor as the cause. Do not
+change drum compression just to make a clipper relevance check pass.
 
-## Make-it-hit decision rules
+## Production finishing review
 
-The make-it-hit tools (subharm, haas, exciter, multiband, master clipper,
-M/S, drum bus parallel sat) exist to **add perceived loudness, weight, or
-width**. They are powerful and easy to overuse — agents pattern-match to
-"more processing = better mix" and stack them. **DO NOT.** Use only when
-the analysis data justifies it. The 2026 rock-mix best practice is "don't
-over-process — keep the band's raw energy".
+Follow the production review below when the user asks for a more
+modern, finished, or impactful record. These are conditional experiments, not a
+mandatory processing chain or a promise of commercial success.
 
-**Required data evidence before applying each tool:**
+1. Establish the intended attention and contrast in each section. Use actual
+   timestamps; mark section labels inferred from activity as provisional.
+2. Preserve the approved lead take and double preference. Review phrase levels,
+   consonants, breaths, and effect tails. Bounded energy-derived gain rides are
+   candidates, not a substitute for word-by-word listening or pitch judgment.
+   Match overall lead loudness before comparing a consistency treatment.
+3. Review drum microphone relationships before adding processing. Try a quiet
+   parallel shell bus for body while retaining the original attacks. Do not
+   automatically include overheads/cymbals in a heavily compressed parallel path.
+   Sample reinforcement requires an identified need, suitable cleared or own
+   samples, velocity handling, and phase/timing review. It is never obligatory.
+4. Review kick/bass and guitar/vocal overlap only where both sources are active.
+   Prefer a small, bounded dynamic EQ experiment over automatic permanent cuts.
+   Preserve sidechain timing and link stereo control. A silent trigger must
+   leave the signal unchanged; check detector activity and actual cut depth.
+5. Shape space by section. Duck the wet vocal return if it interferes with active
+   words, retaining the dry vocal and allowing tails to emerge in gaps. Compare
+   at the same dry/wet balance before claiming better intelligibility.
+6. Use a few deliberate details: selected phrase-end delay throws, a build in
+   room energy, or a swell from existing material. Keep conspicuous options
+   separate from the main revision until reviewed. Do not claim tempo sync
+   without verified tempo, meter, and placement.
+7. Check exposed edits, sustained notes, double consonants, drum fills, and the
+   ending. Do not quantize, tune, replace hits, or remove breaths solely because
+   the user named a genre. Report which requested refinements remain unverified
+   when direct listening is unavailable.
+8. Export the revised mix and master in a new version folder, with source hashes,
+   settings, section decisions, and matched before/after excerpts. Technical
+   checks and musical approval remain separate. Never overwrite an approved
+   source or inherit full-song approval from an earlier balance comment.
 
-| Tool | Required evidence (from analyze.py or render output) |
-|---|---|
-| Master clipper | Sample peak ≥ -10 dBFS AND LRA ≥ 4 LU (the two conditions the code's relevance_check actually enforces). Below either, the clipper has no headroom to recover or just adds fatigue to an already-flat mix. |
-| Sub-bass synth (`apply_subharm`) | `frequency_bands.sub_60hz_rms_db` >= -35; `frequency_bands_crest_db.sub_60hz_crest_db` >= 8; stem is bass or kick |
-| Drum bus parallel sat | Drum bus crest factor > 10 dB; LRA > 4 LU; user explicitly asked for "punchier drums" or a "fatter kit" |
-| Spectral exciter | `spectral_centroid_hz` < 4000; `frequency_bands.air_8khz_plus_rms_db` < -40 |
-| M/S width | `stereo.ms_width_ratio` < 0.2 if side boost; do NOT boost side if width > 0.5 |
-| Haas widener | `stereo.ms_width_ratio` < 0.3; NOT on bass / low-centroid stems |
-| Multiband comp | At least 2 bands with `frequency_bands_crest_db` >= 6 dB; duration > 5s |
-| compare_reference --apply | Largest delta band > 2 dB AND it's a tonal/balance issue (not an obvious EQ omission earlier in the chain) |
+### Room and depth review
 
-**If the data does not match, DO NOT apply the tool.** The `relevance_check`
-in each tool's report will say `recommend_skip: true` with specific reasons.
-That is the source of truth — do not override with `--force` unless the user
-explicitly asks.
+For an assertive production revision, evaluate instrument character and section
+contrast before adding more natural room. Parallel snare distortion, a shaped
+snare tail, and a separate bass midrange drive path are candidate treatments.
+Use `apply_saturation.py --oversample 4` (or 8) for stronger nonlinear processing;
+`--input-gain-db` changes drive while the wet path is RMS matched. Check actual
+alias reduction and peak behavior; oversampling does not establish sound quality.
+Keep an unchanged baseline and compare shortened snare tails or new textures as
+separate options. Do not treat absence of a reference song as a reason to stop.
 
-**Process budget:** a single stem chain should not exceed 4 processing
-steps total (typically: gain → EQ → comp → one fx). If you are about to add
-a 5th step, **stop and re-examine** whether the earlier steps actually
-solved the problem. More processing on already-processed audio compounds
-phase shift, transient smearing, and artifacts.
+- Compare recorded room microphones before choosing synthetic ambience. Preserve
+  acoustic arrival delays by default; waveform correlation alone does not justify
+  shifting a room microphone or changing its polarity. Check the combined kit in
+  stereo and mono, including low-frequency weight and cymbal decay.
+- Compare natural-room and short shared-room alternatives separately. Use
+  instrument sends and wet returns for selective depth; do not automatically add
+  room reverb across the stereo master. Keep the approved dry-vocal balance.
+- Treat room filtering, compression, ducking, and section rides as conditional
+  choices. Document return levels and audition attacks, consonants, and exposed
+  tails at matched loudness. Increased width is not proof of better depth.
+- Preset names and Freeverb room_size values do not establish a physical room,
+  authentic plate algorithm, or decay in seconds. Measure an impulse response
+  when a decay claim matters, reporting the estimator and filtering. Distinguish
+  algorithmic rooms from captured spaces; record provenance for external IRs.
 
-**Re-analyze after every make-it-hit step:**
+## Reproducibility - mix_chain.json
 
-1. Apply the tool.
-2. Immediately run `analyze.py` on the output.
-3. Compare the targeted metric:
-   - Sub-bass synth on a bass DI → sub_60hz_rms_db should rise ~3-6 dB
-   - Master clipper → integrated_lufs should rise 1-3 dB without LRA collapsing
-   - Multiband → per-band crest should tighten in the targeted band
-   - Exciter → spectral_centroid_hz should rise, air_8khz_plus_rms_db should rise
-4. If the metric did not move in the intended direction, **revert** —
-   the tool either didn't help or just shifted the problem.
-5. Additionally check `analyze.pumping.pumping_detected`. If it **flips to
-   true** after a comp / multiband / clipper step (i.e. was `false` before
-   the step and `true` after), the step is the cause — revert or soften
-   and retry. If it was already `true` before the step (musical pulse —
-   common on guitar / drum buses), the step did not cause it; do not
-   revert on that ground. See "Interpreting pumping_detected" for the
-   musical-vs-artifact disambiguation checklist.
+New file-processing calls save `<output-stem>.operation.json` next to their WAV.
+These records contain complete callable arguments, dependency hashes, and the
+decoded-audio hash (samples and format, excluding container timestamps). Repeated tools retain separate records. Keep these files with the
+session; the traditional `eq_report.json` aliases remain summaries of the latest
+operation only.
 
-**Do not chain make-it-hit tools blindly.** A typical "make it hit harder"
-session adds at most ONE of: clipper, multiband, or parallel-sat per bus.
-Stacking all three creates fatigue, not punch.
+Run `tools/build_chain.py output/<session>` then
+`tools/replay_chain.py output/<session>/mix_chain.json --dry-run`.
+Replay validates supported calls and dependencies before processing, stops on the
+first error, and checks recorded output hashes. `--stem NAME` replays that stem
+without rendering the full mix. Replaying overwrites recorded outputs.
 
-**LRA-driven drum bus preset choice.** If after `render_mix --render` the
-mix LRA sits below 4 LU and the render log shows the clipper and
-parallel-sat guards firing ("SKIPPED — LRA X LU < 4"), the upstream drum
-bus compressor is the load-bearing cause. Switch the drums bus from
-`comp_drum_bus` (4:1, -10 dB) to **`comp_drum_bus_gentle`** (2:1, -8 dB,
-15 ms attack, 150 ms release), re-render, re-check. The gentle preset
-preserves enough LRA headroom for the downstream make-it-hit tools to
-function. Do this before reaching for the master clipper / parallel sat
-manually; you want the relevance check to PASS, not be force-overridden.
-
-**Master preset choice on a refmatched mix.** If you ran
-`compare_reference.py --apply` on the mix.wav, the resulting
-`mix.wav` already carries up to six inverse-delta peak EQ filters (the
-spectral correction toward the reference). Running a tonally-active
-master preset (`modern_rock`, `modern_rock_mb`, `pop` — all of which
-add highshelf EQ + side highshelf + exciter) on top of an already-
-refmatched mix **compounds the tonal moves**, pushing the top another
-+2-4 dB above the reference. Use **`--master-preset transparent`** on
-refmatched mixes — let the LUFS normalisation + ISP-aware limiter do
-their job without re-shaping the tonal balance the refmatch step
-already settled. Picked for v3: refmatched mix → `transparent` master
-preset → all four streaming format-conformance verdicts green.
-
-## Reproducibility — mix_chain.json (recall sheet)
-
-After a session is finished (mix_health green / master delivered), generate a
-`mix_chain.json` recall sheet so the entire mix is reproducible from the
-canonical session inputs:
-
-```bash
-python3 tools/build_chain.py output/<session>
-# Writes output/<session>/mix_chain.json
-```
-
-`build_chain` aggregates every `*_report.json` under `tracks/<stem>/` into a
-single JSON that lists, per stem, the exact ordered chain of processing
-steps with their arguments. Steps are topologically sorted by input→output
-filename so the recorded order matches the actual processing order.
-
-To rebuild the mix from a chain:
-
-```bash
-python3 tools/replay_chain.py output/<session>/mix_chain.json
-# Re-runs every step in subprocess; finishes with render_mix --render --stems
-```
-
-Useful flags:
-- `--dry-run` — print the commands without executing (sanity check the chain)
-- `--stem "KICK IN.05"` — replay one stem only (debugging)
-
-**When to run `build_chain`:**
-- After `mix_health.py` passes (mix is "done") — before moving to master.
-- After a v2 / v3 iteration finishes, so each version has its own recall.
-- Before deleting any session-wide audio — the chain is the smallest possible
-  record of "how this mix was made" (a few hundred KB JSON vs. gigabytes of WAV).
-
-**Default behaviour is overwrite-in-place** — replay writes into the same
-`output/<session>/` directory the chain references. Back up first if you
-want to keep the previous run intact. (We chose this over a "_replay"
-sibling dir to avoid having every tool's path-baked references in the
-chain go stale.)
-
-The chain is a faithful record, not a fixer — if the original run had a bug
-(e.g. an align_phase output written to an accidentally-nested path), the
-recall sheet reproduces it. Edit the chain JSON by hand if you need to
-patch a historical mistake before replay.
+Legacy replay is rejected by default; `--allow-legacy` explicitly requests a
+best-effort run without equivalence guarantees. Legacy reports may omit
+parameters or whole operations. They cannot recover
+information that was never recorded. Unsupported or incomplete chains require
+rebuilding from the original inputs with explicit settings. Do not claim a legacy
+recall is bit-identical merely because its commands completed.
 
 ## Ground rules
 
-- One stem at a time until the user confirms the result is correct.
-- State what you observe from the analysis before proposing any action.
-- If a result looks wrong (clipping, unexpected LUFS), stop and diagnose before continuing.
-- Keep `docs/knowledge.md` updated when new domain knowledge is found.
-- **Every `render_mix --render` MUST be followed by `mix_health.py`.** No exceptions. If `mix_health` returns any RED verdict, fix it and re-render; if it returns more than 1 YELLOW, address them. Only declare the mix "done" when `mix_health` shows all green (or at most 1 yellow with a reasoned justification).
-- **Always pass `--stems` to `render_mix --render`.** Stems are required: (a) `mix_health.py` uses `stems/` for per-stem pumping detection — without them the pumping check is silently skipped, and (b) per-bus submixes (`stems/stem_drums.wav`, `stems/stem_bass.wav`, `stems/stem_<bus>.wav`, all LUFS-normalized to -18) are deliverables the user expects alongside `mix.wav`. Run as `render_mix mix_config.json --render --stems`, not bare `--render`.
-- **The mix phase MUST gate the master phase.** Don't start `master_mix` until `mix_health` is green or 1-yellow. Mastering a broken mix wastes work and hides problems under a louder ceiling.
-- **Every `master_mix` output (per format) MUST be followed by `master_health.py`** with the same `--format` flag, to verify the delivery target was actually hit. RED on a **hard gate** (LUFS / true peak / phase / punch) means re-master, not "ship anyway". RED on the **reference-deck section alone** is a tonal advisory, not a hard gate — investigate, document, and ship if the hard gates are green. See knowledge.md "Reference deck is a tonal GUIDE, not a hard delivery gate" for the full table.
-- Follow the **"Analysis tool decision tree — when to run what"** section above as obligations, not suggestions. Skipping a required analysis trigger means you are guessing — and guessing wrong is more expensive than running a 30-second analysis.
+- State observations, uncertainty and the intended audible improvement.
+- Preserve the user's artistic decisions and existing approvals.
+- Diagnose missing sources, nonfinite samples, invalid routing and export clipping.
+- Check rendered mixes and exported masters with the relevant health tool.
+  Resolve technical failures against the agreed specification. LUFS, LRA,
+  spectral similarity, phase and punch heuristics do not replace listening.
+- Export bus stems when requested or needed for diagnosis; they preserve mix
+  levels and are not automatically normalized to -18 LUFS.
+- Keep a reproducible operation record. Do not describe unrecorded changes as
+  verified recall or legacy reports as exact reconstruction.
+- Add knowledge only with source, scope, evidence type and verification date.
+  Internet research must not silently modify an approved session's decisions.

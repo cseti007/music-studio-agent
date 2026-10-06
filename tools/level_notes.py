@@ -22,6 +22,9 @@ Usage:
 """
 
 import argparse
+import json
+from pathlib import Path
+from _recall import record_operation
 import sys
 import soundfile as sf
 import numpy as np
@@ -128,6 +131,23 @@ def level_notes(
     return (new_audio[:, 0] if is_mono else new_audio), report
 
 
+@record_operation("level_notes")
+def level_notes_file(input_path: Path, output_path: Path, start_sec: float,
+                     end_sec: float, target_peak_db: float = -4.0,
+                     quiet_threshold_db: float = -6.0, max_boost_db: float = 15.0,
+                     prominence_db: float = 4.0) -> dict:
+    data, sr = sf.read(input_path, always_2d=True)
+    if not 0 <= start_sec < end_sec <= len(data) / sr:
+        raise ValueError("Note-leveling range must lie within the input audio")
+    output, report = level_notes(data, sr, start_sec, end_sec, target_peak_db,
+                                 quiet_threshold_db, max_boost_db, prominence_db)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(output_path, output, sr, subtype="FLOAT")
+    report.update(input=str(input_path), output=str(output_path))
+    output_path.with_suffix(".report.json").write_text(json.dumps(report, indent=2))
+    return report
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Per-note volume leveling on a target time range.")
     ap.add_argument("input", help="Input WAV file")
@@ -142,17 +162,10 @@ def main() -> None:
                     help="Onset detector prominence in dB")
     args = ap.parse_args()
 
-    data, sr = sf.read(args.input, always_2d=True)
-    out, report = level_notes(
-        data, sr,
-        start_sec=args.start,
-        end_sec=args.end,
-        target_peak_db=args.target_peak_db,
-        quiet_threshold_db=args.quiet_threshold_db,
-        max_boost_db=args.max_boost_db,
-        prominence_db=args.prominence_db,
-    )
-    sf.write(args.output, out, sr, subtype="PCM_24")
+    report = level_notes_file(Path(args.input), Path(args.output),
+                              args.start, args.end, args.target_peak_db,
+                              args.quiet_threshold_db, args.max_boost_db,
+                              args.prominence_db)
 
     print(f"Onsets detected:        {report['onsets_total']}")
     print(f"Notes boosted:          {report['notes_boosted']}")

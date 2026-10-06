@@ -147,6 +147,10 @@ def _relevance_check(
 # Core processing
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_subharm")
 def apply_subharm(
     input_path: Path,
     output_dir: Path,
@@ -214,7 +218,7 @@ def apply_subharm(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_subharm.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     report = {
         "input": str(input_path),

@@ -99,6 +99,8 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
         [str(PTFTOOL), str(session_path)],
         capture_output=True, text=True, errors="replace",
     )
+    if proc.returncode != 0:
+        raise ValueError(f"ptftool failed: {proc.stderr.strip()}")
     output = proc.stdout + proc.stderr
 
     sample_rate = 48000
@@ -107,6 +109,7 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
         sample_rate = int(sr_m.group(1))
 
     tracks: dict[str, list] = {}
+    channel_tracks: dict[str, dict[int, list]] = {}
     max_end = 0
 
     for line in output.splitlines():
@@ -119,14 +122,39 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
         source_offset    = int(m.group(4))
         length           = int(m.group(5))
 
-        tracks.setdefault(track_name, []).append({
+        clip = {
             "source_file":            _resolve_audio(source_filename, audio_dir),
             "timeline_start_sample":  timeline_start,
             "source_offset_sample":   source_offset,
             "length_samples":         length,
-        })
+        }
+        tracks.setdefault(track_name, []).append(clip)
+        track_id = int(re.search(r"t\((\d+)\)", line).group(1))
+        channel_tracks.setdefault(track_name, {}).setdefault(track_id, []).append(clip)
         max_end = max(max_end, timeline_start + length)
 
+    if not tracks:
+        raise ValueError("No audio clips parsed; verify the session format and parser version")
+    # ptftool emits a track entry for each channel of an interleaved stereo
+    # file. Reading that file twice would add 6 dB. Collapse only matching
+    # channel layouts, never two overlapping edits on the same track ID.
+    import soundfile as sf
+    for name, layouts in channel_tracks.items():
+        if len(layouts) <= 1:
+            continue
+        # Channel entries may enumerate identical edits in different orders.
+        # Sorting retains duplicate occurrences and compares every clip field.
+        def layout_key(clip):
+            return (clip["timeline_start_sample"], clip["source_file"],
+                    clip["source_offset_sample"], clip["length_samples"])
+
+        first = sorted(next(iter(layouts.values())), key=layout_key)
+        if (len(layouts) == 2 and all(sorted(clips, key=layout_key) == first for clips in layouts.values())
+                and all(Path(c["source_file"]).is_file()
+                        and sf.info(c["source_file"]).channels == 2 for c in first)):
+            tracks[name] = first
+        else:
+            raise ValueError(f"Ambiguous same-name Pro Tools tracks: {name}; use unique track names or consolidated stems")
     track_list = sorted(
         [
             {"name": name, "clips": sorted(clips, key=lambda c: c["timeline_start_sample"])}
@@ -190,6 +218,8 @@ def _parse_ableton(session_path: Path) -> dict:
     with gzip.open(str(session_path), "rb") as f:
         root = ET.parse(f).getroot()
 
+    if root.findall(".//MasterTrack//Tempo/Automation/Events/FloatEvent"):
+        raise ValueError("Tempo automation is unsupported; export consolidated stems")
     bpm         = _ableton_bpm(root)
     sample_rate = _ableton_sample_rate(root)
     session_dir = session_path.parent
@@ -207,6 +237,10 @@ def _parse_ableton(session_path: Path) -> dict:
             "/ArrangerAutomation/Events/AudioClip"
         )
         for clip in audio_track.findall(clip_path):
+            for tag in ("IsWarped", "Loop/LoopOn"):
+                flag = clip.find(tag)
+                if flag is not None and flag.get("Value", "false").lower() == "true":
+                    raise ValueError(f"Unsupported {tag} on {track_name}; export consolidated stems")
             time_beats       = float(clip.get("Time", 0))
             start_rel_beats  = _find_val(clip, "StartRelative")
             out_marker_beats = _find_val(clip, "OutMarker")
@@ -261,6 +295,8 @@ def parse_session(
     else:
         data = _parse_ableton(session_path)
 
+    if not data["tracks"]:
+        raise ValueError("No supported arrangement audio clips found")
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / "session.json"
     out_path.write_text(json.dumps(data, indent=2), encoding="utf-8")

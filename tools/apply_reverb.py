@@ -269,6 +269,10 @@ def _sidechain_envelope(sc_mono: np.ndarray, sr: int,
     return np.interp(np.arange(len(sc_mono)), block_centers, gain_blocks).astype(np.float64)
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_reverb")
 def apply_reverb(
     file_path: Path,
     output_dir: Path,
@@ -325,10 +329,8 @@ def apply_reverb(
         ])
     reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float64)
 
-    # Trim pre-delay padding from reverb output so it aligns with dry signal
-    if pre_delay_samples > 0:
-        reverb_out = reverb_out[pre_delay_samples:]
-    # Match length to dry signal
+    # Keep the leading delay. Removing it would cancel the requested pre-delay.
+    # Match length to the dry timeline, truncating only the end.
     reverb_out = reverb_out[:len(data)]
     if len(reverb_out) < len(data):
         pad = np.zeros((len(data) - len(reverb_out), 2), dtype=np.float64)
@@ -404,7 +406,7 @@ def apply_reverb(
     output_dir.mkdir(parents=True, exist_ok=True)
     mode_tag = "_send" if send_mode else ""
     out_path = output_dir / (file_path.stem + f"_reverb{mode_tag}.wav")
-    sf.write(str(out_path), output, sr, subtype="PCM_24")
+    sf.write(str(out_path), output, sr, subtype="FLOAT")
 
     result = {
         "input": str(file_path),

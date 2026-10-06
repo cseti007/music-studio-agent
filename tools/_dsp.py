@@ -15,13 +15,17 @@ from scipy.signal import resample_poly
 
 
 def true_peak_dbfs(signal: np.ndarray, oversample: int = 4) -> float:
-    """ITU-R BS.1770-4 style true peak (dBFS) of a single channel.
+    """Polyphase estimate of waveform true peak (dBTP) for one channel.
 
-    Inter-sample peaks emerge after DAC reconstruction or lossy codec
-    encoding (Ogg Vorbis, AAC); polyphase oversampling reveals them before
-    they cause clipping.
+    Oversampling estimates inter-sample peaks in this waveform. It does not
+    simulate codec encoding and has not been certified against BS.1770 tests.
     """
-    up = resample_poly(np.asarray(signal), oversample, 1)
+    signal = np.asarray(signal)
+    if signal.ndim != 1 or not signal.size or not np.isfinite(signal).all():
+        raise ValueError("True peak requires nonempty finite mono audio")
+    if not isinstance(oversample, int) or oversample < 1:
+        raise ValueError("Oversampling factor must be a positive integer")
+    up = resample_poly(signal, oversample, 1)
     peak = float(np.max(np.abs(up)))
     return float(20.0 * np.log10(max(peak, 1e-12)))
 
@@ -36,6 +40,8 @@ def worst_channel_true_peak_dbfs(data: np.ndarray, oversample: int = 4) -> float
     the sample count always vastly exceeds the channel count).
     """
     arr = np.asarray(data)
+    if arr.ndim not in (1, 2) or not arr.size:
+        raise ValueError("Audio must be a nonempty mono or two-dimensional array")
     if arr.ndim == 1:
         return true_peak_dbfs(arr, oversample)
     if arr.shape[0] > arr.shape[1]:

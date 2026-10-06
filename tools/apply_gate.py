@@ -198,6 +198,10 @@ def _gate_gain_envelope(
 # Core processing
 # ---------------------------------------------------------------------------
 
+from _recall import record_operation
+
+
+@record_operation("apply_gate")
 def apply_gate(
     input_path: Path,
     output_dir: Path,
@@ -241,7 +245,7 @@ def apply_gate(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_gate.wav")
-    sf.write(str(out_path), output_data, sr, subtype="PCM_24")
+    sf.write(str(out_path), output_data, sr, subtype="FLOAT")
 
     # Report statistics
     open_fraction = float(np.mean(gain > (10.0 ** (range_db / 20.0) * 2)))

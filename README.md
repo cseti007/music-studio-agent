@@ -7,6 +7,13 @@ the agent proposes, you approve.
 
 Works with any LLM: Claude, ChatGPT, Gemini, local models via Ollama, etc.
 
+Rendered audio starts as a draft. Agents must disclose whether they can directly
+audition it, compare changes at matched loudness, and preserve the scope of user
+feedback. Health checks and style scores never certify musical quality.
+`prepare_audition.py` creates comparison excerpts; `review_delivery.py` checks
+the current file and its recorded human listening approval before delivery.
+Shared instructions are in `CLAUDE.md`, with `AGENTS.md` as the agent entry point.
+
 ---
 
 ## Requirements
@@ -57,9 +64,9 @@ and ground rules. The agent should take it from there.
 
 ## Preparing your recording session
 
-The pipeline reads a DAW session file directly — no stem-bouncing required.
-But a few things need to be set right *before* you hand the session to the
-agent so it can do its job.
+Consolidated, time-aligned stems are the most reliable input. The DAW parser
+extracts a limited audio clip layout; it does not reproduce plugins, automation,
+or complete session playback. Check the parsed layout before assembly.
 
 ### DO before handoff
 

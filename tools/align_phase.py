@@ -182,6 +182,10 @@ def _apply_correction(signal: np.ndarray, delay_samples: float, polarity_flip: b
     return _fractional_shift(out, -delay_samples)
 
 
+from _recall import record_operation
+
+
+@record_operation("align_phase")
 def align_phase(
     reference_path: Path,
     target_path: Path,
@@ -194,10 +198,11 @@ def align_phase(
     tgt_data, tgt_sr = sf.read(str(target_path), always_2d=True)
 
     if ref_sr != tgt_sr:
-        print(
-            f"WARNING: sample rate mismatch — ref {ref_sr} Hz, tgt {tgt_sr} Hz",
-            file=sys.stderr,
-        )
+        raise ValueError(f"Sample rate mismatch: {ref_sr} Hz vs {tgt_sr} Hz")
+    if max_delay_ms <= 0 or segment_sec <= 0:
+        raise ValueError("Alignment window and duration must be positive")
+    if not np.isfinite(ref_data).all() or not np.isfinite(tgt_data).all():
+        raise ValueError("Alignment input contains non-finite samples")
 
     ref_mono = ref_data.mean(axis=1)
     tgt_mono = tgt_data.mean(axis=1)
@@ -207,8 +212,9 @@ def align_phase(
     ref_padded = np.pad(ref_mono, (0, n - len(ref_mono)))
     tgt_padded = np.pad(tgt_mono, (0, n - len(tgt_mono)))
 
-    ref_seg, _ = _find_active_segment(ref_padded, ref_sr, segment_sec, threshold_db)
-    tgt_seg, _ = _find_active_segment(tgt_padded, tgt_sr, segment_sec, threshold_db)
+    _, start = _find_active_segment(ref_padded, ref_sr, segment_sec, threshold_db)
+    end = min(n, start + int(segment_sec * ref_sr))
+    ref_seg, tgt_seg = ref_padded[start:end], tgt_padded[start:end]
 
     # trim both segments to same length for correlation
     seg_len = min(len(ref_seg), len(tgt_seg))
@@ -219,6 +225,8 @@ def align_phase(
     )
 
     delay_ms = round(delay_samples / ref_sr * 1000.0, 3)
+    if abs(correlation_score) < 0.3:
+        raise ValueError(f"Alignment confidence too low: correlation={correlation_score:.4f}")
 
     # warn if delay hits the search boundary (may indicate a larger issue)
     max_samples = int(max_delay_ms * ref_sr / 1000.0)
@@ -241,7 +249,7 @@ def align_phase(
     stem_dir = output_dir / target_path.parent.name
     stem_dir.mkdir(parents=True, exist_ok=True)
     out_path = stem_dir / "assembled_aligned.wav"
-    sf.write(str(out_path), corrected_data, tgt_sr, subtype="PCM_24")
+    sf.write(str(out_path), corrected_data, tgt_sr, subtype="FLOAT")
 
     report = {
         "reference": str(reference_path),

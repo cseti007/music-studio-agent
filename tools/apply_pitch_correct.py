@@ -149,6 +149,10 @@ def _blend_pitch(f0_orig: np.ndarray, f0_quantised: np.ndarray, strength: float)
     return out
 
 
+from _recall import record_operation
+
+
+@record_operation("apply_pitch_correct")
 def apply_pitch_correct(
     input_path: Path,
     output_dir: Path,
@@ -202,7 +206,7 @@ def apply_pitch_correct(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / (input_path.stem + "_pitched.wav")
-    sf.write(str(output_path), out_audio, sr, subtype="PCM_24")
+    sf.write(str(output_path), out_audio, sr, subtype="FLOAT")
 
     # Stats
     voiced_orig = f0_orig[~np.isnan(f0_orig)]
