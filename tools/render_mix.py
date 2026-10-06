@@ -53,8 +53,10 @@ _REVERB_TAIL_S = 3.0
 _LIMITER_NAME = ("pedalboard.BrickwallLimiter (true-peak, stereo-linked, 5 ms lookahead, "
                  "100 ms release, no makeup) + 8x-verified static safety trim")
 
-# Guitar guitarist prefixes in specificity order (most specific first)
-_GUITARIST_PREFIXES = ["GTR 1", "GTR LACI", "GTR TERKA", "GTR"]
+# Guitar tracks follow the "GTR <player> <mic>" naming convention (README).
+# The player token becomes a sub-bus (gtr_<player>); a name with only one
+# token after GTR ("GTR DI.01") goes to the generic "gtr" sub-bus.
+_GUITARIST_RE = re.compile(r"^(GTR\s+\S+)\s+\S")
 
 _DRUM_KEYWORDS = ["KICK", "SN ", " SN", "OH ", " OH", "TOM", "HIHAT", "HI-HAT",
                   "CRASH", "RIDE", "ROOM", "CYMBAL"]
@@ -73,9 +75,9 @@ def _detect_bus(name: str) -> str:
         return "drums"
     if "BASS" in u:
         return "bass"
-    for prefix in _GUITARIST_PREFIXES:
-        if u.startswith(prefix):
-            return prefix.lower().replace(" ", "_")
+    prefix = _guitarist_prefix(name)
+    if prefix:
+        return _guitar_bus_slug(prefix)
     if any(k in u for k in _VOCAL_BG_KEYWORDS):
         return "vocal_bg"
     if any(k in u for k in _VOCAL_LEAD_KEYWORDS):
@@ -155,11 +157,18 @@ def _detect_pan(name: str) -> float:
 
 
 def _guitarist_prefix(name: str) -> str | None:
+    """'GTR <player>' for 'GTR <player> <mic>' names, 'GTR' for other GTR names."""
     u = name.upper()
-    for p in _GUITARIST_PREFIXES:
-        if u.startswith(p):
-            return p
+    m = _GUITARIST_RE.match(u)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1))
+    if u.startswith("GTR"):
+        return "GTR"
     return None
+
+
+def _guitar_bus_slug(prefix: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", prefix.lower()).strip("_")
 
 
 def _mic_type(name: str, prefix: str) -> str:
@@ -253,13 +262,8 @@ def _load_style_bus_pans(style: str | None) -> dict[str, float]:
     the field. Callers should fall back to 0.0 (center) for any bus not
     in the returned dict.
 
-    Genre conventions (typical 2 rhythm guitarist setup):
-      - modern_rock:        gtr_1 -0.6,  gtr_laci +0.6  (wide L/R)
-      - punchy_modern_rock: gtr_1 -0.7,  gtr_laci +0.7  (very wide)
-      - classic_rock:       gtr_1 -0.5,  gtr_laci +0.5  (band-feel)
-      - pop:                gtr_1 -0.4,  gtr_laci +0.4  (conservative)
-      - hip_hop:            gtr_1  0,    gtr_laci  0    (centered, drum-led)
-      - jazz_acoustic:      gtr_1 -0.3,  gtr_laci +0.3  (narrow, intimate)
+    Per-guitarist sub-buses are not listed here because their names come
+    from the session's track names; see _load_style_guitar_player_pans.
     """
     if not style:
         return {}
@@ -271,6 +275,20 @@ def _load_style_bus_pans(style: str | None) -> dict[str, float]:
     except (OSError, json.JSONDecodeError):
         return {}
     return profile.get("default_bus_pan", {})
+
+
+def _load_style_guitar_player_pans(style: str | None) -> list[float]:
+    """`guitar_player_pans` from the style profile: pans for the per-player
+    guitar sub-buses, assigned in sorted player order (e.g. [-0.85, 0.85, 0.0]
+    puts the first player left, the second right, a third centre)."""
+    if not style:
+        return []
+    profile_path = Path(__file__).resolve().parent / "style_profiles" / f"{style}.json"
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [float(v) for v in profile.get("guitar_player_pans", [])]
 
 
 def generate_config(session_dir: Path, output_path: Path, style: str | None = None, auto_trim: bool = False) -> None:
@@ -331,24 +349,26 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
     for t in tracks:
         prefix = _guitarist_prefix(t["name"])
         if prefix:
-            slug = prefix.lower().replace(" ", "_")
+            slug = _guitar_bus_slug(prefix)
             t["blend_group"] = f"{slug}_mics"
             n = len(gtr_mic_types[prefix])
             t["volume_db"] = round(-20.0 * float(np.log10(max(n, 1))), 1)
 
     # Build bus hierarchy: per-guitarist sub-buses feed into a shared guitar bus
     gtr_sub_buses = {}
-    for prefix in _GUITARIST_PREFIXES:
-        slug = prefix.lower().replace(" ", "_")
-        if any(t["bus"] == slug for t in tracks):
-            gtr_sub_buses[slug] = {
-                "volume_db": 0.0,
-                "comp_preset": None,
-                "parent_bus": "guitar",
-            }
+    player_pans = iter(_load_style_guitar_player_pans(style))
+    for prefix in sorted(gtr_mic_types):
+        slug = _guitar_bus_slug(prefix)
+        pan = 0.0 if prefix == "GTR" else next(player_pans, 0.0)
+        gtr_sub_buses[slug] = {
+            "volume_db": 0.0,
+            "pan": float(style_bus_pans.get(slug, pan)),
+            "comp_preset": None,
+            "parent_bus": "guitar",
+        }
 
     # Top-level bus volume_db: use the style profile default if given, else 0 dB.
-    # Bus pan: same idea — style profile says e.g. modern_rock gtr_1 -0.6.
+    # Bus pan: same idea — style profile default_bus_pan per named bus.
     # auto_trim_db remains zero unless equal-LUFS calibration is requested.
     def _bus_default(name: str) -> float:
         return float(style_bus_defaults.get(name, 0.0))
@@ -364,7 +384,7 @@ def generate_config(session_dir: Path, output_path: Path, style: str | None = No
         # session genuinely needs heavier glue.
         "drums":  {"volume_db": _bus_default("drums"),  "pan": _bus_pan("drums"),  "auto_trim_db": 0.0, "comp_preset": "comp_drum_bus_gentle", "parent_bus": None},
         "bass":   {"volume_db": _bus_default("bass"),   "pan": _bus_pan("bass"),   "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
-        **{name: {**cfg, "pan": _bus_pan(name), "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
+        **{name: {**cfg, "auto_trim_db": 0.0} for name, cfg in gtr_sub_buses.items()},
         "guitar": {"volume_db": _bus_default("guitar"), "pan": _bus_pan("guitar"), "auto_trim_db": 0.0, "comp_preset": None,            "parent_bus": None},
     }
 
