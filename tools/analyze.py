@@ -1194,7 +1194,7 @@ def analyze(
     spec_flux = _spectral_flux_per_sec(mono, sr, onset_env=onset_env_shared)
 
     # Use parent dir name too — assembled.wav files live under per-track dirs like
-    # `output/terido/tracks/KICK IN.05/assembled.wav`, and the meaningful identifier
+    # `output/<session>/tracks/KICK IN.05/assembled.wav`, and the meaningful identifier
     # is in the parent dir name, not the basename.
     stem_hint = f"{file_path.parent.name} {file_path.name}"
     run_pitch = force_vocal_metrics or _looks_vocal(stem_hint)

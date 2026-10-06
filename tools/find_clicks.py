@@ -321,13 +321,13 @@ def main() -> None:
         epilog="""
 Examples:
   Sweep the mix and list the top click candidates:
-    find_clicks.py output/horgonyt
+    find_clicks.py output/<session>
 
   Trace a known click time through every chain stage:
-    find_clicks.py output/horgonyt --time 72.33
+    find_clicks.py output/<session> --time 72.33
 
   Tighten the detection threshold for cleaner mixes:
-    find_clicks.py output/horgonyt --threshold 0.05
+    find_clicks.py output/<session> --threshold 0.05
         """,
     )
     parser.add_argument("session_dir", type=Path,

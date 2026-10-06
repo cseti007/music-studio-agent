@@ -163,7 +163,7 @@ Comparison:
 | Boundary warble risk | yes (100+ × 5ms ≈ 500ms warble) | low (5-15 boundaries × 50ms ≈ 250-750ms blend) |
 | Best for | unstable player amplitude needing brutal leveling | natural performance dynamics + engineer section-gain fixes |
 
-**Field measurement — horgonyt 2026-05-25 (10 continuous-mode tracks: 2 bass + 8 guitars):**
+**Field measurement — session B, 2026-05-25 (10 continuous-mode tracks: 2 bass + 8 guitars):**
 
 | Metric | v3 (no per-source norm) | v4 (per-source norm) |
 |---|---|---|
@@ -241,7 +241,7 @@ continuous audio file with silence in the gaps.
 and `GTR 1 DI.dup2.09_26.wav`). The PTX tells you exactly which file was actually used and where.
 Do NOT assume all files on disk are used — many are discarded takes.
 
-#### Naming convention in Pro Tools exports (observed in Terido session, 2022):
+#### Naming convention in Pro Tools exports (observed in session A, 2022):
 
 File format: `INSTRUMENT_NAME.XX_YY.wav`
 - `XX` = internal clip/region start index in the session
@@ -639,7 +639,7 @@ in the chain (amp hum, pick noise, room reflections) by the same factor (2,000�
 high-gain). The result is that the 5th-percentile RMS of a distorted amp recording is
 dominated by the amp's own sustain and character, not by unwanted noise.
 
-**Typical values observed in Terido session (2026):**
+**Typical values observed in session A (2026):**
 - Clean DI guitar (no amp processing): noise floor -38 dBFS, DR 7–8 dB
 - Distorted amp mic recording (SM57, ribbon): noise floor -18 to -19 dBFS, DR 2–3 dB
 
@@ -887,7 +887,7 @@ of "one room". The principle: **feel** the reverb, don't **hear** it.
 3. Master the reverb-treated premaster with `master_mix.py` — the LUFS norm + limiter will compensate for any slight level shift from the wet content
 4. Compare against the no-master-reverb master at the same -14 LUFS — the wet version should sound slightly more "glued" without obvious reverb tails
 
-**When master reverb backfires (terido v11 lesson):**
+**When master reverb backfires (session A v11 lesson):**
 If the mix has cumulative top-emphasis (e.g. side highshelf +3 dB @ 8k, guitar EQ +1.5 dB @ 3.5k, exciter mix 0.10), adding master reverb at wet 0.07 stacks 300 Hz+ content into the master clipper at +5-7 dB above threshold → audible "overdrive" perception. Fix: drop wet to 0.03-0.04 OR reduce the cumulative top emphasis upstream OR use the `modern_rock_spatial_dark` master preset (drops side highshelf +3 → +1, drops master EQ shelf +1 → +0.5, halves exciter mix).
 
 **Sources:**
@@ -1320,7 +1320,7 @@ This complements transient_density: density tells you *how often* onsets occur, 
 - Heavily compressed stems: compression artificially lowers prominence — measure the pre-comp assembled.wav.
 - Overhead/room mics: measure the room, not individual drums — not meaningful.
 
-**Terido session reference (2026-05-16, raw assembled.wav):**
+**Session A reference (2026-05-16, raw assembled.wav):**
 - KICK IN: prominence 10.9 dB, decay 31.7ms → strong attack, tight → no shaping needed
 - SN TOP: prominence 12.1 dB, decay 46.4ms → strong crack, normal decay → no shaping needed
 - BASS DI: prominence 4.3 dB, decay 72ms → expected for sustained instrument, ignore
@@ -1374,7 +1374,7 @@ Matching them does not establish correct tone, audible balance, genre identity,
 or reference equivalence. Inspect actual in-mix contributions and compare at
 matched loudness. Keep user preferences when profile scores disagree.
 
-### Field-test reference: terido v4 → v5
+### Field-test reference: session A v4 → v5
 
 After v4 hit drum = bass = guitar = -19 LUFS exactly on `bus_balance`, the
 listener reported the bass still felt 1–2 dB hotter on stereo headphones.
@@ -1537,7 +1537,7 @@ Every profile JSON has the same shape:
 The agent and user iterate from these starting points; they're a reference,
 not a final answer. After `--style` generation, listen to the first render
 and adjust on a per-session basis (e.g. a particularly bass-heavy bass DI
-might need an extra -2 dB, as the v5 terido iteration documented).
+might need an extra -2 dB, as the session A v5 iteration documented).
 
 ### How the grading works
 
