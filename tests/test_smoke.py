@@ -11,7 +11,7 @@ field-test rounds revealed as easy to regress:
 - Each make-it-hit tool's relevance_check returns the expected skip/apply
   decision on simple synthetic inputs
 
-Run with:  conda run -n music-studio-agent pytest tests/ -v
+Run with:  conda run -n music-mix-agent pytest tests/ -v
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ class TestTruePeak:
     def test_true_peak_exceeds_sample_peak_on_hf_content(self, hf_sine_1s):
         """At 19 kHz with phase that misses the peak, true peak must exceed
         sample peak by at least 0.1 dB — that's the whole point of ISP."""
-        from analyze import _true_peak_dbfs
+        from _dsp import true_peak_dbfs as _true_peak_dbfs
 
         sample_peak_db = 20 * np.log10(np.max(np.abs(hf_sine_1s)))
         true_peak_db = _true_peak_dbfs(hf_sine_1s)
@@ -97,7 +97,7 @@ class TestTruePeak:
 
     def test_true_peak_matches_sample_peak_on_lf_content(self):
         """At 100 Hz with no aliasing, true peak ~= sample peak (within 0.1 dB)."""
-        from analyze import _true_peak_dbfs
+        from _dsp import true_peak_dbfs as _true_peak_dbfs
 
         t = np.arange(SR) / SR
         sig = 0.5 * np.sin(2 * np.pi * 100 * t)
@@ -953,7 +953,6 @@ class TestChainRecall:
         assert chain["stems"][0]["name"] == "KICK"
 
     def test_replay_chain_dry_run_emits_argv_for_each_step(self, tmp_path):
-        import json
         from replay_chain import _build_argv
 
         session_json = tmp_path / "session.json"
@@ -1474,7 +1473,6 @@ class TestPremasterMode:
         import json as _json
         from render_mix import render_mix
         import soundfile as sf
-        import pyloudnorm as pyln
 
         # Make a synthetic drum stem with high crest (transient hits + noise)
         stem = tmp_path / "stem.wav"
@@ -1672,7 +1670,6 @@ class TestApplyGainCrossfade:
 
         assembled, _ = sf.read(str(out_dir / "TEST" / "assembled.wav"))
         # The clip boundary is at sample sr (1 sec). Inspect a window around it.
-        boundary = sr
         # With a 5 ms crossfade (240 samples at 48k), the discontinuity should
         # be spread over the boundary window — no single-sample 1.0-magnitude
         # jump. The actual jump magnitude at any single sample should be much

@@ -10,6 +10,14 @@ to the profile's integrated LUFS target). This way the spectral check is
 loudness-independent — a quiet mix at -23 LUFS and a loud one at -8 LUFS
 get the same band-RMS reading if their tonal balance is actually identical.
 
+Profile loudness, LRA and crest targets describe finished masters. A
+premaster (render_mix default: peak-normalized to -3 dBFS, no limiter) is
+not expected to match them, so for premaster input those three checks are
+reported as N/A and excluded from the score. --input-kind auto (default)
+treats input whose worst-channel true peak is at or below -2.5 dBTP as a
+premaster; pass --input-kind master or premaster to override. Metrics that
+cannot be measured (silent or too-short input) are also graded N/A.
+
 Usage:
   python tools/style_check.py mix.wav --style modern_rock --output-dir output/<session>/analysis
 
@@ -30,10 +38,17 @@ import pyloudnorm as pyln
 import soundfile as sf
 from scipy.signal import butter, sosfilt
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 
 _STYLE_PROFILES_DIR = Path(__file__).resolve().parent / "style_profiles"
 
 # Band edges must match analyze.py / mix_health.py
+# Input at or below this worst-channel true peak is treated as a premaster.
+_PREMASTER_MAX_TP_DBTP = -2.5
+_MASTER_ONLY_CHECKS = ("integrated_lufs", "lra_lu", "crest_factor_db")
+INPUT_KINDS = ("auto", "premaster", "master")
+
 _BANDS = {
     "sub_60hz":       (0,    60),
     "low_60_250hz":   (60,   250),
@@ -132,10 +147,12 @@ def _grade_range(measured: float, target: float, range_min: float, range_max: fl
 def _verdict_for_checks(checks: list[dict]) -> tuple[str, int]:
     """Overall verdict + 0..100 score based on per-check colours.
 
-    Score: each GREEN check = full points, YELLOW = half, RED = 0.
-    Total normalised to 100. Verdict: GREEN if score >= 85, YELLOW 60-84,
-    RED below 60. This measures profile similarity, not delivery readiness.
+    Score: each GREEN check = full points, YELLOW = half, RED = 0; N/A checks
+    are excluded. Total normalised to 100. Verdict: GREEN if score >= 85,
+    YELLOW 60-84, RED below 60. This measures profile similarity, not
+    delivery readiness.
     """
+    checks = [c for c in checks if c["verdict"] != "N/A"]
     n = len(checks)
     if n == 0:
         return ("RED", 0)
@@ -157,28 +174,44 @@ def _verdict_for_checks(checks: list[dict]) -> tuple[str, int]:
 # Main flow
 # ---------------------------------------------------------------------------
 
-def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
+def _finite(value) -> float | None:
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) else None
+
+
+def _not_applicable(check: dict, reason: str) -> dict:
+    return {**check, "verdict": "N/A", "severity": None, "borderline": False, "reason": reason}
+
+
+def check_style(mix_path: Path, profile: dict, output_dir: Path, input_kind: str = "auto") -> dict:
+    if input_kind not in INPUT_KINDS:
+        raise ValueError(f"input_kind must be one of {INPUT_KINDS}")
     data, sr = sf.read(str(mix_path), always_2d=True)
-    if data.ndim == 1:
-        data = data[:, np.newaxis]
     mono = data.mean(axis=1).astype(np.float64)
 
-    # Measurements on the original (LUFS measured on stereo, others on mono mix)
+    # Measurements on the original (LUFS measured on stereo, others on mono mix).
+    # Silent or too-short input yields -inf / NaN -> None (graded N/A).
     meter = pyln.Meter(sr)
     lufs_input = data if data.shape[1] > 1 else mono
     try:
-        integrated_lufs = float(meter.integrated_loudness(lufs_input))
+        integrated_lufs = _finite(meter.integrated_loudness(lufs_input))
     except Exception:
-        integrated_lufs = -120.0
+        integrated_lufs = None
     try:
-        lra = float(meter.loudness_range(lufs_input))
+        lra = _finite(meter.loudness_range(lufs_input))
     except Exception:
-        lra = 0.0
+        lra = None
     crest = _crest_factor_db(mono)
+    true_peak = worst_channel_true_peak_dbfs(data)
+    if input_kind == "auto":
+        input_kind = "premaster" if true_peak <= _PREMASTER_MAX_TP_DBTP else "master"
 
     # Spectral balance measured on a LUFS-normalised copy
     target_lufs = profile["lufs"]["integrated_target"]
-    mono_norm = _normalize_to_lufs(mono, sr, integrated_lufs, target_lufs)
+    mono_norm = mono if integrated_lufs is None else _normalize_to_lufs(mono, sr, integrated_lufs, target_lufs)
     bands = {
         name: round(_band_rms_db(mono_norm, sr, lo, hi), 1)
         for name, (lo, hi) in _BANDS.items()
@@ -188,23 +221,26 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
     checks: list[dict] = []
 
     # LUFS — symmetric tolerance
-    v, s = _grade_value(integrated_lufs, target_lufs, profile["lufs"]["tolerance_lu"])
-    checks.append({
-        "name": "integrated_lufs", "measured": round(integrated_lufs, 1),
-        "target": target_lufs, "delta": round(integrated_lufs - target_lufs, 1),
-        "tolerance": profile["lufs"]["tolerance_lu"], "verdict": v, "severity": round(s, 2),
-        "borderline": bool(v == "GREEN" and s >= 0.7),
-    })
+    check = {"name": "integrated_lufs", "measured": None if integrated_lufs is None else round(integrated_lufs, 1),
+             "target": target_lufs, "delta": None, "tolerance": profile["lufs"]["tolerance_lu"]}
+    if integrated_lufs is None:
+        checks.append(_not_applicable(check, "not measurable (silent or too short)"))
+    else:
+        v, s = _grade_value(integrated_lufs, target_lufs, profile["lufs"]["tolerance_lu"])
+        checks.append({**check, "delta": round(integrated_lufs - target_lufs, 1),
+                       "verdict": v, "severity": round(s, 2),
+                       "borderline": bool(v == "GREEN" and s >= 0.7)})
 
     # LRA — range based
     lra_min, lra_max = profile["lra"]["range_lu"]
-    v, s = _grade_range(lra, profile["lra"]["target_lu"], lra_min, lra_max)
-    checks.append({
-        "name": "lra_lu", "measured": round(lra, 1),
-        "target": profile["lra"]["target_lu"], "range": [lra_min, lra_max],
-        "verdict": v, "severity": round(s, 2),
-        "borderline": bool(v == "GREEN" and s >= 0.7),
-    })
+    check = {"name": "lra_lu", "measured": None if lra is None else round(lra, 1),
+             "target": profile["lra"]["target_lu"], "range": [lra_min, lra_max]}
+    if lra is None:
+        checks.append(_not_applicable(check, "not measurable (silent or too short)"))
+    else:
+        v, s = _grade_range(lra, profile["lra"]["target_lu"], lra_min, lra_max)
+        checks.append({**check, "verdict": v, "severity": round(s, 2),
+                       "borderline": bool(v == "GREEN" and s >= 0.7)})
 
     # Crest — range based
     cr_min, cr_max = profile["crest_factor"]["range_db"]
@@ -215,6 +251,12 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "verdict": v, "severity": round(s, 2),
         "borderline": bool(v == "GREEN" and s >= 0.7),
     })
+
+    # Profile loudness/dynamics targets describe finished masters.
+    if input_kind == "premaster":
+        checks = [_not_applicable(c, "premaster input; profile targets describe a finished master")
+                  if c["name"] in _MASTER_ONLY_CHECKS and c["verdict"] != "N/A" else c
+                  for c in checks]
 
     # 5 band checks
     for band_name, band_spec in profile["tonal_balance_dbfs"].items():
@@ -233,6 +275,7 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "borderline": sum(1 for c in checks if c.get("borderline")),
         "yellow":     sum(1 for c in checks if c["verdict"] == "YELLOW"),
         "red":        sum(1 for c in checks if c["verdict"] == "RED"),
+        "not_applicable": sum(1 for c in checks if c["verdict"] == "N/A"),
     }
 
     result = {
@@ -242,13 +285,15 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
         "listening_review": {"status": "pending", "performed_by_tool": False},
         "style_profile": profile["name"],
         "profile_version": profile.get("version", "?"),
+        "input_kind": input_kind,
         "score": score,
         "verdict": verdict,
         "counts": counts,
         "measurements": {
-            "integrated_lufs": round(integrated_lufs, 1),
-            "lra_lu":          round(lra, 1),
+            "integrated_lufs": None if integrated_lufs is None else round(integrated_lufs, 1),
+            "lra_lu":          None if lra is None else round(lra, 1),
             "crest_factor_db": crest,
+            "true_peak_dbtp":  round(true_peak, 1),
             "bands_lufs_normalised_dbfs": bands,
         },
         "checks": checks,
@@ -256,7 +301,7 @@ def check_style(mix_path: Path, profile: dict, output_dir: Path) -> dict:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "style_check.json").write_text(
-        json.dumps(result, indent=2), encoding="utf-8"
+        json.dumps(result, indent=2, allow_nan=False), encoding="utf-8"
     )
     (output_dir / "style_check.txt").write_text(
         _format_text_report(result, profile), encoding="utf-8"
@@ -277,7 +322,7 @@ def _bar(measured: float, target: float, scale_db: float = 6.0, width: int = 30)
     return " " * half + "│" + " " * half
 
 
-_COLOR_TAG = {"GREEN": "[OK]", "YELLOW": "[~~]", "RED": "[!!]"}
+_COLOR_TAG = {"GREEN": "[OK]", "YELLOW": "[~~]", "RED": "[!!]", "N/A": "[n/a]"}
 _BORDERLINE_TAG = "[OK*]"  # green but near the yellow threshold (severity >= 0.7)
 
 
@@ -299,7 +344,9 @@ def _format_text_report(result: dict, profile: dict) -> str:
     lines.append(f"Similarity: {result['verdict']}    Score: {result['score']}/100    "
                  f"({result['counts']['green']} green / "
                  f"{result['counts']['yellow']} yellow / "
-                 f"{result['counts']['red']} red){borderline_part}")
+                 f"{result['counts']['red']} red / "
+                 f"{result['counts']['not_applicable']} n/a){borderline_part}")
+    lines.append(f"Input kind: {result['input_kind']}")
     lines.append("")
     lines.append(profile.get("description", ""))
     lines.append("")
@@ -307,7 +354,11 @@ def _format_text_report(result: dict, profile: dict) -> str:
     lines.append("-" * 70)
     for c in result["checks"][:3]:
         tag = _tag_for(c)
-        if "range" in c:
+        if c["verdict"] == "N/A":
+            measured = "n/a" if c["measured"] is None else f"{c['measured']:.1f}"
+            lines.append(f"  {tag} {c['name']:<18}  measured {measured:>6}   "
+                         f"target {c['target']:>5.1f}   not graded: {c['reason']}")
+        elif "range" in c:
             r = c["range"]
             lines.append(f"  {tag} {c['name']:<18}  measured {c['measured']:>6.1f}   "
                          f"target {c['target']:>5.1f}   range [{r[0]}..{r[1]}]")
@@ -338,38 +389,26 @@ def _format_text_report(result: dict, profile: dict) -> str:
             else:
                 lines.append(f"  [OK*] {name:<18}  measured {c['measured']} (severity {sev:.2f}, range {c.get('range', '?')})")
         lines.append("")
-    # Recommendations from each RED / YELLOW band
-    recs: list[str] = []
+    # Neutral description of each YELLOW / RED difference; not a processing instruction
+    diffs: list[str] = []
     for c in result["checks"]:
-        if c["verdict"] == "GREEN":
+        if c["verdict"] in ("GREEN", "N/A"):
             continue
-        if c["name"].startswith("band_"):
-            band = c["name"].replace("band_", "")
+        if c["name"].startswith("band_") or c["name"] == "integrated_lufs":
+            name = c["name"].replace("band_", "")
             d = c["delta"]
-            direction = "cut" if d > 0 else "boost"
-            recs.append(f"  - {band}: {direction} ~{abs(d):.1f} dB to reach style target")
-        elif c["name"] == "integrated_lufs":
-            d = c["delta"]
-            if d < 0:
-                recs.append(f"  - integrated LUFS {d:+.1f} below target — increase loudness")
-            else:
-                recs.append(f"  - integrated LUFS {d:+.1f} above target — back off the limiter")
-        elif c["name"] == "lra_lu":
+            unit = "LU" if c["name"] == "integrated_lufs" else "dB"
+            side = "above" if d > 0 else "below"
+            diffs.append(f"  - {name}: {abs(d):.1f} {unit} {side} profile target (tolerance ±{c['tolerance']})")
+        else:
             r = c["range"]
-            if c["measured"] < r[0]:
-                recs.append(f"  - LRA {c['measured']} below {r[0]} — over-compressed for this style")
-            else:
-                recs.append(f"  - LRA {c['measured']} above {r[1]} — too dynamic, more compression")
-        elif c["name"] == "crest_factor_db":
-            r = c["range"]
-            if c["measured"] < r[0]:
-                recs.append(f"  - crest {c['measured']} below {r[0]} — over-limited")
-            else:
-                recs.append(f"  - crest {c['measured']} above {r[1]} — under-processed")
-    if recs:
-        lines.append("RECOMMENDATIONS")
+            side = f"below profile range minimum {r[0]}" if c["measured"] < r[0] \
+                else f"above profile range maximum {r[1]}"
+            diffs.append(f"  - {c['name']}: {c['measured']} {side}")
+    if diffs:
+        lines.append("DIFFERENCES FROM PROFILE (similarity only; listen before changing the mix)")
         lines.append("-" * 70)
-        lines.extend(recs)
+        lines.extend(diffs)
     return "\n".join(lines) + "\n"
 
 
@@ -378,7 +417,12 @@ def main() -> None:
         description="Measure similarity to a project style preference; not musical quality.",
     )
     parser.add_argument("mix", nargs="?", type=Path, help="Path to mix WAV (e.g. mix.wav, master_spotify.wav)")
-    parser.add_argument("--style", type=str, help="Style profile name (modern_rock / classic_rock / pop / hip_hop / jazz_acoustic)")
+    parser.add_argument("--style", type=str, help=f"Style profile name ({' / '.join(list_profiles())})")
+    parser.add_argument(
+        "--input-kind", choices=INPUT_KINDS, default="auto",
+        help="premaster: skip master-only loudness/LRA/crest checks; master: grade them; "
+             f"auto (default): premaster when worst-channel true peak <= {_PREMASTER_MAX_TP_DBTP} dBTP",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     parser.add_argument("--list-styles", action="store_true", help="List built-in profiles")
     args = parser.parse_args()
@@ -399,9 +443,11 @@ def main() -> None:
         sys.exit(2)
 
     profile = load_profile(args.style)
-    result = check_style(args.mix, profile, args.output_dir)
+    result = check_style(args.mix, profile, args.output_dir, input_kind=args.input_kind)
     print(f"Style check: {result['style_profile']}  →  {result['verdict']}  ({result['score']}/100)")
-    print(f"  {result['counts']['green']} green / {result['counts']['yellow']} yellow / {result['counts']['red']} red")
+    print(f"  {result['counts']['green']} green / {result['counts']['yellow']} yellow / "
+          f"{result['counts']['red']} red / {result['counts']['not_applicable']} n/a "
+          f"(input kind: {result['input_kind']})")
     print(f"  Report: {args.output_dir / 'style_check.txt'}")
     # A preference mismatch is a successful measurement, not a failed delivery.
     sys.exit(0)

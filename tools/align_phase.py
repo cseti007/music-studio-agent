@@ -20,7 +20,12 @@ Usage:
       --target    "output/<session>/KICK OUT.05/assembled.wav" \\
       --output-dir output/<session>
 
-Reads [align] section from config.toml in the current working directory.
+The detected peak correlation must reach --min-correlation (default 0.3,
+config key [align] min_correlation); otherwise the tool refuses to write an
+aligned stem. Distant pairs (room/overhead vs close mic) often fall below it:
+that means the delay estimate is unreliable, not that alignment is required.
+
+Reads the [align] section from config.toml in the project root (next to tools/).
 """
 
 import argparse
@@ -33,11 +38,14 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import correlate
 
-_CONFIG_PATH = Path("config.toml")
+from _recall import record_operation
+
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 
 DEFAULT_MAX_DELAY_MS    = 20.0
 DEFAULT_SEGMENT_SEC     = 10.0
 DEFAULT_ACTIVE_THRESHOLD_DB = -40.0
+DEFAULT_MIN_CORRELATION = 0.3
 
 
 def _load_config() -> dict:
@@ -182,9 +190,6 @@ def _apply_correction(signal: np.ndarray, delay_samples: float, polarity_flip: b
     return _fractional_shift(out, -delay_samples)
 
 
-from _recall import record_operation
-
-
 @record_operation("align_phase")
 def align_phase(
     reference_path: Path,
@@ -193,6 +198,7 @@ def align_phase(
     max_delay_ms: float = DEFAULT_MAX_DELAY_MS,
     segment_sec: float = DEFAULT_SEGMENT_SEC,
     threshold_db: float = DEFAULT_ACTIVE_THRESHOLD_DB,
+    min_correlation: float = DEFAULT_MIN_CORRELATION,
 ) -> dict:
     ref_data, ref_sr = sf.read(str(reference_path), always_2d=True)
     tgt_data, tgt_sr = sf.read(str(target_path), always_2d=True)
@@ -225,8 +231,10 @@ def align_phase(
     )
 
     delay_ms = round(delay_samples / ref_sr * 1000.0, 3)
-    if abs(correlation_score) < 0.3:
-        raise ValueError(f"Alignment confidence too low: correlation={correlation_score:.4f}")
+    if abs(correlation_score) < min_correlation:
+        raise ValueError(f"Alignment confidence too low: |correlation| {abs(correlation_score):.4f} "
+                         f"< --min-correlation {min_correlation}; the delay estimate is unreliable "
+                         "for this pair, no aligned stem written")
 
     # warn if delay hits the search boundary (may indicate a larger issue)
     max_samples = int(max_delay_ms * ref_sr / 1000.0)
@@ -291,6 +299,12 @@ def main() -> None:
         default=cfg.get("segment_duration_sec", DEFAULT_SEGMENT_SEC),
         help=f"Active segment length used for correlation (default: {DEFAULT_SEGMENT_SEC}s)",
     )
+    parser.add_argument(
+        "--min-correlation", type=float,
+        default=cfg.get("min_correlation", DEFAULT_MIN_CORRELATION),
+        help="Refuse to align when the absolute peak correlation is below this value "
+             f"(default: config [align] min_correlation, fallback {DEFAULT_MIN_CORRELATION})",
+    )
     args = parser.parse_args()
 
     for p in (args.reference, args.target):
@@ -298,13 +312,18 @@ def main() -> None:
             print(json.dumps({"error": f"Not found: {p}"}), file=sys.stderr)
             sys.exit(1)
 
-    align_phase(
-        reference_path=args.reference,
-        target_path=args.target,
-        output_dir=args.output_dir,
-        max_delay_ms=args.max_delay_ms,
-        segment_sec=args.segment_sec,
-    )
+    try:
+        align_phase(
+            reference_path=args.reference,
+            target_path=args.target,
+            output_dir=args.output_dir,
+            max_delay_ms=args.max_delay_ms,
+            segment_sec=args.segment_sec,
+            min_correlation=args.min_correlation,
+        )
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ through `tools/replay_chain.py` rebuilds the full mix from scratch.
 This tool is **non-invasive**: it only reads existing reports. The
 existing apply_*.py tools are not modified.
 
+Reports without an operation record (legacy runs, or tools whose reports
+cannot be mapped) are kept as unverified steps with a warning; the chain is
+then marked "verified_operations": false and replay rejects or best-efforts
+those steps instead of silently dropping them.
+
 Usage:
   python tools/build_chain.py output/<session>
   # Writes: output/<session>/mix_chain.json
@@ -289,25 +294,34 @@ def _topo_sort_chain(steps: list[dict]) -> list[dict]:
     return ordered
 
 
-def build_stem_chain(track_dir: Path) -> list[dict]:
+def _read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid recall file: {path}: {exc}") from exc
+
+
+def build_stem_chain(track_dir: Path, warnings: list[str] | None = None) -> list[dict]:
     """Collect every *_report.json in a stem directory, map to chain steps,
-    return them topologically ordered."""
-    steps = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(track_dir.glob("*.operation.json"))]
+    return them topologically ordered. Reports lacking an operation record
+    are appended to `warnings` and kept as unverified steps."""
+    steps = [_read_json(p) for p in sorted(track_dir.glob("*.operation.json"))]
     recorded_outputs = {str(Path(step["output"]).resolve()) for step in steps}
-    for report_path in track_dir.glob("*_report.json"):
+    for report_path in sorted(track_dir.glob("*_report.json")):
+        rpt = _read_json(report_path)
+        if not rpt.get("output") or str(Path(rpt["output"]).resolve()) in recorded_outputs:
+            continue
         mapper = _REPORT_TO_MAPPER.get(report_path.name)
         if mapper is None:
-            rpt = json.loads(report_path.read_text(encoding="utf-8"))
-            if rpt.get("output") and str(Path(rpt["output"]).resolve()) not in recorded_outputs:
-                raise ValueError(f"Unrecorded processing report: {report_path}; rerun the tool to capture recall")
-            continue
-        try:
-            rpt = json.loads(report_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Invalid processing report: {report_path}") from exc
-        step = mapper(rpt)
-        if step.get("output") and str(Path(step["output"]).resolve()) not in recorded_outputs:
-            steps.append(step)
+            step = {"step": "unrecorded", "report": str(report_path),
+                    "input": rpt.get("input"), "output": rpt["output"], "args": {}}
+            note = "no operation record and no legacy mapping; replay cannot rebuild it"
+        else:
+            step = mapper(rpt)
+            note = "legacy report without operation record; replay needs --allow-legacy"
+        if warnings is not None:
+            warnings.append(f"{report_path}: {note}")
+        steps.append(step)
     return _topo_sort_chain(steps)
 
 
@@ -330,10 +344,11 @@ def build_chain(session_dir: Path) -> dict:
             raise ValueError(f"Invalid mix config: {mix_config}") from exc
 
     stems: list[dict] = []
+    warnings: list[str] = []
     for stem_dir in sorted(tracks_root.iterdir()):
         if not stem_dir.is_dir():
             continue
-        chain = build_stem_chain(stem_dir)
+        chain = build_stem_chain(stem_dir, warnings)
         if not chain:
             continue
         stems.append({
@@ -348,6 +363,7 @@ def build_chain(session_dir: Path) -> dict:
         "mix_config": str(session_dir / "mix_config.json"),
         "verified_operations": all(step["step"] == "recorded_call" for stem in stems for step in stem["chain"]),
         "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "warnings": warnings,
         "stems": stems,
     }
 
@@ -362,13 +378,20 @@ def main() -> None:
                         help="Where to write mix_chain.json (default: <session_dir>/mix_chain.json)")
     args = parser.parse_args()
 
-    chain = build_chain(args.session_dir)
-    out_path = args.output or (args.session_dir / "mix_chain.json")
-    out_path.write_text(json.dumps(chain, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        chain = build_chain(args.session_dir)
+        out_path = args.output or (args.session_dir / "mix_chain.json")
+        out_path.write_text(json.dumps(chain, indent=2, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"build_chain: error: {exc}", file=sys.stderr)
+        sys.exit(1)
 
+    for warning in chain["warnings"]:
+        print(f"WARNING: {warning}", file=sys.stderr)
     n_stems = len(chain["stems"])
     n_steps = sum(len(s["chain"]) for s in chain["stems"])
-    print(f"Wrote {out_path} — {n_stems} stems, {n_steps} chain steps total")
+    verified = "verified" if chain["verified_operations"] else "NOT verified (see warnings)"
+    print(f"Wrote {out_path} — {n_stems} stems, {n_steps} chain steps total, operations {verified}")
 
 
 if __name__ == "__main__":

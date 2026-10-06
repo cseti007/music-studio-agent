@@ -5,13 +5,12 @@ Two modes:
   --per-clip session.json
       Reads the clip layout from session.json and assembles the full-length
       stem at original levels. Normalize only with --normalize; boundary
-      crossfades are opt-in via --crossfade-ms.
+      crossfades are opt-in via --crossfade-ms (default 0 ms in per-clip
+      mode; continuous mode defaults to 50 ms).
       Output: output_dir/<track_name>/assembled.wav
 
-      Use --no-normalize to assemble clips at their original recording levels
-      without any per-clip LUFS normalization. Recommended for drums, which are
-      recorded in a single continuous take — use --no-normalize here, then
-      apply --per-channel on the assembled result for uniform gain staging.
+      --no-normalize is a deprecated no-op kept for old command lines;
+      original levels are already the default.
 
   --per-channel file.wav
       Applies a single gain to an already-assembled stem to reach a target
@@ -19,7 +18,7 @@ Two modes:
       pre-assembled stems.
       Output: output_dir/<stem_name>_gained.wav
 
-Reads [gain] section from config.toml in the current working directory.
+Reads the [gain] section from config.toml in the project root (next to tools/).
 
 Usage:
   # list available tracks
@@ -45,13 +44,15 @@ import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
 
+from _recall import record_operation
+
 try:
     import librosa
     _LIBROSA = True
 except ImportError:
     _LIBROSA = False
 
-_CONFIG_PATH = Path("config.toml")
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
 
 PRESETS: dict[str, dict] = {
     "stem":      {"target_lufs": -18.0, "peak_ceiling_db": -1.0},
@@ -215,13 +216,17 @@ def _assemble_track_with_clip_gain(
     skipped = 0
     clips_limited = 0
 
-    # Optional equal-power crossfades can smooth discontinuous edits. They may
-    # boost correlated material and do not reconstruct the DAW's fade settings.
+    # Optional crossfades can smooth discontinuous edits; they do not
+    # reconstruct the DAW's fade settings. Equal-power fades suit unrelated
+    # material; a cut inside one continuous take is correlated, so it gets
+    # equal-gain (linear) fades that sum to the original level instead of +3 dB.
     xfade_samples = max(0, int(round(crossfade_ms * sr / 1000.0)))
     if xfade_samples > 0:
         _xf_t = np.linspace(0.0, 1.0, xfade_samples)
         _fade_in_env = np.sin(np.pi / 2.0 * _xf_t)
         _fade_out_env = np.cos(np.pi / 2.0 * _xf_t)
+        _linear_in_env = _xf_t
+        _linear_out_env = 1.0 - _xf_t
     else:
         _fade_in_env = None
         _fade_out_env = None
@@ -242,6 +247,11 @@ def _assemble_track_with_clip_gain(
         prev_end = prev_clip["timeline_start_sample"] + prev_clip["length_samples"]
         this_start = this_clip["timeline_start_sample"]
         return abs(prev_end - this_start) <= butt_up_tolerance
+
+    def _same_take(prev_clip, this_clip) -> bool:
+        return (prev_clip["source_file"] == this_clip["source_file"]
+                and this_clip["source_offset_sample"] - prev_clip["source_offset_sample"]
+                == this_clip["timeline_start_sample"] - prev_clip["timeline_start_sample"])
 
     for i, clip in enumerate(clips_sorted):
         has_prev_boundary = (xfade_samples > 0 and i > 0
@@ -276,11 +286,13 @@ def _assemble_track_with_clip_gain(
         # The two faded envelopes from adjacent clips sum to constant power in
         # the overlap window.
         if has_prev_boundary and data.shape[0] >= xfade_samples:
-            data[:xfade_samples] = data[:xfade_samples] * _fade_in_env[:, None]
+            fade_in = _linear_in_env if _same_take(clips_sorted[i - 1], clip) else _fade_in_env
+            data[:xfade_samples] = data[:xfade_samples] * fade_in[:, None]
             crossfades_applied += 1
         if has_next_boundary and data.shape[0] >= xfade_samples:
             n_tail = min(xfade_samples, data.shape[0])
-            data[-n_tail:] = data[-n_tail:] * _fade_out_env[-n_tail:][:, None]
+            fade_out = _linear_out_env if _same_take(clip, clips_sorted[i + 1]) else _fade_out_env
+            data[-n_tail:] = data[-n_tail:] * fade_out[-n_tail:][:, None]
 
         tl_start = clip["timeline_start_sample"]
         tl_end = tl_start + len(data)
@@ -316,7 +328,9 @@ def _assemble_track_with_clip_gain(
             f"{w['boundary_sec']:.2f}s — "
             f"before={w['rms_before_db']:+.1f} dB, after={w['rms_after_db']:+.1f} dB, "
             f"diff={w['diff_db']:.1f} dB. "
-            f"Consider --no-normalize if this is a continuous recording.",
+            + ("Per-clip normalization was enabled; compare against original levels "
+               "(omit --normalize) if this is a continuous recording."
+               if normalize else "Levels are as edited in the session; check the source edit."),
             file=sys.stderr,
         )
 
@@ -559,10 +573,16 @@ def _assemble_track_continuous(
     return report
 
 
-from _recall import record_operation
+def _resolve_clip_defaults(arguments: dict) -> None:
+    """Resolve config and mode defaults so recall records the values used."""
+    if arguments.get("target_lufs") is None:
+        arguments["target_lufs"] = float(
+            _load_config().get("gain", {}).get("per_clip_target_lufs", -18.0))
+    if arguments.get("crossfade_ms") is None:
+        arguments["crossfade_ms"] = 50.0 if arguments.get("source_mode") == "continuous" else 0.0
 
 
-@record_operation("apply_gain")
+@record_operation("apply_gain", resolve=_resolve_clip_defaults)
 def apply_gain_per_clip(
     session_json: Path,
     output_dir: Path,
@@ -571,18 +591,15 @@ def apply_gain_per_clip(
     target_lufs: float | None = None,
     peak_ceiling_db: float = DEFAULT_PEAK_CEILING,
     normalize: bool = False,
-    crossfade_ms: float = 0.0,
+    crossfade_ms: float | None = None,
     source_mode: str = "per-clip",
     interloper_head_ms: float | None = None,
     interloper_tail_ms: float | None = None,
     normalize_per_source: bool = False,
     source_target_lufs: float = -18.0,
 ) -> list[dict]:
-    cfg = _load_config().get("gain", {})
-    if target_lufs is None:
-        target_lufs = cfg.get("per_clip_target_lufs", -18.0)
-
-    data = json.loads(session_json.read_text(encoding="utf-8"))
+    # target_lufs and crossfade_ms are resolved by _resolve_clip_defaults.
+    data = json.loads(Path(session_json).read_text(encoding="utf-8"))
     tracks = data["tracks"]
 
     if not all_tracks and not track_names:
@@ -781,18 +798,20 @@ def main() -> None:
     clip_group.add_argument("--normalize", action="store_true", help="Opt in to per-clip loudness normalization")
     clip_group.add_argument(
         "--no-normalize", action="store_true", dest="no_normalize",
-        help="Assemble clips at original recording levels without per-clip LUFS normalization. "
-             "Use for drums (single continuous take); follow up with --per-channel for uniform gain.",
+        help="Deprecated, kept for old command lines: original recording levels "
+             "are already the default (normalization requires --normalize). "
+             "If both flags are given, --no-normalize wins.",
     )
     clip_group.add_argument(
-        "--crossfade-ms", type=float, default=0.0, metavar="MS",
-        help="Opt-in crossfade length at adjacent clip boundaries (default: 0 ms). "
+        "--crossfade-ms", type=float, default=None, metavar="MS",
+        help="Crossfade length at adjacent clip boundaries (default: 0 ms in per-clip mode, "
+             "which preserves the edits; 50 ms in continuous mode). "
              "Changes the audio around joins; does not reproduce DAW fade settings.",
     )
     clip_group.add_argument(
         "--source-mode", choices=("per-clip", "continuous"), default="per-clip",
         help="Assembly strategy. 'per-clip' (default): assemble session-defined slip-edit "
-             "clips with crossfade smoothing. 'continuous': bypass slip-edits — for each "
+             "clips at their positions (no crossfades unless --crossfade-ms). 'continuous': bypass slip-edits — for each "
              "unique source WAV, cluster the clips by timeline proximity, play each "
              "cluster as one continuous chunk at its median timeline anchor. Eliminates "
              "warble/click artifacts on sustained material (bass DI especially) where "

@@ -93,7 +93,8 @@ class TestRenderPipeline:
 
     def test_stage_render_writes_stems_to_session_root(self, session):
         """Regression for the --stage stems path: the stage WAV goes to
-        mixes/stages/, but the stems must still land in <session>/stems."""
+        mixes/stages/, and its stems land in <session>/stems/<stage>/ so they
+        never replace the main render's stems."""
         import render_mix
 
         config_path = session / "mix_config.json"
@@ -101,7 +102,7 @@ class TestRenderPipeline:
         render_mix.render_mix(config_path, render_stems=True, stage="raw")
 
         assert (session / "mixes" / "stages" / "mix_stage_raw.wav").exists()
-        assert list((session / "stems").glob("stem_*.wav"))
+        assert list((session / "stems" / "raw").glob("stem_*.wav"))
         # The bug put stems here; the fix must not:
         assert not (session / "mixes" / "stems").exists()
 

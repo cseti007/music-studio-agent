@@ -342,7 +342,8 @@ class TestCompareReference:
     def test_filters_from_delta_max_count_and_order(self):
         from compare_reference import _filters_from_delta
 
-        delta = [{"hz": 100.0 * i, "delta_db": float(i)} for i in range(2, 12)]
+        # Alternating signs: adjacent same-sign bands would merge into one filter
+        delta = [{"hz": 100.0 * i, "delta_db": float(i) * (-1) ** i} for i in range(2, 12)]
         filters = _filters_from_delta(delta, threshold_db=1.0)
         assert len(filters) == 6  # capped at _APPLY_MAX_FILTERS
         # sorted by |delta| descending -> largest delta (11) first

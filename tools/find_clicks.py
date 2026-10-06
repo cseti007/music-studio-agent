@@ -6,8 +6,9 @@ single-sample jump of >= ~0.1 magnitude, which corresponds to a >12 kHz
 spectral edge that the ear hears as a tick).
 
 For each candidate click, optionally walk back through the chain to identify
-WHERE the click first appears: source recording → assembled stem →
-per-bus stem → mix. This lets you attribute the artifact to its actual
+WHERE the click first appears: source recording (via session.json) →
+assembled stem → every processed WAV in the track folder (ordered by the
+operation records) → per-bus stem → mix. This lets you attribute the artifact to its actual
 origin (engineer's slip-edit, polarity inversion, comp ceiling clipping, or
 a real recording problem) instead of guessing.
 
@@ -125,30 +126,68 @@ def _scan_window(mono: np.ndarray, sr: int, t_lo: float, t_hi: float) -> dict:
 
 
 def _find_chain_files_for_track(session_dir: Path, track_name: str) -> list[tuple[str, Path]]:
-    """Locate the assembled / processed files for a track in chain order.
+    """Locate every WAV in the track folder in chain order.
 
-    Returns [(stage_label, path), ...] where stage_label is e.g. "assembled",
-    "assembled_eq", "assembled_eq_comp", "assembled_eq_comp_aligned".
-    Only returns paths that actually exist on disk.
+    Order follows the input -> output links of the *.operation.json records
+    (processing depth); files without a record fall back to the number of
+    suffixes in their name (assembled < assembled_eq < assembled_eq_comp).
+    Returns [(stage_label, path), ...] with the file stem as label.
     """
     track_dir = session_dir / "tracks" / track_name
     if not track_dir.is_dir():
         return []
-    candidates = [
-        "assembled.wav",
-        "assembled_eq.wav",
-        "assembled_eq_comp.wav",
-        "assembled_eq_comp_aligned.wav",
-        "assembled_aligned.wav",
-        "assembled_eq_comp_deessed.wav",
-        "assembled_eq_comp_deessed_eq.wav",
-    ]
-    out = []
-    for fname in candidates:
-        p = track_dir / fname
-        if p.exists():
-            out.append((p.stem, p))
-    return out
+    producer_input: dict[str, str] = {}
+    for record in track_dir.glob("*.operation.json"):
+        try:
+            operation = json.loads(record.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if operation.get("output") and operation.get("input"):
+            producer_input[str(Path(operation["output"]).resolve())] = str(Path(operation["input"]).resolve())
+
+    def depth(path: Path) -> int:
+        key, seen = str(path.resolve()), set()
+        while key in producer_input and key not in seen:
+            seen.add(key)
+            key = producer_input[key]
+        return len(seen)
+
+    wavs = sorted(track_dir.glob("*.wav"), key=lambda p: (depth(p), p.stem.count("_"), p.name))
+    return [(p.stem, p) for p in wavs]
+
+
+def _scan_sources(session_dir: Path, track_name: str, t_lo: float, t_hi: float) -> list[dict]:
+    """Measure the original recordings that the session places in the window."""
+    session_path = session_dir / "session.json"
+    if not session_path.is_file():
+        return []
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    sr = session["sample_rate"]
+    entries = []
+    for track in session.get("tracks", []):
+        if track["name"] != track_name:
+            continue
+        for clip in track.get("clips", []):
+            start = clip["timeline_start_sample"] / sr
+            lo, hi = max(t_lo, start), min(t_hi, start + clip["length_samples"] / sr)
+            if hi <= lo:
+                continue
+            label = f"source:{Path(clip['source_file']).name}"
+            offset = clip["source_offset_sample"] / sr - start  # timeline -> source seconds
+            try:
+                info = sf.info(clip["source_file"])
+                first = max(0, int((lo + offset) * info.samplerate))
+                data, file_sr = sf.read(clip["source_file"], start=first, always_2d=True,
+                                        frames=int((hi - lo) * info.samplerate) + 1)
+            except Exception as e:
+                entries.append({"stage": label, "error": str(e)})
+                continue
+            mono = data.mean(axis=1)
+            m = _scan_window(mono, file_sr, 0.0, len(mono) / file_sr)
+            if m["max_step_t"] is not None:
+                m["max_step_t"] = round(lo + m["max_step_t"], 4)  # report timeline time
+            entries.append({"stage": label, **m})
+    return entries
 
 
 def trace_at_time(
@@ -185,8 +224,9 @@ def trace_at_time(
         chain_files = _find_chain_files_for_track(session_dir, track_name)
         if not chain_files:
             continue
-        track_entry: dict = {"name": track_name, "chain": []}
-        any_hot = False
+        track_entry: dict = {"name": track_name, "chain": _scan_sources(session_dir, track_name, t_lo, t_hi)}
+        any_hot = any(c.get("max_step") is not None and c["max_step"] >= DEFAULT_STEP_THRESHOLD
+                      for c in track_entry["chain"])
         for stage_label, path in chain_files:
             try:
                 mono, sr = _load_mono(path)
@@ -265,7 +305,7 @@ def _render_trace_text(rep: dict) -> str:
     if rep["mix"]:
         m = rep["mix"]
         hot = " [HOT]" if m["max_step"] is not None and m["max_step"] >= DEFAULT_STEP_THRESHOLD else ""
-        lines.append(f"Final mix:")
+        lines.append("Final mix:")
         lines.append(
             f"  peak {(m['peak_db'] or 0):>+7.2f} dBFS  "
             f"max step {(m['max_step'] or 0):.5f} ({(m['max_step_db'] or 0):+.2f} dBFS){hot}"

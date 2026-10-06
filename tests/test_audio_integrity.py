@@ -54,9 +54,9 @@ def test_vinyl_export_measures_saved_audio_and_preserves_headroom(tmp_path):
     saved, sr = sf.read(report["output"], always_2d=True)
     measured = pyln.Meter(sr).integrated_loudness(saved)
     assert report["output_lufs"] == pytest.approx(measured, abs=.011)
-    assert worst_channel_true_peak_dbfs(saved) <= -1 + .01
+    assert worst_channel_true_peak_dbfs(saved, 8) <= report["tp_ceiling_dbtp"] + .01
     assert np.max(np.abs(saved)) < 1
-    assert report["loudness_target_met"] is False
+    assert report["loudness_target_met"] is None  # vinyl_pre has no LUFS target
 
 
 def test_cd_resamples_before_quantization(tmp_path):

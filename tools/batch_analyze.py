@@ -96,13 +96,20 @@ def _collect_jobs(session_dir: Path | None,
     if files:
         if output_dir is None:
             raise ValueError("--output-dir is required when using --files")
+        existing = [f for f in files if f.exists()]
         for f in files:
             if not f.exists():
                 print(f"WARNING: skipping (not found): {f}", file=sys.stderr)
-                continue
-            # When the caller hands us explicit files, write into output-dir
-            # subfolders named after the file stem
-            target = output_dir / f.stem
+        # Subfolders are named after the file stem; when stems repeat
+        # (tracks/A/assembled.wav, tracks/B/assembled.wav) use the parent
+        # folder name so analyses do not overwrite each other.
+        stems = [f.stem for f in existing]
+        names = [f.stem if stems.count(f.stem) == 1 else f.parent.name for f in existing]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"--files would write several analyses to the same folder: {duplicates}")
+        for f, name in zip(existing, names):
+            target = output_dir / name
             if skip_existing and (target / "analysis.json").exists():
                 continue
             jobs.append((str(f), str(target)))
@@ -147,7 +154,8 @@ def main() -> None:
     parser.add_argument("session_dir", nargs="?", type=Path,
                         help="Session output dir (scans <dir>/tracks/*/assembled.wav)")
     parser.add_argument("--files", nargs="+", type=Path, default=None,
-                        help="Explicit input WAVs (overrides session_dir scanning); requires --output-dir")
+                        help="Explicit input WAVs (overrides session_dir scanning); requires --output-dir. "
+                             "Each gets <output-dir>/<file stem>, or <parent folder name> when stems repeat")
     parser.add_argument("--output-dir", type=Path, default=None,
                         help="Where to write per-stem analysis dirs (only for --files mode)")
     parser.add_argument("--workers", type=int, default=cpu_default,
@@ -159,7 +167,10 @@ def main() -> None:
     if args.session_dir is None and args.files is None:
         parser.error("either session_dir or --files is required")
 
-    jobs = _collect_jobs(args.session_dir, args.files, args.output_dir, args.skip_existing)
+    try:
+        jobs = _collect_jobs(args.session_dir, args.files, args.output_dir, args.skip_existing)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
     if not jobs:
         print("No stems to analyse (nothing matched or all skipped).")
         return

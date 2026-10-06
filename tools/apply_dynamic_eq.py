@@ -1,4 +1,11 @@
-"""Blend a bounded bell cut under a channel-linked RMS sidechain envelope."""
+"""Blend a bounded bell cut under a channel-linked RMS sidechain envelope.
+
+Detector band: without --sidechain-path the input triggers itself through an
+octave-wide band centred on --frequency-hz (so level elsewhere in the
+spectrum does not trigger the cut). An external sidechain keeps the broad
+80-5000 Hz detector. Explicit --detector-hp-hz / --detector-lp-hz override
+either default.
+"""
 
 from __future__ import annotations
 
@@ -42,12 +49,21 @@ def apply_dynamic_eq(input_path: Path, output_dir: Path, frequency_hz: float,
                      threshold_db: float = -30.0, attack_ms: float = 10.0,
                      release_ms: float = 120.0, range_db: float = 12.0,
                      sidechain_path: Path | None = None,
-                     detector_hp_hz: float = 80.0, detector_lp_hz: float = 5000.0) -> dict:
-    values = (frequency_hz, q, max_cut_db, threshold_db, attack_ms, release_ms,
+                     detector_hp_hz: float | None = None,
+                     detector_lp_hz: float | None = None) -> dict:
+    if not np.isfinite(frequency_hz):
+        raise ValueError("Dynamic EQ parameters must be finite")
+    data, sr = sf.read(input_path, always_2d=True, dtype="float32")
+    if sidechain_path is None:
+        default_hp, default_lp = frequency_hz / np.sqrt(2), min(frequency_hz * np.sqrt(2), 0.45 * sr)
+    else:
+        default_hp, default_lp = 80.0, 5000.0
+    detector_hp_hz = float(default_hp if detector_hp_hz is None else detector_hp_hz)
+    detector_lp_hz = float(default_lp if detector_lp_hz is None else detector_lp_hz)
+    values = (q, max_cut_db, threshold_db, attack_ms, release_ms,
               range_db, detector_hp_hz, detector_lp_hz)
     if not all(np.isfinite(value) for value in values):
         raise ValueError("Dynamic EQ parameters must be finite")
-    data, sr = sf.read(input_path, always_2d=True, dtype="float32")
     if not data.size or data.shape[1] not in (1, 2) or not np.isfinite(data).all():
         raise ValueError("Expected finite nonempty mono/stereo input")
     if not (0 < frequency_hz < sr / 2 and q > 0 and 0 <= max_cut_db <= 12
@@ -101,8 +117,10 @@ def main() -> None:
     parser.add_argument("--release-ms", type=float, default=120.0)
     parser.add_argument("--range-db", type=float, default=12.0)
     parser.add_argument("--sidechain-path", type=Path)
-    parser.add_argument("--detector-hp-hz", type=float, default=80.0)
-    parser.add_argument("--detector-lp-hz", type=float, default=5000.0)
+    parser.add_argument("--detector-hp-hz", type=float, default=None,
+                        help="Detector high-pass (default: frequency/sqrt(2) self-triggered, 80 with sidechain)")
+    parser.add_argument("--detector-lp-hz", type=float, default=None,
+                        help="Detector low-pass (default: frequency*sqrt(2) self-triggered, 5000 with sidechain)")
     print(json.dumps(apply_dynamic_eq(**vars(parser.parse_args())), indent=2))
 
 

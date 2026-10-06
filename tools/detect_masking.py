@@ -1,19 +1,34 @@
-"""Detect frequency masking between stems in a session.
+"""Find candidate frequency overlap between stems in a session.
 
-For each 1/3-octave band, finds stem pairs that compete within a configurable
-dB threshold — indicating that one stem is likely masking the other in the mix.
+For each 1/3-octave band, lists stem pairs whose band power lies within a
+configurable dB gap. These are hypotheses about where two parts may compete;
+check them by listening in context before any EQ decision.
 
-All stems are LUFS-normalized to -18 dBFS before comparison so that the analysis
-reflects mix-ready levels rather than raw recording gain differences.
+All stems are LUFS-normalized to a common level (default -18 LUFS) before
+comparison. This removes raw recording-gain differences but also discards
+the actual mix balance: a flagged pair may be well separated by the faders,
+and a part that is masked in the mix may not be flagged at all.
 
-Severity levels (based on level gap between competing stems in a band):
-  CRITICAL  < 3 dB gap — strong masking, almost certainly audible
-  HIGH      3–6 dB gap — significant masking, likely audible
-  MODERATE  6–10 dB gap — moderate masking, may be audible on some playback systems
+Band levels are 1/3-octave band power (PSD integrated over the band) in dB
+relative to digital full scale (a full-scale sine reads -3 dB).
+
+Severity levels (level gap between two stems in a band):
+  CRITICAL  < 3 dB gap
+  HIGH      3-6 dB gap
+  MODERATE  6-10 dB gap
+A smaller gap means more similar normalized band power; it does not by
+itself establish audible masking.
+
+Pairs are time-gated with the overlap coefficient of their activity
+envelopes (shared active frames / active frames of the shorter part), so a
+short part that plays entirely over a long part is still compared.
+
+In session mode, tracks marked "active": false in mix_config.json are
+skipped, and the fx stage uses each track's mix_config "file" when present.
 
 Output:
-  masking_report.json  — full per-band data, all competing pairs
-  masking_report.txt   — human-readable heatmap + ranked masking list
+  masking_report.json  - full per-band data, all candidate pairs
+  masking_report.txt   - human-readable heatmap + ranked candidate list
 
 Usage:
   # Auto-discover stems from session output directory
@@ -72,14 +87,18 @@ _BLOCKS = " ░▒▓█"
 
 def _find_stem_file(track_dir: Path, stage: str) -> Path | None:
     if stage == "fx":
-        # Last alphabetically among _sat, _amp, _delay, _reverb suffixes
-        candidates = sorted(track_dir.glob("assembled_*_*.wav"))
-        # Prefer amp/reverb over plain _comp; skip _comp and _eq only files
-        fx_files = [f for f in candidates if f.stem.count("_") >= 3]
-        if fx_files:
-            return fx_files[-1]
-        # Fall back to comp
-        return _find_stem_file(track_dir, "comp")
+        # Processing tools append a suffix to their input's stem, so the final
+        # file of a chain is a leaf: no other file extends its name. Send-mode
+        # outputs (*_send.wav) are wet-only returns and never a track's signal.
+        files = [f for f in track_dir.glob("assembled*.wav") if not f.stem.endswith("_send")]
+        leaves = [f for f in files if not any(o.stem.startswith(f.stem + "_") for o in files)]
+        if not leaves:
+            return None
+        if len(leaves) > 1:
+            print(f"  WARNING: {track_dir.name}: several processing branches "
+                  f"({', '.join(sorted(f.name for f in leaves))}); using the longest chain",
+                  file=sys.stderr)
+        return max(leaves, key=lambda f: (f.stem.count("_"), f.name))
 
     for name in _SHARED_STAGE_CANDIDATES.get(stage, []):
         p = track_dir / name
@@ -88,15 +107,31 @@ def _find_stem_file(track_dir: Path, stage: str) -> Path | None:
     return None
 
 
+def _mix_config_tracks(session_dir: Path) -> dict[str, dict]:
+    """Track entries of session_dir/mix_config.json by name ({} if absent)."""
+    path = session_dir / "mix_config.json"
+    if not path.exists():
+        return {}
+    config = json.loads(path.read_text(encoding="utf-8"))
+    return {t["name"]: t for t in config.get("tracks", []) if "name" in t}
+
+
 def discover_stems(session_dir: Path, stage: str) -> dict[str, Path]:
     """Find the best assembled WAV per track in session_dir/tracks/."""
     tracks_dir = session_dir / "tracks"
     if not tracks_dir.exists():
         return {}
 
+    config_tracks = _mix_config_tracks(session_dir)
     stems: dict[str, Path] = {}
     for track_dir in sorted(tracks_dir.iterdir()):
         if not track_dir.is_dir():
+            continue
+        entry = config_tracks.get(track_dir.name)
+        if entry is not None and not entry.get("active", True):
+            continue
+        if stage == "fx" and entry is not None and Path(entry.get("file", "")).is_file():
+            stems[track_dir.name] = Path(entry["file"])
             continue
         f = _find_stem_file(track_dir, stage)
         if f is None:
@@ -165,11 +200,16 @@ def _gated_audio(mono: np.ndarray, sr: int, active: np.ndarray) -> np.ndarray:
 
 
 def _third_octave_psd_db(mono: np.ndarray, sr: int) -> list[dict]:
+    """1/3-octave band power in dB re full scale (PSD summed over band bins).
+
+    Band power, unlike the mean PSD density, does not depend on the FFT bin
+    width, so absolute floors are meaningful: a full-scale sine reads -3 dB.
+    """
     if len(mono) < 1024:
         return []
     nperseg = min(len(mono), 32768)
     freqs, psd = welch(mono, fs=sr, nperseg=nperseg, average="mean")
-    psd_db = 10.0 * np.log10(psd + 1e-20)
+    bin_hz = freqs[1] - freqs[0]
 
     centers: list[float] = []
     f = 20.0
@@ -183,7 +223,8 @@ def _third_octave_psd_db(mono: np.ndarray, sr: int) -> list[dict]:
         hi = fc * 2.0 ** (1.0 / 6.0)
         mask = (freqs >= lo) & (freqs < hi)
         if mask.any():
-            bands.append({"hz": round(fc, 1), "db": round(float(np.mean(psd_db[mask])), 1)})
+            power = float(np.sum(psd[mask]) * bin_hz)
+            bands.append({"hz": round(fc, 1), "db": round(10.0 * np.log10(power + 1e-20), 1)})
     return bands
 
 
@@ -204,39 +245,42 @@ def _severity(gap_db: float) -> str:
 
 
 _MIN_COACTIVITY_RATIO = 0.15
+# Bands below this 1/3-octave band power (dB re full scale, after LUFS
+# normalization) are treated as inactive for that stem.
+_DEFAULT_FLOOR_DB = -50.0
 
 
 def _coactivity_ratio(env_a: np.ndarray, env_b: np.ndarray) -> float:
-    """Fraction of frames where BOTH stems are simultaneously active.
+    """Overlap coefficient: shared active frames / active frames of the shorter part.
 
-    Denominator is union-of-active (Jaccard-like) so a stem that plays only in
-    the chorus while another plays only in the verse scores near 0, instead of
-    being penalised by the full-song length.
+    A solo playing 10% of the song entirely over a sustained bass scores 1.0
+    (it is always accompanied), while verse-only vs chorus-only parts score 0.
     """
     n = min(len(env_a), len(env_b))
     if n == 0:
         return 0.0
     a = env_a[:n]
     b = env_b[:n]
-    union = int(np.sum(a | b))
-    if union == 0:
+    smaller = min(int(np.sum(a)), int(np.sum(b)))
+    if smaller == 0:
         return 0.0
     intersect = int(np.sum(a & b))
-    return float(intersect / union)
+    return float(intersect / smaller)
 
 
 def find_masking_pairs(
     stem_bands: dict[str, list[dict]],
     stem_activity: dict[str, np.ndarray] | None = None,
     threshold_db: float = 6.0,
-    floor_db: float = -45.0,
+    floor_db: float = _DEFAULT_FLOOR_DB,
 ) -> list[dict]:
-    """For each 1/3-octave band, find stem pairs competing within threshold_db.
+    """For each 1/3-octave band, find stem pairs within threshold_db of each other.
 
+    Band levels are band power in dB; bands below floor_db are ignored.
     When stem_activity is supplied, a pair is suppressed if the two stems
-    don't co-occur in time often enough (co-activity ratio below
-    _MIN_COACTIVITY_RATIO). This kills false positives like
-    "rhythm guitar (verses) vs lead vocal (choruses)".
+    don't co-occur in time often enough (overlap coefficient below
+    _MIN_COACTIVITY_RATIO), e.g. "rhythm guitar (verses only) vs lead vocal
+    (choruses only)".
     """
     # Build hz → {stem: db} index
     hz_index: dict[float, dict[str, float]] = {}
@@ -319,7 +363,8 @@ def _heatmap(stem_bands: dict[str, list[dict]], stem_names: list[str]) -> str:
 
     header = f"{'Stem':<{name_w}}" + "".join(f"{b[0]:^{col_w}}" for b in _HEATMAP_BANDS)
     sep = "─" * len(header)
-    lines = ["", "STEM ENERGY HEATMAP (per frequency region, loudness-normalized)", sep, header, sep]
+    lines = ["", "STEM ENERGY HEATMAP (mean 1/3-octave band power per region, after LUFS normalization)",
+             sep, header, sep]
 
     for name in stem_names:
         bands = {b["hz"]: b["db"] for b in stem_bands.get(name, [])}
@@ -331,21 +376,21 @@ def _heatmap(stem_bands: dict[str, list[dict]], stem_names: list[str]) -> str:
                 row += f"{'':^{col_w}}"
                 continue
             avg_db = float(np.mean(vals))
-            # Map -60..0 dBFS to 0..4 block index
-            level = int(np.clip((avg_db + 60) / 15, 0, 4))
+            # Map -60..-20 dB band power to 0..4 block index
+            level = int(np.clip((avg_db + 60) / 10, 0, 4))
             row += f"{_BLOCKS[level]:^{col_w}}"
         lines.append(row)
 
     lines.append(sep)
-    lines.append("  Energy scale: (space)=silent  ░=low  ▒=mid  ▓=high  █=dominant")
+    lines.append("  Band power scale (dB re full scale): (space)<-50  ░ -50..-40  ▒ -40..-30  ▓ -30..-20  █ >=-20")
     return "\n".join(lines)
 
 
 def _masking_section(events: list[dict], threshold_db: float) -> str:
     if not events:
-        return "\nNo masking pairs detected above threshold."
+        return "\nNo candidate overlap pairs within the threshold."
 
-    lines = [f"\nMASKING PAIRS  (threshold: ±{threshold_db:.0f} dB)", "=" * 60]
+    lines = [f"\nCANDIDATE OVERLAP PAIRS  (gap threshold: {threshold_db:.0f} dB)", "=" * 60]
     current_sev = None
 
     moderate_shown = 0
@@ -355,9 +400,9 @@ def _masking_section(events: list[dict], threshold_db: float) -> str:
         if e["severity"] != current_sev:
             current_sev = e["severity"]
             sev_desc = {
-                "CRITICAL": "CRITICAL  (< 3 dB gap — strong masking)",
-                "HIGH":     "HIGH      (3–6 dB gap — significant masking)",
-                "MODERATE": f"MODERATE  (6–10 dB gap — top {moderate_limit} shown)",
+                "CRITICAL": "CRITICAL  (< 3 dB gap)",
+                "HIGH":     "HIGH      (3-6 dB gap)",
+                "MODERATE": f"MODERATE  (6-10 dB gap, top {moderate_limit} shown)",
             }.get(current_sev, current_sev)
             lines += ["", f"── {sev_desc} ──────────────────────"]
 
@@ -370,20 +415,20 @@ def _masking_section(events: list[dict], threshold_db: float) -> str:
         a, b = e["stems"][0], e["stems"][1]
         co_lbl = f"  co={e['coactivity']:.2f}" if "coactivity" in e else ""
         lines.append(
-            f"  {hz_lbl}  {a['name']} ({a['db']:+.1f} dBFS)  vs  "
-            f"{b['name']} ({b['db']:+.1f} dBFS)  [{e['gap_db']:.1f} dB gap]{co_lbl}"
+            f"  {hz_lbl}  {a['name']} ({a['db']:+.1f} dB)  vs  "
+            f"{b['name']} ({b['db']:+.1f} dB)  [{e['gap_db']:.1f} dB gap]{co_lbl}"
         )
 
     lines += [
         "",
-        "RECOMMENDATIONS",
+        "HOW TO USE THESE CANDIDATES",
         "─" * 60,
-        "  For each competing pair: decide which stem is the 'hero' at that frequency.",
-        "  Cut the non-hero stem 2–4 dB in the flagged band using apply_eq.py:",
-        "    --filter '{\"type\":\"peak\",\"hz\":64,\"db\":-3,\"q\":1.5}'",
-        "  CRITICAL pairs should be addressed first — they cause the most audible masking.",
-        "  Sidechain compression (apply_compression.py --sidechain) can also reduce",
-        "  transient masking between kick and bass in the 50–120 Hz range.",
+        "  Each pair is a hypothesis: two parts with similar normalized band power",
+        "  that play at the same time. Listen to the flagged passage in the actual",
+        "  mix balance before changing anything; many pairs are intentional blends.",
+        "  If an overlap is heard as a problem, compare a small bounded change",
+        "  (balance, a narrow EQ cut, or a dynamic EQ keyed from the other part)",
+        "  against the unprocessed version at matched loudness.",
     ]
     return "\n".join(lines)
 
@@ -399,6 +444,11 @@ def _summary_counts(events: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------------
+
+_NORMALIZATION_NOTE = (
+    "Every stem was normalized to {lufs:.0f} LUFS before comparison, so the actual "
+    "mix balance is not represented; listen in context before acting on a pair."
+)
 
 def detect_masking(
     stems: dict[str, Path],
@@ -429,7 +479,7 @@ def detect_masking(
         else:
             stem_bands[name] = []
 
-    print("Detecting masking pairs...", flush=True)
+    print("Comparing band power between stems...", flush=True)
     events = find_masking_pairs(stem_bands, stem_activity=stem_activity, threshold_db=threshold_db)
 
     report = {
@@ -437,6 +487,8 @@ def detect_masking(
         "stage": stage,
         "threshold_db": threshold_db,
         "lufs_normalization_target": lufs_target,
+        "band_level_unit": "1/3-octave band power, dB re full scale",
+        "normalization_note": _NORMALIZATION_NOTE.format(lufs=lufs_target),
         "masking_pairs": events,
         "summary": {
             "total_pairs": len(events),
@@ -453,12 +505,13 @@ def detect_masking(
 
     summary_line = _summary_counts(events)
     header = "\n".join([
-        "FREQUENCY MASKING REPORT",
+        "FREQUENCY OVERLAP CANDIDATES",
         "=" * 60,
         f"  Stage     : {stage}",
         f"  Stems     : {len(stems)}",
-        f"  Threshold : ±{threshold_db:.0f} dB",
-        f"  Masking   : {summary_line}",
+        f"  Threshold : {threshold_db:.0f} dB gap",
+        f"  Pairs     : {summary_line}",
+        f"  Note      : {_NORMALIZATION_NOTE.format(lufs=lufs_target)}",
     ])
 
     full_text = (
@@ -477,7 +530,7 @@ def detect_masking(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Detect frequency masking between stems in a session.",
+        description="Find candidate frequency overlap between stems; hypotheses to check by listening.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(

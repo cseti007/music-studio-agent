@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -19,13 +20,12 @@ import soundfile as sf
 import librosa
 from scipy.signal import butter, sosfilt
 
+from _recall import record_operation
+
 
 def _design_bandpass(sr, hp_hz, lp_hz, order=2):
     nyq = sr / 2.0
     return butter(order, [hp_hz / nyq, lp_hz / nyq], btype="band", output="sos")
-
-
-from _recall import record_operation
 
 
 @record_operation("apply_octaver")
@@ -59,13 +59,11 @@ def apply_octaver(input_path: Path, output_path: Path,
     # Mix back into the original
     output = audio + shifted * mix
 
-    # Peak limit safety
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output)))
-    safety_scale_db = 0.0
-    if peak > 0.99:
-        scale = 0.99 / peak
-        output = output * scale
-        safety_scale_db = 20 * np.log10(scale)
+    if peak > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     sf.write(str(output_path), output, sr, subtype="FLOAT")
 
@@ -77,8 +75,8 @@ def apply_octaver(input_path: Path, output_path: Path,
         "lp_hz": lp_hz,
         "mix": mix,
         "shifted_band_gain_db": round(20 * np.log10(mix + 1e-12), 2),
-        "safety_scale_db": round(safety_scale_db, 2),
-        "peak_dbfs": round(20 * np.log10(max(float(np.max(np.abs(output))), 1e-12)), 2),
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-12)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
         "duration_sec": round(len(output) / sr, 3),
     }

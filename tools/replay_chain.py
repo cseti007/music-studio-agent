@@ -19,7 +19,9 @@ Usage:
   python tools/replay_chain.py output/<session>
 
   python tools/replay_chain.py output/<session>/mix_chain.json --dry-run
-  # Prints every command it would execute without actually running anything
+  # Validates the chain without writing anything: checks recorded calls,
+  # data-dependency hashes and mix routing, warns about changed engine code,
+  # and prints each operation (step -> output) in replay order
 
   python tools/replay_chain.py output/<session>/mix_chain.json --stem "KICK IN.05"
   # Replay a single stem only (for debugging)
@@ -27,8 +29,15 @@ Usage:
   python tools/replay_chain.py output/<session>/mix_chain.json --subprocess
   # Force the old subprocess path (each step in its own Python process)
 
-The default behaviour is overwrite-in-place — the original output/<session>/
-directory is the target. Back up first if you want to keep the previous run.
+Recorded operations are verified: each one runs into a temporary folder next
+to its output with recording suppressed, and the replayed audio replaces the
+recorded WAV only when its content hash matches. On a mismatch the original
+WAV and its .operation.json stay untouched and the replayed candidate is left
+in the reported `.replay-*` folder. Report aliases (eq_report.json, ...) are
+not regenerated. A changed data dependency (input, source, preset) is an
+error; changed tool code (engine) is a warning, and the replay is then not
+verified as bit-identical until every output hash matches. Legacy
+(--allow-legacy) steps and the final render overwrite in place.
 """
 
 from __future__ import annotations
@@ -36,11 +45,11 @@ from __future__ import annotations
 import argparse
 import json
 import inspect
-import shlex
+import os
+import shutil
 import subprocess
 import sys
-import time
-import traceback
+import tempfile
 from pathlib import Path
 
 
@@ -49,6 +58,9 @@ TOOLS_DIR = Path(__file__).resolve().parent
 # Make sibling tools importable when this file is run directly (not as a module)
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+
+from _recall import (CALLS, SCHEMA_VERSIONS, content_hash,  # noqa: E402
+                     recording_suppressed, split_dependencies)
 
 
 # ---------------------------------------------------------------------------
@@ -637,10 +649,9 @@ def _resolve_chain_path(arg: Path) -> Path:
 
 
 def _recorded_callable(step):
-    from _recall import CALLS
     args = step["args"]
     module, name = args["module"], args["function"]
-    if name not in CALLS.get(module, ()) or step.get("schema_version") != 1:
+    if name not in CALLS.get(module, ()) or step.get("schema_version") not in SCHEMA_VERSIONS:
         raise ValueError("Unsupported recorded operation")
     function = getattr(_lazy_import(module), name)
     kwargs = dict(args["kwargs"])
@@ -650,21 +661,54 @@ def _recorded_callable(step):
     return function, kwargs
 
 
+def _changed_engine(step, cache: dict) -> list[str]:
+    """Engine files whose code differs from the recorded hash (warning only)."""
+    _, engine = split_dependencies(step)
+    for path in engine:
+        if path not in cache:
+            cache[path] = content_hash(path) if Path(path).is_file() else None
+    return [path for path, digest in engine.items() if cache[path] != digest]
+
+
 def _run_recorded(step):
-    from _recall import content_hash
-    for path, digest in step["dependencies"].items():
+    """Replay into a scratch folder; install the WAV only if its hash matches.
+
+    Recording is suppressed so the .operation.json is never rewritten, and a
+    differing result never replaces the recorded audio.
+    """
+    data, _ = split_dependencies(step)
+    for path, digest in data.items():
         if not Path(path).is_file() or content_hash(path) != digest:
             raise ValueError(f"Recall dependency changed or missing: {path}")
     function, kwargs = _recorded_callable(step)
-    function(**kwargs)
-    if not Path(step["output"]).is_file() or content_hash(step["output"]) != step["output_hash"]:
-        raise ValueError(f"Replayed output differs from recorded audio: {step['output']}")
+    output = Path(step["output"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=".replay-", dir=output.parent))
+    if "output_dir" in kwargs:
+        candidate = scratch / output.resolve().relative_to(Path(kwargs["output_dir"]).resolve())
+        kwargs["output_dir"] = scratch
+    elif "output_path" in kwargs:
+        candidate = scratch / output.name
+        kwargs["output_path"] = candidate
+    else:
+        shutil.rmtree(scratch)
+        raise ValueError(f"Recorded operation has no output location to redirect: {output}")
+    try:
+        with recording_suppressed():
+            function(**kwargs)
+    except BaseException:
+        shutil.rmtree(scratch, ignore_errors=True)
+        raise
+    if not candidate.is_file() or content_hash(candidate) != step["output_hash"]:
+        raise ValueError(f"Replayed output differs from recorded audio: {output}; "
+                         f"recorded file and operation kept, replayed candidate left at {candidate}")
+    os.replace(candidate, output)
+    shutil.rmtree(scratch, ignore_errors=True)
 
 
 def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
            use_subprocess: bool = False, allow_legacy: bool = False) -> int:
     """Preflight the entire selected chain, then stop on the first failure."""
-    from _recall import content_hash
     try:
         chain = json.loads(chain_path.read_text(encoding="utf-8"))
         stems = [stem for stem in chain["stems"] if stem.get("active", True)
@@ -677,27 +721,39 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
         outputs = {str(Path(step["output"]).resolve()): step for step in steps}
         if len(outputs) != len(steps):
             raise ValueError("Ambiguous recall: multiple operations write the same output")
+        for step in steps:
+            if step["step"] == "unrecorded":
+                raise ValueError(f"No recall record for {step.get('output')} (report {step.get('report')}); "
+                                 "rerun that tool to capture an operation record")
+            if step["step"] != "recorded_call" and step["step"] not in _STEP_TO_CALLABLE:
+                raise ValueError(f"Unsupported recall step: {step['step']} ({step.get('output')})")
+        if not allow_legacy and any(step["step"] != "recorded_call" for step in steps):
+            raise ValueError("Legacy reports lack verified recall metadata; regenerate operations or explicitly use --allow-legacy for best-effort replay")
         session_json = Path(chain.get("session_json") or "session.json")
         mix_config = Path(chain["mix_config"]) if chain.get("mix_config") else None
         if stem_filter is None and (mix_config is None or not mix_config.is_file()):
             raise ValueError("Full replay requires an existing mix_config")
         if stem_filter is None:
-            _lazy_import("render_mix").validate_mix_config(
-                json.loads(mix_config.read_text(encoding="utf-8")), pending_files=outputs)
+            config = json.loads(mix_config.read_text(encoding="utf-8"))
+            for track in config.get("tracks", []):
+                source = Path(track.get("file", ""))
+                if (track.get("active", True) and str(source.resolve()) not in outputs
+                        and not source.is_file()):
+                    raise ValueError(f"Mix config track {track.get('name')!r} references missing audio "
+                                     f"that no replayed operation produces: {source}")
+            _lazy_import("render_mix").validate_mix_config(config, pending_files=outputs)
         prepared = {}
+        engine_changed, engine_cache = set(), {}
         for step in steps:
             if step["step"] == "recorded_call":
                 function, kwargs = _recorded_callable(step)
-                dependencies = step["dependencies"]
+                dependencies, _ = split_dependencies(step)
                 for path, digest in dependencies.items():
                     if str(Path(path).resolve()) not in outputs:
                         if not Path(path).is_file() or content_hash(path) != digest:
                             raise ValueError(f"Recall dependency changed or missing: {path}")
+                engine_changed.update(_changed_engine(step, engine_cache))
             else:
-                if step["step"] not in _STEP_TO_CALLABLE:
-                    raise ValueError(f"Unsupported recall step: {step['step']}")
-                if not allow_legacy:
-                    raise ValueError("Legacy reports lack verified recall metadata; regenerate operations or explicitly use --allow-legacy for best-effort replay")
                 function, kwargs = _build_inproc(step, session_json)
                 inspect.signature(function).bind(**kwargs)
                 dependencies = {str(value): None for key, value in kwargs.items()
@@ -725,6 +781,11 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
             ordered.append(step)
         for step in steps:
             visit(step)
+        if engine_changed:
+            print("WARNING: tool code or unused settings changed since recording (engine, not data): "
+                  + ", ".join(sorted(Path(path).name for path in engine_changed))
+                  + ". Replay is not verified as bit-identical; a differing output is "
+                  "reported and the recorded audio is kept.", file=sys.stderr)
         for step in ordered:
             print(f"{step['step']} -> {step['output']}")
             if dry_run:
@@ -744,7 +805,8 @@ def replay(chain_path: Path, dry_run: bool, stem_filter: str | None,
                 raise ValueError(f"Processing did not create {step['output']}")
         if not dry_run and stem_filter is None:
             _lazy_import("render_mix").render_mix(mix_config, render_stems=True)
-        print(f"Replay {'validated' if dry_run else 'completed'}: {len(ordered)} operations")
+        engine_note = " (engine changed: outputs unverified)" if dry_run and engine_changed else ""
+        print(f"Replay {'validated' if dry_run else 'completed'}: {len(ordered)} operations{engine_note}")
         return 0
     except (Exception, SystemExit) as exc:
         print(f"Replay stopped: {exc}", file=sys.stderr)
@@ -758,7 +820,8 @@ def main() -> None:
     parser.add_argument("chain", type=Path, nargs="?",
                         help="Path to mix_chain.json (or the session directory containing it)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Print every command without executing")
+                        help="Validate recorded calls, data hashes and mix routing and print "
+                             "each operation in replay order; writes nothing")
     parser.add_argument("--stem", type=str, default=None,
                         help="Replay only this single stem (for debugging)")
     parser.add_argument("--subprocess", action="store_true",
@@ -769,7 +832,11 @@ def main() -> None:
     parser.add_argument("--operation", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.operation:
-        _run_recorded(json.loads(args.operation))
+        try:
+            _run_recorded(json.loads(args.operation))
+        except ValueError as exc:
+            print(f"Replay stopped: {exc}", file=sys.stderr)
+            sys.exit(1)
         return
     if args.chain is None:
         parser.error("chain is required")

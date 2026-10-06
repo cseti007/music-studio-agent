@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from scipy.signal import welch
+from scipy.signal import butter, sosfilt, welch
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
@@ -40,7 +40,8 @@ from _dsp import worst_channel_true_peak_dbfs  # noqa: E402
 _TARGETS = {
     "lufs_tolerance_db": 0.5,         # within ±0.5 of target = green; ±1.5 = yellow; else red
     "true_peak_ceiling_dbtp": -1.0,   # green if <= ceiling
-    "lra_min_lu": 6.0,                # green if >= 6 LU; yellow 4-6; red < 4
+    # LRA has no delivery standard (">= 6 LU premaster" targets are folklore):
+    # it is reported as information only and never contributes a verdict.
     "ms_width_min": 0.10,             # green if >= 0.10; yellow 0.05-0.10; red < 0.05
     "ms_width_max": 0.50,             # green if <= 0.50; yellow 0.50-0.65; red > 0.65
     "mono_corr_low_freq_min": 0.6,    # below 100 Hz, near-mono is needed
@@ -56,6 +57,7 @@ _TARGETS = {
 GREEN = "[OK]"
 YELLOW = "[!] "
 RED = "[X] "
+INFO = "[i] "  # advisory measurement, no pass/fail meaning
 
 
 def _verdict(green: bool, yellow: bool) -> str:
@@ -91,7 +93,6 @@ def _stereo_metrics(data: np.ndarray, sr: int) -> dict:
 
     # Low-frequency correlation (below 200 Hz) — bass should be near-mono for
     # both phase coherence and mono compatibility on club PA / phone.
-    from scipy.signal import butter, sosfilt
     sos = butter(4, 200.0 / (sr / 2.0), btype="low", output="sos")
     L_low = sosfilt(sos, L)
     R_low = sosfilt(sos, R)
@@ -128,7 +129,6 @@ def _detect_pumping_quick(signal: np.ndarray, sr: int) -> dict:
         for i in range(n_frames)
     ])
     env_sr = sr / hop
-    from scipy.signal import butter, sosfilt
     sos_hp = butter(2, 0.5 / (env_sr / 2.0), btype="high", output="sos")
     env_hp = sosfilt(sos_hp, env)
 
@@ -195,12 +195,13 @@ def _third_octave_psd_db(mono: np.ndarray, sr: int) -> dict[float, float]:
 def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
                       lufs_target: float, tp_ceiling: float,
                       stage_targets: dict | None = None) -> dict:
-    """Stage-aware LUFS / true-peak / LRA verdict.
+    """Stage-aware LUFS / true-peak verdicts; LRA is reported as advisory.
 
     `stage_targets` (from `_STAGE_TARGETS`) controls the tolerance bands —
-    premaster handoff allows ±2 LUFS / ±2 dB peak slop, master is tighter.
-    Falls back to the historical mastering numbers (±0.5 LU green / ±1.5
-    yellow / TP within 1 dB of ceiling) if `stage_targets` is None.
+    premaster handoff allows ±2 LUFS slop, master is tighter. Falls back to
+    the historical mastering numbers (±0.5 LU green / ±1.5 yellow / TP
+    within 1 dB of ceiling) if `stage_targets` is None. A sample peak above
+    0 dBFS is always red: integer PCM delivery would clip it.
     """
     if stage_targets is None:
         stage_targets = {
@@ -222,6 +223,7 @@ def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
     # panned full-scale transient is ~6 dB quieter after .mean() and would let
     # an inter-sample-clipping mix pass the master gate as green.
     tp = worst_channel_true_peak_dbfs(data)
+    sample_peak = float(20.0 * np.log10(max(float(np.max(np.abs(data))), 1e-12)))
 
     # Verdicts
     lufs_err = abs(lufs - lufs_target)
@@ -231,7 +233,8 @@ def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
     )
     tp_yellow_band = stage_targets["tp_yellow_band_db"]
     tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + tp_yellow_band)
-    lra_v = _verdict(green=lra >= _TARGETS["lra_min_lu"], yellow=lra >= 4.0)
+    if sample_peak > 0.0:
+        tp_v = RED
 
     return {
         "integrated_lufs": round(lufs, 2),
@@ -241,8 +244,9 @@ def _loudness_section(mono: np.ndarray, data: np.ndarray, sr: int,
         "true_peak_dbtp": round(tp, 2),
         "true_peak_ceiling": tp_ceiling,
         "true_peak_verdict": tp_v,
+        "sample_peak_dbfs": round(sample_peak, 2),
         "lra_lu": round(lra, 2),
-        "lra_verdict": lra_v,
+        "lra_verdict": INFO,
     }
 
 
@@ -381,7 +385,7 @@ def _render_text(report: dict) -> str:
     lines.append(f"  {L['true_peak_verdict']} True peak        : {L['true_peak_dbtp']:+.2f} dBTP  "
                  f"(ceiling {L['true_peak_ceiling']})")
     lines.append(f"  {L['lra_verdict']} LRA              : {L['lra_lu']:.1f} LU  "
-                 f"(style suggestion >= {_TARGETS['lra_min_lu']} LU; not proof of compression)")
+                 "(advisory only; no LRA value is a delivery standard)")
 
     S = report["stereo"]
     lines.append("")
@@ -478,13 +482,15 @@ def _detect_mix_stage(mix_path: Path) -> str:
 
 
 # Project suggestions for diagnostics, not universal premaster requirements.
+# Peak gate (both stages): green at or below -1 dBTP, yellow up to 0 dBTP,
+# red above 0 dBTP or a sample peak above 0 dBFS.
 _STAGE_TARGETS = {
     "premaster": {
         "lufs_target": -18.0,
         "lufs_tolerance_green": 2.0,
         "lufs_tolerance_yellow": 4.0,
-        "tp_ceiling_dbtp": 0.0,
-        "tp_yellow_band_db": 2.0,
+        "tp_ceiling_dbtp": -1.0,
+        "tp_yellow_band_db": 1.0,
     },
     "master": {
         "lufs_target": -14.0,
@@ -577,8 +583,8 @@ def main() -> None:
                         help="Override LUFS target. Default: autodetected from "
                              "mix_report.json (premaster -> -18, master -> -14).")
     parser.add_argument("--tp-ceiling", type=float, default=None,
-                        help="Override true peak ceiling in dBTP. Default: "
-                             "autodetected (premaster -> 0, master -> -1.0).")
+                        help="Override the green true peak ceiling in dBTP (yellow up to "
+                             "1 dB above). Default: -1.0 for premaster and master.")
     parser.add_argument("--target-stage", choices=["premaster", "master"], default=None,
                         help="Force the stage gates (skips autodetect from "
                              "mix_report.json). 'premaster' = pre-mastering "

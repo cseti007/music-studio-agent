@@ -4,8 +4,8 @@
   "description": "Classic rock (60s-80s analogue aesthetic). More midrange, less sub, less air than modern rock. Greater dynamic range from less aggressive limiting. Vintage tonal character.",
   "sources": [
     "iZotope Tonal Balance Control 3 reference curve naming (Classic Rock)",
-    "Streaming mastering guides 2025: dynamic rock target -12 to -14 LUFS",
-    "Calibrated: modern_rock baseline + classic-rock spectral shifts (midrange +1.5, sub -2, air -1.5)"
+    "Unattributed streaming mastering guidance (2025), used as a project preference: dynamic rock target -12 to -14 LUFS",
+    "Project preference derived from the modern_rock profile + classic-rock spectral shifts (midrange +1.5, sub -2, air -1.5) (assumed, not measured)"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS at integrated_target LUFS. Derived from modern_rock baseline with documented classic-rock spectral biases.",
   "lufs": {

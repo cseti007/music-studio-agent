@@ -1,7 +1,9 @@
 """Apply dynamic range compression to an assembled stem.
 
 Uses pedalboard (Spotify/JUCE) for sample-accurate compression — same engine
-as professional DAW plugins.
+as professional DAW plugins. Detection is stereo-linked: one gain curve,
+driven by the louder channel, is applied to all channels so the image does
+not shift when only one side is loud.
 
 Parameters:
   threshold  dB level where compression starts (e.g. -20)
@@ -16,7 +18,8 @@ Parallel compression (New York style): set mix < 1.0.
   Preserves original transients while adding body/sustain from the compressed copy.
 
 Sidechain compression: use --sidechain to drive gain reduction from an external signal.
-  --sidechain  path to reference WAV (e.g. kick driving bass compression)
+  --sidechain  path to reference WAV (e.g. kick driving bass compression);
+               must match the input's sample rate and frame count
   --sc-hp      high-pass the sidechain at this Hz (isolates kick sub, default: none)
   --sc-lp      low-pass the sidechain at this Hz (default: none)
   Example: compress bass, sidechain from kick, HP at 60 Hz to isolate beater click.
@@ -44,8 +47,11 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from pedalboard import Compressor, Gain, Pedalboard
+from pedalboard import Compressor
 from scipy.signal import butter, sosfilt
+
+from _dsp import linked_gain
+from _recall import record_operation
 
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
@@ -158,8 +164,6 @@ def _sidechain_gain_envelope(
 # Core processing
 # ---------------------------------------------------------------------------
 
-from _recall import record_operation
-
 
 @record_operation("apply_compression")
 def apply_compression(
@@ -188,20 +192,12 @@ def apply_compression(
         # --- Custom sidechain path ---
         sc_data, sc_sr = sf.read(str(sidechain_path), always_2d=True)
 
-        # Resample sidechain if sample rates differ (rare but safe)
-        if sc_sr != sr:
+        if sc_sr != sr or sc_data.shape[0] != data.shape[0]:
             raise ValueError(
-                f"Sidechain sample rate {sc_sr} Hz differs from main {sr} Hz — "
-                "resample before using as sidechain."
+                f"Sidechain must have matching sample rate and frame count "
+                f"(main {sr} Hz / {data.shape[0]} frames, sidechain "
+                f"{sc_sr} Hz / {sc_data.shape[0]} frames)"
             )
-
-        # Trim or zero-pad sidechain to match main signal length
-        n_main = data.shape[0]
-        if sc_data.shape[0] > n_main:
-            sc_data = sc_data[:n_main]
-        elif sc_data.shape[0] < n_main:
-            pad = n_main - sc_data.shape[0]
-            sc_data = np.pad(sc_data, ((0, pad), (0, 0)))
 
         # Sum to mono, apply SC filters
         sc_mono = sc_data.mean(axis=1)
@@ -230,17 +226,14 @@ def apply_compression(
         # --- Pedalboard path (no sidechain) ---
         if makeup_db is None:
             makeup_db = _auto_makeup_db(threshold_db, ratio)
-        audio_f32 = data.T.astype(np.float32)
-        board = Pedalboard([
-            Compressor(
-                threshold_db=float(threshold_db),
-                ratio=float(ratio),
-                attack_ms=float(attack_ms),
-                release_ms=float(release_ms),
-            ),
-            Gain(gain_db=float(makeup_db)),
-        ])
-        compressed = board(audio_f32, sr).T.astype(np.float64)
+        comp = Compressor(
+            threshold_db=float(threshold_db),
+            ratio=float(ratio),
+            attack_ms=float(attack_ms),
+            release_ms=float(release_ms),
+        )
+        gain = linked_gain(data.T, comp, sr) * 10.0 ** (float(makeup_db) / 20.0)
+        compressed = data * gain[:, None]
 
     # Parallel blend: dry + compressed
     if mix < 0.999:
@@ -248,16 +241,11 @@ def apply_compression(
     else:
         output_data = compressed
 
-    # Clip guard
+    # Float output keeps overs; report them instead of rescaling the file.
     peak_linear = float(np.max(np.abs(output_data)))
-    clipped = peak_linear > 1.0
-    if clipped:
-        print(
-            f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS — "
-            "scaling down to prevent clipping",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak_linear
+    if peak_linear > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_comp.wav")
@@ -280,9 +268,9 @@ def apply_compression(
         },
         "sidechain": sidechain_info,
         "input_peak_dbfs": round(in_peak, 1),
-        "output_peak_dbfs": round(out_peak, 1),
+        "output_peak_dbfs": round(out_peak, 2),
+        "output_exceeds_0dbfs": peak_linear > 1.0,
         "net_level_change_db": round(out_peak - in_peak, 1),
-        "clipping_prevented": clipped,
         "sample_rate": sr,
     }
     (output_dir / "comp_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -307,8 +295,8 @@ def main() -> None:
     parser.add_argument("--release",   type=float, metavar="MS", help="Release time in ms")
     parser.add_argument("--makeup",    type=float, metavar="DB", help="Makeup gain dB (default: auto)")
     parser.add_argument(
-        "--mix", type=float, default=1.0, metavar="0-1",
-        help="Wet/dry blend: 1.0=serial, <1.0=parallel (default 1.0)",
+        "--mix", type=float, default=None, metavar="0-1",
+        help="Wet/dry blend: 1.0=serial, <1.0=parallel (default: preset or 1.0)",
     )
     parser.add_argument("--preset", metavar="NAME", help="Compression preset (see --list-presets)")
     parser.add_argument("--list-presets", action="store_true", help="List compression presets and exit")
@@ -359,7 +347,7 @@ def main() -> None:
         if attack    is None: attack    = s["attack_ms"]
         if release   is None: release   = s["release_ms"]
         if makeup    is None: makeup    = s.get("makeup_db")
-        if mix == 1.0 and "mix" in s: mix = s["mix"]
+        if mix       is None: mix       = s.get("mix")
         print(f"Loaded preset {args.preset!r}: "
               f"thr={threshold} ratio={ratio}:1 atk={attack}ms rel={release}ms "
               f"makeup={makeup} mix={mix}", file=sys.stderr)
@@ -368,6 +356,9 @@ def main() -> None:
                       ("--attack", attack), ("--release", release)]:
         if val is None:
             parser.error(f"{name} is required (or use --preset)")
+
+    if mix is None:
+        mix = 1.0
 
     if args.sidechain and not args.sidechain.exists():
         print(json.dumps({"error": f"Sidechain file not found: {args.sidechain}"}), file=sys.stderr)

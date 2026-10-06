@@ -2,6 +2,11 @@
 
 Evidence records are attestations, not authenticated proof of listening. Agents
 must copy actual feedback and its source; this tool cannot infer or invent it.
+
+Every record's artifact_hash is the content hash of the reviewed export (the
+WAV given here). A codec_roundtrip record also carries the WAV's hash: it
+attests that the encoded/decoded version of this exact WAV was auditioned.
+--bit-depth 32 accepts 32-bit integer PCM or 32-bit float.
 """
 
 from __future__ import annotations
@@ -78,7 +83,8 @@ def review_delivery(audio: Path, output_dir: Path, evidence: list[dict] | None =
     if sample_rate is not None:
         checks["sample_rate"] = sr == sample_rate
     if bit_depth is not None:
-        checks["bit_depth"] = info.subtype == f"PCM_{bit_depth}"
+        accepted = {f"PCM_{bit_depth}"} | ({"FLOAT"} if bit_depth == 32 else set())
+        checks["bit_depth"] = info.subtype in accepted
     if target_lufs is not None:
         checks["contractual_loudness"] = bool(np.isfinite(loudness) and abs(loudness - target_lufs) <= lufs_tolerance)
     artifact_hash = content_hash(audio)
@@ -111,10 +117,12 @@ def main() -> None:
     parser.add_argument("--evidence", type=Path, help="JSON list of actual human feedback, oldest first")
     parser.add_argument("--tp-ceiling", type=float)
     parser.add_argument("--sample-rate", type=int)
-    parser.add_argument("--bit-depth", type=int, choices=(16, 24, 32))
+    parser.add_argument("--bit-depth", type=int, choices=(16, 24, 32),
+                        help="Required bit depth; 32 accepts PCM_32 or 32-bit float")
     parser.add_argument("--target-lufs", type=float, help="Contractual requirement only, not a streaming preference")
     parser.add_argument("--lufs-tolerance", type=float, default=0.5)
-    parser.add_argument("--require-codec-review", action="store_true")
+    parser.add_argument("--require-codec-review", action="store_true",
+                        help="Also require a codec_roundtrip approval recorded against this WAV's hash")
     args = vars(parser.parse_args())
     if args["evidence"] is not None:
         args["evidence"] = json.loads(args["evidence"].read_text(encoding="utf-8"))

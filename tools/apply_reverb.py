@@ -12,6 +12,19 @@ Both engines share the same pre-delay, HP/LP-on-return, gate, and wet/dry
 plumbing. With --ir, the algorithmic parameters (room_size, damping, width)
 are ignored; the IR defines the tail.
 
+Wet-level calibration: pedalboard's Convolution normalizes every IR to about
+-18 dB wet gain on white noise, while Freeverb's wet gain grows with room_size
+(about +1 to +7 dB across the presets). Preset wet values were tuned on
+Freeverb, so the convolution return is scaled to the wet energy Freeverb
+produces at the same room_size/damping/width and return HP/LP, measured on a
+fixed white-noise reference (reported as convolution_makeup_db). With --ir
+those algorithmic parameters therefore set only this level reference; the IR
+defines the tail.
+
+Output is 32-bit float: peaks above 0 dBFS are kept and reported
+(output_exceeds_0dbfs), never rescaled. A --sidechain file must match the
+input's sample rate and frame count.
+
 Two output modes:
   Insert (default): dry + wet signal mixed to output. Use for inline per-track reverb.
   Send (--send):    wet only output. Use to generate a reverb return bus that
@@ -39,6 +52,8 @@ import numpy as np
 import pedalboard
 import soundfile as sf
 from scipy.signal import butter, sosfilt
+
+from _recall import record_operation
 
 
 PRESETS: dict[str, dict] = {
@@ -155,6 +170,30 @@ PRESETS: dict[str, dict] = {
 }
 
 
+def _filter_return(data: np.ndarray, sr: int, hp_hz: float | None, lp_hz: float | None) -> np.ndarray:
+    if hp_hz is not None and hp_hz > 0:
+        data = _highpass(data, sr, hp_hz)
+    if lp_hz is not None and lp_hz > 0:
+        data = _lowpass(data, sr, lp_hz)
+    return data
+
+
+def _convolution_makeup_db(ir_path: Path, sr: int, room_size: float, damping: float,
+                           width: float, hp_hz: float | None, lp_hz: float | None) -> float:
+    """Gain matching the convolution return to Freeverb's wet energy at the
+    same settings, on a fixed 3 s white-noise reference (see module docstring)."""
+    noise = (0.1 * np.random.default_rng(0).standard_normal((2, 3 * sr))).astype(np.float32)
+
+    def energy(engine) -> float:
+        wet = _filter_return(engine(noise, sr).T.astype(np.float64), sr, hp_hz, lp_hz)
+        return float(np.mean(wet[sr:] ** 2))
+
+    freeverb = pedalboard.Reverb(room_size=room_size, damping=damping, wet_level=1.0,
+                                 dry_level=0.0, width=width)
+    convolution = pedalboard.Convolution(impulse_response_filename=str(ir_path), mix=1.0)
+    return 10.0 * np.log10(energy(freeverb) / max(energy(convolution), 1e-20))
+
+
 def _gate(data: np.ndarray, sr: int, hold_ms: float, release_ms: float, threshold: float = 0.05) -> np.ndarray:
     """Simple noise gate for gated reverb effect.
 
@@ -259,7 +298,8 @@ def _sidechain_envelope(sc_mono: np.ndarray, sr: int,
         if env > threshold_lin:
             # Map (env_db - threshold) onto a 0..1 ducking amount, capped
             over_db = 20.0 * np.log10(max(env, 1e-10)) - threshold_db
-            # Light static: 1:4 ratio → 0.25 dB ducking per dB over threshold
+            # Light static curve: 0.25 dB of ducking per dB over threshold
+            # (about 1.33:1), floored at depth_db
             ducked = max(depth_lin, 10.0 ** ((-over_db * 0.25) / 20.0))
             gain_blocks[i] = ducked
         # else: leave at 1.0 (no ducking)
@@ -267,9 +307,6 @@ def _sidechain_envelope(sc_mono: np.ndarray, sr: int,
     # Interpolate to sample resolution
     block_centers = np.arange(n_blocks) * block_samples + block_samples // 2
     return np.interp(np.arange(len(sc_mono)), block_centers, gain_blocks).astype(np.float64)
-
-
-from _recall import record_operation
 
 
 @record_operation("apply_reverb")
@@ -328,6 +365,10 @@ def apply_reverb(
             )
         ])
     reverb_out = board(delayed.T.astype(np.float32), sr).T.astype(np.float64)
+    makeup_db = None
+    if ir_path is not None:
+        makeup_db = _convolution_makeup_db(ir_path, sr, room_size, damping, width, hp_hz, lp_hz)
+        reverb_out *= 10.0 ** (makeup_db / 20.0)
 
     # Keep the leading delay. Removing it would cancel the requested pre-delay.
     # Match length to the dry timeline, truncating only the end.
@@ -337,10 +378,7 @@ def apply_reverb(
         reverb_out = np.concatenate([reverb_out, pad], axis=0)
 
     # Apply HP/LP to reverb return (remove low mud and harshness)
-    if hp_hz is not None and hp_hz > 0:
-        reverb_out = _highpass(reverb_out, sr, hp_hz)
-    if lp_hz is not None and lp_hz > 0:
-        reverb_out = _lowpass(reverb_out, sr, lp_hz)
+    reverb_out = _filter_return(reverb_out, sr, hp_hz, lp_hz)
 
     # Apply gate to reverb tail (gated reverb effect)
     if gate_hold_ms is not None and gate_release_ms is not None:
@@ -353,16 +391,12 @@ def apply_reverb(
     sidechain_info: dict | None = None
     if sidechain_path is not None:
         sc_data, sc_sr = sf.read(str(sidechain_path), always_2d=True)
-        if sc_sr != sr:
+        if sc_sr != sr or sc_data.shape[0] != reverb_out.shape[0]:
             raise ValueError(
-                f"Sidechain sample rate {sc_sr} Hz differs from main {sr} Hz"
+                f"Sidechain must have matching sample rate and frame count "
+                f"(main {sr} Hz / {reverb_out.shape[0]} frames, sidechain "
+                f"{sc_sr} Hz / {sc_data.shape[0]} frames)"
             )
-        # Trim/pad to match
-        n_main = reverb_out.shape[0]
-        if sc_data.shape[0] > n_main:
-            sc_data = sc_data[:n_main]
-        elif sc_data.shape[0] < n_main:
-            sc_data = np.pad(sc_data, ((0, n_main - sc_data.shape[0]), (0, 0)))
         sc_mono = sc_data.mean(axis=1)
         # Optional band-pass on the sidechain (isolate kick beater range)
         if sc_hp_hz and sc_hp_hz > 0:
@@ -394,14 +428,11 @@ def apply_reverb(
     if was_mono:
         output = output.mean(axis=1, keepdims=True)
 
-    # Prevent clipping
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output)))
     if peak > 1.0:
-        print(
-            f"WARNING: clipping by {20*np.log10(peak):.1f} dB — reducing gain",
-            file=sys.stderr,
-        )
-        output = output / peak
+        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     mode_tag = "_send" if send_mode else ""
@@ -426,6 +457,9 @@ def apply_reverb(
         "gate_hold_ms": gate_hold_ms,
         "gate_release_ms": gate_release_ms,
         "sidechain": sidechain_info,
+        "convolution_makeup_db": None if makeup_db is None else round(makeup_db, 2),
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
     }
 
@@ -441,7 +475,7 @@ def main() -> None:
         epilog="Available presets: " + ", ".join(PRESETS),
     )
     parser.add_argument("input", type=Path, nargs="?", help="Input WAV file")
-    parser.add_argument("--output-dir", type=Path, default=Path("output"), help="Output directory")
+    parser.add_argument("--output-dir", type=Path, help="Output directory (required unless listing presets)")
     parser.add_argument("--preset", choices=list(PRESETS), help="Reverb preset")
     parser.add_argument("--send", action="store_true", help="Send mode: output wet only (no dry signal)")
     parser.add_argument("--pre-delay", type=float, metavar="MS", help="Pre-delay in milliseconds")
@@ -457,7 +491,8 @@ def main() -> None:
     parser.add_argument(
         "--ir", type=Path, metavar="WAV",
         help="Impulse response WAV — switches engine to convolution. "
-             "Algorithmic params (room_size, damping, width) are ignored when set.",
+             "Algorithmic params (room_size, damping, width) then only set the "
+             "wet-level reference (Freeverb-matched), not the tail.",
     )
     parser.add_argument(
         "--ir-preset", metavar="NAME",
@@ -514,6 +549,8 @@ def main() -> None:
 
     if args.input is None:
         parser.error("input file is required")
+    if args.output_dir is None:
+        parser.error("--output-dir is required")
     if not args.input.exists():
         print(json.dumps({"error": f"Not found: {args.input}"}), file=sys.stderr)
         sys.exit(1)

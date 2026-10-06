@@ -48,6 +48,8 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import butter, iirnotch, sosfilt, sosfiltfilt, tf2sos
 
+from _recall import record_operation
+
 _PRESETS_DIR = Path(__file__).parent / "presets"
 
 
@@ -173,15 +175,29 @@ def filter_signal(data: np.ndarray, sr: int, spec: dict, phase: str = "minimum",
 # Preset loader
 # ---------------------------------------------------------------------------
 
+def _eq_presets() -> dict[str, dict]:
+    """Presets that define EQ filters (comp_/gate_/sat_ presets belong to other tools)."""
+    presets = {}
+    for path in sorted(_PRESETS_DIR.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("filters"):
+            presets[path.stem] = data
+    return presets
+
+
 def _load_preset(name: str) -> list[dict]:
     path = _PRESETS_DIR / f"{name}.json"
     if not path.exists():
-        available = [p.stem for p in sorted(_PRESETS_DIR.glob("*.json"))]
         raise FileNotFoundError(
-            f"Preset {name!r} not found. Available: {', '.join(available)}"
+            f"Preset {name!r} not found. Available EQ presets: {', '.join(_eq_presets())}"
         )
     data = json.loads(path.read_text(encoding="utf-8"))
     filters = data.get("filters", [])
+    if not filters:
+        raise ValueError(
+            f"Preset {name!r} has no EQ filters (it belongs to another tool). "
+            f"Available EQ presets: {', '.join(_eq_presets())}"
+        )
     for f in filters:
         f["_preset"] = name
     return filters
@@ -191,10 +207,8 @@ def list_presets() -> None:
     if not _PRESETS_DIR.exists():
         print("No presets directory found.")
         return
-    for path in sorted(_PRESETS_DIR.glob("*.json")):
-        data = json.loads(path.read_text(encoding="utf-8"))
-        desc = data.get("description", "")
-        print(f"  {path.stem:<28}  {desc}")
+    for name, data in _eq_presets().items():
+        print(f"  {name:<28}  {data.get('description', '')}")
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +235,6 @@ def _filters_from_analysis(analysis_path: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Core processing
 # ---------------------------------------------------------------------------
-
-from _recall import record_operation
 
 
 @record_operation("apply_eq")
@@ -252,15 +264,11 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str
 
     output_data = np.stack(result_channels, axis=1)
 
+    # Float output keeps overs; report them instead of rescaling the file.
     peak_linear = float(np.max(np.abs(output_data)))
-    clipped = peak_linear > 1.0
-    if clipped:
-        print(
-            f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS — "
-            "scaling down to prevent clipping",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak_linear
+    if peak_linear > 1.0:
+        print(f"WARNING: output peak {20 * np.log10(peak_linear):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_eq.wav")
@@ -276,7 +284,8 @@ def apply_eq(input_path: Path, output_dir: Path, filters: list[dict], phase: str
         "filter_notes": [f["_auto"] for f in filters if "_auto" in f] or None,
         "preset_used": next((f["_preset"] for f in filters if "_preset" in f), None),
         "sample_rate": sr,
-        "clipping_prevented": clipped,
+        "output_peak_dbfs": round(20 * np.log10(max(peak_linear, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak_linear > 1.0,
     }
     (output_dir / "eq_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
@@ -338,7 +347,7 @@ def main() -> None:
             for f in preset_filters:
                 print(f"  {f}", file=sys.stderr)
             filters.extend(preset_filters)
-        except FileNotFoundError as e:
+        except (FileNotFoundError, ValueError) as e:
             print(json.dumps({"error": str(e)}), file=sys.stderr)
             sys.exit(1)
 

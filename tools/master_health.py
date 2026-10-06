@@ -172,7 +172,7 @@ def _punch_index(mono: np.ndarray, sr: int) -> dict:
 # Oversampled waveform true peak (no codec simulation)
 # ---------------------------------------------------------------------------
 
-def _oversampled_true_peak(stereo: np.ndarray, sr: int) -> float:
+def _oversampled_true_peak(stereo: np.ndarray) -> float:
     """Measure 8x waveform true peak. This does not simulate a codec."""
     return worst_channel_true_peak_dbfs(stereo, oversample=8)
 
@@ -185,7 +185,10 @@ def _compression_history(stereo: np.ndarray, sr: int, meter: pyln.Meter) -> dict
     """Try to tell whether the input has already been compressed/limited.
 
     BS.1770 measurements use the stereo signal (channel-weighted); crest is
-    computed on the loudest channel since clipping is per-channel.
+    computed on the loudest channel since clipping is per-channel. The peak
+    gate (> -2.5 dBFS) sits below common delivery ceilings (-1/-2 dBTP
+    masters peak around -1.1 to -2.3 dBFS) but above a -3 dBFS premaster
+    handoff, so limited masters can be flagged. Advisory only.
     """
     try:
         lra = float(meter.loudness_range(stereo.T))
@@ -203,13 +206,13 @@ def _compression_history(stereo: np.ndarray, sr: int, meter: pyln.Meter) -> dict
     crest = min(crests) if crests else 0.0
     peak_dbfs = max(peak_db_per_ch) if peak_db_per_ch else -120.0
 
-    likely_mastered = bool(crest < 10.0 and peak_dbfs > -0.5)
+    likely_mastered = bool(crest < 10.0 and peak_dbfs > -2.5)
     reasons = []
 
     if crest < 10.0:
         reasons.append(f"crest {crest:.1f} dB < 10")
-    if peak_dbfs > -0.5:
-        reasons.append(f"sample peak {peak_dbfs:.1f} dBFS > -0.5")
+    if peak_dbfs > -2.5:
+        reasons.append(f"sample peak {peak_dbfs:.1f} dBFS > -2.5")
 
     return {
         "lra_lu": round(lra, 1),
@@ -299,8 +302,7 @@ def _reference_deck_delta(mono: np.ndarray, sr: int, refs: list[Path]) -> dict:
 # Section verdicts
 # ---------------------------------------------------------------------------
 
-def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
-                         format_preset: dict | None) -> dict:
+def _conformance_section(stereo: np.ndarray, sr: int, format_preset: dict | None) -> dict:
     meter = pyln.Meter(sr)
     # BS.1770: stereo LUFS measured on the (N, 2) signal — channel-weighted
     try:
@@ -312,7 +314,7 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
     except Exception:
         lra = 0.0
     tp = worst_channel_true_peak_dbfs(stereo)
-    tp_8x = _oversampled_true_peak(stereo, sr)
+    tp_8x = _oversampled_true_peak(stereo)
     sample_peak = 20.0 * np.log10(max(np.max(np.abs(stereo)), 1e-12))
 
     if format_preset is None:
@@ -330,8 +332,9 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
 
     target_lufs = format_preset["target_lufs"]
     tp_ceiling = format_preset["tp_ceiling_dbtp"]
-    lufs_err = abs(lufs - target_lufs)
-    lufs_v = _verdict(green=lufs_err <= 0.5, yellow=lufs_err <= 1.5)
+    # Formats without a loudness target (vinyl_pre) are checked on peaks only.
+    lufs_err = None if target_lufs is None else abs(lufs - target_lufs)
+    lufs_v = GREEN if lufs_err is None else _verdict(green=lufs_err <= 0.5, yellow=lufs_err <= 1.5)
 
     skip_limiter = format_preset.get("skip_limiter", False)
     tp_v = _verdict(green=tp <= tp_ceiling, yellow=tp <= tp_ceiling + 0.1)
@@ -353,7 +356,7 @@ def _conformance_section(mono: np.ndarray, stereo: np.ndarray, sr: int,
         "format_tp_ceiling_dbtp": tp_ceiling,
         "format_skip_limiter": skip_limiter,
         "integrated_lufs": round(lufs, 2),
-        "lufs_delta": round(lufs - target_lufs, 2),
+        "lufs_delta": None if target_lufs is None else round(lufs - target_lufs, 2),
         "lufs_verdict": lufs_v,
         "lra_lu": round(lra, 2),
         "true_peak_dbtp": round(tp, 2),
@@ -436,17 +439,19 @@ def _render_text(report: dict) -> str:
     C = report["conformance"]
     lines.append("FORMAT CONFORMANCE")
     lines.append("-" * 60)
-    if C.get("format_target_lufs") is None:
+    if report.get("format") is None:
         lines.append("  (no format target supplied — measurements only)")
         lines.append(f"      LUFS                : {C['integrated_lufs']:+.2f}")
         lines.append(f"      LRA                 : {C['lra_lu']:.2f} LU")
         lines.append(f"      True peak (4x)      : {C['true_peak_dbtp']:+.2f} dBTP")
         lines.append(f"      True peak (8x)  : {C['true_peak_8x_dbtp']:+.2f} dBTP")
     else:
-        lines.append(f"  Target: {report['format']}  ({C['format_target_lufs']} LUFS, "
+        target = "no LUFS target" if C["format_target_lufs"] is None else f"{C['format_target_lufs']} LUFS"
+        delta = "n/a" if C["lufs_delta"] is None else f"{C['lufs_delta']:+.2f}"
+        lines.append(f"  Target: {report['format']}  ({target}, "
                      f"{C['format_tp_ceiling_dbtp']} dBTP ceiling)")
         lines.append(f"  {C['lufs_verdict']} Integrated LUFS    : {C['integrated_lufs']:+.2f}  "
-                     f"(delta {C['lufs_delta']:+.2f})")
+                     f"(delta {delta})")
         lines.append(f"  {C['true_peak_verdict']} True peak          : {C['true_peak_dbtp']:+.2f} dBTP")
         lines.append(f"  {C['true_peak_8x_verdict']} True peak (8x) : {C['true_peak_8x_dbtp']:+.2f} dBTP  (8x oversampled)")
         if C.get("true_peak_note"):
@@ -527,7 +532,7 @@ def _render_text(report: dict) -> str:
 # Main
 # ---------------------------------------------------------------------------
 
-_HEALTH_CACHE_VERSION = 3
+_HEALTH_CACHE_VERSION = 4
 
 
 def _health_cache_signature(master_path: Path, format_name: str | None,
@@ -585,7 +590,7 @@ def master_health(master_path: Path, output_dir: Path,
     fmt = FORMAT_PRESETS.get(format_name) if format_name else None
 
     print("  [1/5] Format conformance...", flush=True)
-    conformance = _conformance_section(mono, stereo, sr, fmt)
+    conformance = _conformance_section(stereo, sr, fmt)
     info = sf.info(str(master_path))
     format_ok = fmt is None or (sr == fmt.get("sample_rate", sr)
                                and info.subtype == f"PCM_{fmt['bit_depth']}")

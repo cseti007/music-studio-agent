@@ -8,8 +8,12 @@ even on speakers that physically cannot reproduce sub frequencies.
 
 DSP chain:
   1. Bandpass the input around the sub region (40-80 Hz default)
-  2. Push it through tanh saturation to generate harmonics
-  3. Bandpass the harmonics back into the 80-200 Hz region
+  2. Take its analytic signal (envelope + phase) and synthesize the 2nd and
+     3rd harmonic directly (cos(2*phase), 0.5*cos(3*phase)). The fundamental
+     itself is not passed on. The harmonic level follows the fundamental's
+     envelope through tanh(drive * env) / drive: linear for quiet notes,
+     compressed for loud ones (higher drive = more compression).
+  3. Bandpass the harmonics into the 80-200 Hz region
   4. Mix the harmonics into the original signal at low level (10-25%)
 
 Relevance check (the tool refuses to do anything useful otherwise):
@@ -39,7 +43,9 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, hilbert, sosfilt
+
+from _recall import record_operation
 
 
 PRESETS: dict[str, dict] = {
@@ -147,7 +153,14 @@ def _relevance_check(
 # Core processing
 # ---------------------------------------------------------------------------
 
-from _recall import record_operation
+def _harmonics(signal: np.ndarray, sr: int, fundamental_lo: float, fundamental_hi: float,
+               harmonic_lo: float, harmonic_hi: float, drive: float) -> np.ndarray:
+    """2nd + 3rd harmonics of the fundamental band, without the fundamental."""
+    analytic = hilbert(_band_filter(signal, sr, fundamental_lo, fundamental_hi))
+    phase = np.angle(analytic)
+    level = np.tanh(np.abs(analytic) * drive) / max(drive, 1e-6)
+    harmonics = level * (np.cos(2.0 * phase) + 0.5 * np.cos(3.0 * phase))
+    return _band_filter(harmonics, sr, harmonic_lo, harmonic_hi)
 
 
 @record_operation("apply_subharm")
@@ -196,25 +209,17 @@ def apply_subharm(
     out_channels = []
     for ch in range(data.shape[1]):
         signal = data[:, ch].astype(np.float64)
-        # 1. Isolate the fundamental region
-        fundamental = _band_filter(signal, sr, fundamental_hz_low, fundamental_hz_high)
-        # 2. Generate harmonics via tanh
-        saturated = np.tanh(fundamental * drive)
-        # 3. Bandpass harmonics into the audible weight region
-        harmonics = _band_filter(saturated, sr, harmonic_hz_low, harmonic_hz_high)
-        # 4. Mix in
+        harmonics = _harmonics(signal, sr, fundamental_hz_low, fundamental_hz_high,
+                               harmonic_hz_low, harmonic_hz_high, drive)
         out_channels.append(signal + harmonics * harmonic_mix)
 
     output_data = np.stack(out_channels, axis=1)
 
-    # Clip guard
+    # Float output keeps overs; report them instead of rescaling the file.
     peak = float(np.max(np.abs(output_data)))
     if peak > 1.0:
-        print(
-            f"WARNING: output peak {20*np.log10(peak):.1f} dBFS — scaling down",
-            file=sys.stderr,
-        )
-        output_data = output_data / peak
+        print(f"WARNING: output peak {20*np.log10(peak):.1f} dBFS exceeds 0 dBFS "
+              "(kept in float; lower the gain downstream)", file=sys.stderr)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / (input_path.stem + "_subharm.wav")
@@ -234,6 +239,8 @@ def apply_subharm(
         },
         "relevance_check": rel,
         "applied": True,
+        "output_peak_dbfs": round(20 * np.log10(max(peak, 1e-10)), 2),
+        "output_exceeds_0dbfs": peak > 1.0,
         "sample_rate": sr,
     }
     (output_dir / "subharm_report.json").write_text(
@@ -259,7 +266,7 @@ def main() -> None:
     parser.add_argument("--fundamental-hz-high", type=float, help="Fundamental band high edge (Hz)")
     parser.add_argument("--harmonic-hz-low", type=float, help="Harmonic band low edge (Hz)")
     parser.add_argument("--harmonic-hz-high", type=float, help="Harmonic band high edge (Hz)")
-    parser.add_argument("--drive", type=float, help="Saturation drive (1.0-3.0 typical)")
+    parser.add_argument("--drive", type=float, help="Harmonic level compression: tanh(drive*env)/drive (1.0-3.0 typical)")
     parser.add_argument("--harmonic-mix", type=float, help="Wet level of harmonics (0.05-0.30 typical)")
     parser.add_argument("--force", action="store_true",
                         help="Apply even if relevance_check recommends skip")

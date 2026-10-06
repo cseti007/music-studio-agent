@@ -6,9 +6,17 @@ inside the render. This tool represents the master-engineer's pass — runs on
 a finished stereo file, may be more aggressive, and is calibrated for
 format-specific delivery targets (Spotify -14, Apple -16, CD -9, etc).
 
-Chain order (each step optional, controlled by the mastering preset):
+Chain order (each step optional, controlled by the mastering preset and format):
 
-  EQ -> glue comp -> harmonic exciter -> clipper -> LUFS norm -> true-peak limiter -> dither
+  resample -> EQ -> multiband comp -> glue comp -> exciter -> M/S EQ/gain
+  -> stereo width -> vinyl elliptical EQ (opt-in) -> clipper
+  -> LUFS norm (or true-peak normalization for formats without a LUFS target)
+  -> true-peak brickwall limiter -> 8x true-peak safety trim -> dither
+
+Compressors are stereo-linked. The limiter is pedalboard.BrickwallLimiter
+(true-peak detection, no makeup gain); the exported file's 8x true peak is
+verified to sit at or below the ceiling, the same oversampling master_health
+checks.
 
 Outputs are named after the format preset: `master_spotify.wav`, etc. The
 `--all-formats` mode produces all delivery targets from one input in a
@@ -23,8 +31,9 @@ Usage:
   python master_mix.py mix.wav --output-dir output/<session>/masters \
       --all-formats --master-preset modern_rock
 
-  # Custom target (no format preset)
-  python master_mix.py mix.wav --output-dir DIR \
+  # Custom target on a format preset. Without --tp-ceiling, a target
+  # louder than -14 LUFS lowers the ceiling to -2 dBTP.
+  python master_mix.py mix.wav --output-dir DIR --format spotify \
       --target-lufs -12 --tp-ceiling -1.0 --master-preset gentle
 """
 
@@ -37,16 +46,17 @@ from pathlib import Path
 import numpy as np
 import pyloudnorm as pyln
 import soundfile as sf
-from pedalboard import Compressor, Gain, Limiter, Pedalboard
 from scipy.signal import butter, resample_poly, sosfilt
 
 # Reuse pieces already in the project
 sys.path.insert(0, str(Path(__file__).parent))
+from _dsp import brickwall_limit, worst_channel_true_peak_dbfs  # noqa: E402
 from apply_eq import filter_signal  # noqa: E402
-from apply_multiband_comp import _compress_band, _lr4_split  # noqa: E402
+from apply_multiband_comp import _lr4_split  # noqa: E402
 from render_mix import (  # noqa: E402
+    _LIMITER_NAME,
     _hard_clip,
-    _measure_true_peak_dbfs,
+    _linked_compress,
     _ms_apply_eq,
     _ms_decode,
     _ms_encode,
@@ -90,7 +100,7 @@ FORMAT_PRESETS: dict[str, dict] = {
         "dither": False,
     },
     "cd": {
-        "description": "CD delivery: 44.1 kHz, 16-bit dithered; loudness is a creative default",
+        "description": "CD delivery: 44.1 kHz, 16-bit dithered; -9 LUFS is an artistic loudness choice, not a standard (louder than -14 LUFS -> -2 dBTP ceiling)",
         "sample_rate": 44100,
         "target_lufs": -9.0,
         "tp_ceiling_dbtp": -1.0,
@@ -98,17 +108,16 @@ FORMAT_PRESETS: dict[str, dict] = {
         "dither": True,
     },
     "vinyl_pre": {
-        "description": "Vinyl pre-master — sub-mono below 150 Hz, no clipper/limiter, preserves dynamics for cutting",
-        "target_lufs": -12.0,
-        "tp_ceiling_dbtp": -1.0,
+        "description": "Vinyl pre-master: no LUFS target, no clipper/limiter; linear gain sets the 8x true peak to -3 dBTP headroom for the cutting engineer. Sub-mono (elliptical) EQ is opt-in via --vinyl-elliptical",
+        "target_lufs": None,
+        "tp_ceiling_dbtp": -3.0,
         "bit_depth": 24,
         "dither": False,
         "skip_clipper": True,
         "skip_limiter": True,
-        "vinyl_elliptical_hz": 150.0,
     },
     "broadcast": {
-        "description": "Broadcast EBU R128; conservative -2 dBTP house ceiling",
+        "description": "Broadcast EBU R128 (-23 LUFS); -2 dBTP is a house choice (R128 maximum is -1 dBTP)",
         "loudness_policy": "requirement",
         "target_lufs": -23.0,
         "tp_ceiling_dbtp": -2.0,
@@ -321,7 +330,7 @@ def _dynamics_review(input_crest: float, output_crest: float, normalization_gain
             "post_limiter_peak_attenuation_db": round(peak_attenuation, 2),
             "output_true_peak_minus_sample_peak_db": round(peak_gap, 2),
             "warnings": warnings, "threshold_policy": "Project review heuristics, not quality requirements",
-            "note": "Whole-file crest changes depend on arrangement; attenuation includes limiter makeup, not just intersample overshoot"}
+            "note": "Whole-file crest changes depend on arrangement; attenuation is the static trim after the limiter's 8x true-peak verification"}
 
 
 def _master_eq(stereo: np.ndarray, sr: int, filters: list) -> np.ndarray:
@@ -335,17 +344,9 @@ def _master_eq(stereo: np.ndarray, sr: int, filters: list) -> np.ndarray:
 
 
 def _master_comp(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
-    """Pedalboard-based glue compressor for the master bus."""
-    board = Pedalboard([
-        Compressor(
-            threshold_db=float(params["threshold_db"]),
-            ratio=float(params["ratio"]),
-            attack_ms=float(params["attack_ms"]),
-            release_ms=float(params["release_ms"]),
-        ),
-        Gain(gain_db=float(params.get("makeup_db", 0.0))),
-    ])
-    return board(stereo.astype(np.float32), sr).astype(np.float32)
+    """Stereo-linked pedalboard glue compressor for the master bus."""
+    return _linked_compress(stereo, sr, params["threshold_db"], params["ratio"], params["attack_ms"],
+                            params["release_ms"], params.get("makeup_db", 0.0))
 
 
 def _harmonic_exciter(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
@@ -353,8 +354,11 @@ def _harmonic_exciter(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
     excitation. Different from apply_exciter.py's tool: this runs on the
     full stereo master, not a stem, and the mix is set by mastering preset.
 
-    Generates 2nd-order harmonic content above hp_hz; mixes in at low level
-    so the dry remains dominant.
+    Symmetric tanh can only add odd-order harmonics, and at typical master
+    levels |hp * drive| << 1 keeps tanh nearly linear. In practice this acts
+    mostly as a gentle high-frequency lift above hp_hz (about
+    20*log10(1 + mix) dB, shaped by the two minimum-phase high-passes), not
+    as a 2nd-harmonic generator. The mix stays low so the dry dominates.
     """
     hp_hz = float(params["hp_hz"])
     drive = float(params["drive"])
@@ -373,21 +377,21 @@ def _harmonic_exciter(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
 
 
 def _master_multiband(stereo: np.ndarray, sr: int, params: dict) -> np.ndarray:
-    """3-band Linkwitz-Riley split + per-band compressor on each channel.
+    """3-band Linkwitz-Riley split + stereo-linked compressor per band.
 
-    Reuses the LR4 split and band-compressor helpers from
-    apply_multiband_comp so the math is the same as the standalone tool.
+    Reuses the LR4 split from apply_multiband_comp. Each band's gain curve is
+    derived from the louder channel and applied to both, so a loud band on
+    one side cannot shift the image.
     """
     lo_hz = float(params["low_high_hz"])
     hi_hz = float(params["mid_high_hz"])
-    out = np.empty_like(stereo)
-    for ch in range(stereo.shape[0]):
-        low, mid, high = _lr4_split(stereo[ch], sr, lo_hz, hi_hz)
-        out[ch] = (
-            _compress_band(low, sr, params["low"])
-            + _compress_band(mid, sr, params["mid"])
-            + _compress_band(high, sr, params["high"])
-        )
+    split = [_lr4_split(stereo[ch], sr, lo_hz, hi_hz) for ch in range(stereo.shape[0])]
+    out = np.zeros_like(stereo)
+    for i, name in enumerate(("low", "mid", "high")):
+        band = np.vstack([bands[i] for bands in split])
+        p = params[name]
+        out += _linked_compress(band, sr, p["threshold_db"], p["ratio"], p["attack_ms"],
+                                p["release_ms"], p.get("makeup_db", 0.0))
     return out
 
 
@@ -433,15 +437,14 @@ def _vinyl_elliptical_eq(stereo: np.ndarray, sr: int, mono_below_hz: float = 150
     end). This stops the cutter head from leaving the groove on a wide low
     end — classic vinyl mastering requirement.
 
-    Implementation: M/S encode, low-pass the SIDE channel at `mono_below_hz`
-    using a complementary high-shelf — anything below the cutoff is zeroed
-    on the side, anything above passes through.
+    Implementation: M/S encode, high-pass the SIDE channel at `mono_below_hz`
+    and decode. The filter is zero-phase (2nd-order Butterworth run forward
+    and backward, 24 dB/oct magnitude): a minimum-phase high-pass shifts the
+    side's phase well above the cutoff and leaks hard-panned content into
+    the opposite channel.
     """
     mid, side = _ms_encode(stereo)
-    nyq = sr / 2.0
-    # 4th-order high-pass on the side channel: removes <150 Hz from side
-    sos_hp = butter(4, mono_below_hz / nyq, btype="high", output="sos")
-    side = sosfilt(sos_hp, side)
+    side = filter_signal(side, sr, {"type": "highpass", "hz": float(mono_below_hz), "order": 2}, "zero")
     return _ms_decode(mid, side)
 
 
@@ -491,6 +494,7 @@ def master_mix(
     target_lufs: float | None = None,
     tp_ceiling: float | None = None,
     precomputed_input: tuple[np.ndarray, int, float, float] | None = None,
+    vinyl_elliptical_hz: float | None = None,
 ) -> dict:
     """Master a stereo mix.wav to a delivery format.
 
@@ -501,6 +505,14 @@ def master_mix(
     skip loading + initial LUFS measurement (the --all-formats path uses this
     to share work across formats). The buffer is *copied* before mutation so
     multiple master_mix() calls don't interfere.
+
+    `vinyl_elliptical_hz`: opt-in sub-mono (side high-pass) below this
+    frequency, for vinyl cutting. None skips it.
+
+    Without an explicit `tp_ceiling`, a loudness target louder than -14 LUFS
+    lowers the format ceiling to -2 dBTP (lossy-codec headroom guidance).
+    A format without a LUFS target (vinyl_pre) is scaled so its 8x true
+    peak sits at the ceiling instead.
     """
     fmt = FORMAT_PRESETS[format_name]
     mp = MASTERING_PRESETS[mastering_preset]
@@ -508,6 +520,10 @@ def master_mix(
     # Format overrides (user can specify --target-lufs / --tp-ceiling)
     actual_target_lufs = target_lufs if target_lufs is not None else fmt["target_lufs"]
     actual_tp = tp_ceiling if tp_ceiling is not None else fmt["tp_ceiling_dbtp"]
+    tp_reason = "explicit" if tp_ceiling is not None else "format preset"
+    if tp_ceiling is None and actual_target_lufs is not None and actual_target_lufs > -14.0 and actual_tp > -2.0:
+        actual_tp = -2.0
+        tp_reason = "target louder than -14 LUFS"
     bit_depth = fmt.get("bit_depth", 24)
     do_dither = fmt.get("dither", False)
     skip_clipper = fmt.get("skip_clipper", False)
@@ -527,7 +543,8 @@ def master_mix(
 
     print(f"  Input: LUFS {lufs_before:.2f}, sample peak {peak_before:.2f} dBFS")
 
-    if not np.isfinite(actual_target_lufs) or not np.isfinite(actual_tp) or actual_tp > 0:
+    if (actual_target_lufs is not None and not np.isfinite(actual_target_lufs)) \
+            or not np.isfinite(actual_tp) or actual_tp > 0:
         raise ValueError("Loudness must be finite and true-peak ceiling must be <= 0 dBTP")
     if not np.isfinite(lufs_before):
         raise ValueError("Input is silent or below the loudness measurement gate")
@@ -599,10 +616,11 @@ def master_mix(
         chain_applied.append(f"stereo_width({width:.2f})")
 
     # 7. Vinyl elliptical EQ — sub-mono filter for cutter compatibility.
-    #    Only fires for the vinyl_pre format (which signals it explicitly).
-    if fmt.get("vinyl_elliptical_hz"):
-        master = _vinyl_elliptical_eq(master, sr, mono_below_hz=fmt["vinyl_elliptical_hz"])
-        chain_applied.append(f"vinyl_elliptical(side muted below {fmt['vinyl_elliptical_hz']} Hz)")
+    #    Opt-in only (--vinyl-elliptical); many cutting engineers prefer to
+    #    decide on the elliptical filter themselves.
+    if vinyl_elliptical_hz:
+        master = _vinyl_elliptical_eq(master, sr, mono_below_hz=vinyl_elliptical_hz)
+        chain_applied.append(f"vinyl_elliptical(side high-passed below {vinyl_elliptical_hz} Hz, zero-phase)")
 
     # 8. Clipper
     if mp["clipper"] and not skip_clipper:
@@ -616,49 +634,36 @@ def master_mix(
         chain_applied.append("clipper(SKIPPED for format)")
 
     # Measure the actual signal after every tonal/dynamics stage.
-    current_lufs = float(meter.integrated_loudness(master.T))
-    if np.isfinite(current_lufs):
-        gain_db = actual_target_lufs - current_lufs
+    if actual_target_lufs is None:
+        # No loudness target: one linear gain puts the 8x true peak at the
+        # ceiling (headroom for the cutting engineer). No limiter.
+        gain_db = actual_tp - 0.01 - worst_channel_true_peak_dbfs(master, 8)
         normalization_gain = gain_db
         master = master * 10.0 ** (gain_db / 20.0)
-        # Track approximately so the post-limiter measurement is the only
-        # follow-up. Linear gain shifts LUFS by the same dB.
-        current_lufs = current_lufs + gain_db
-        chain_applied.append(f"lufs_norm({gain_db:+.2f} dB → target {actual_target_lufs})")
+        chain_applied.append(f"peak_norm({gain_db:+.2f} dB -> 8x true peak {actual_tp} dBTP)")
+    else:
+        current_lufs = float(meter.integrated_loudness(master.T))
+        if np.isfinite(current_lufs):
+            gain_db = actual_target_lufs - current_lufs
+            normalization_gain = gain_db
+            master = master * 10.0 ** (gain_db / 20.0)
+            chain_applied.append(f"lufs_norm({gain_db:+.2f} dB → target {actual_target_lufs})")
 
-    # 6. Sample-peak limiter followed by measured true-peak attenuation
+    # True-peak limiter. BrickwallLimiter adds no makeup gain, so loudness can
+    # only fall below the normalization target; that shortfall is reported
+    # (loudness_target_met), never chased with more gain.
+    limiter_used = None
     if not skip_limiter:
-        board = Pedalboard([Limiter(threshold_db=float(actual_tp), release_ms=100.0)])
-        master = board(master.astype(np.float32), sr).astype(np.float32)
-        # Second-pass ISP check + scale down if still over
-        tp_measured = _measure_true_peak_dbfs(master)
-        if tp_measured > actual_tp:
-            scale_db = actual_tp - tp_measured
-            peak_attenuation = scale_db
-            master *= 10.0 ** (scale_db / 20.0)
-            chain_applied.append(f"limiter(post_limiter_peak_attenuation={scale_db:+.2f} dB)")
-        else:
-            chain_applied.append(f"limiter(TP {tp_measured:.2f} dBTP)")
-
-        # Post-limiter LUFS correction: pedalboard.Limiter applies internal
-        # makeup gain, so the integrated LUFS after limiting is usually
-        # higher than the LUFS norm target we asked for. This is a real
-        # transform (the limiter changes LUFS unpredictably) so we MUST
-        # re-measure here — no cache substitute.
-        lufs_after = float(meter.integrated_loudness(master.T))
-        current_lufs = lufs_after
-        if np.isfinite(lufs_after):
-            correction_db = actual_target_lufs - lufs_after
-            if correction_db < -0.2:  # only correct if overshoot > 0.2 dB
-                master *= 10.0 ** (correction_db / 20.0)
-                current_lufs = current_lufs + correction_db
-                chain_applied.append(f"lufs_post_correction({correction_db:+.2f} dB)")
+        master, peak_attenuation = brickwall_limit(master, sr, actual_tp)
+        limiter_used = _LIMITER_NAME
+        chain_applied.append(f"limiter(BrickwallLimiter, ceiling {actual_tp} dBTP, "
+                             f"8x safety trim {peak_attenuation:+.2f} dB)")
     else:
         chain_applied.append("limiter(SKIPPED for format)")
 
-    # A non-limited format still needs a safe PCM export. Leave a small
-    # margin for quantization/dither and prioritize peak safety over loudness.
-    tp_measured = _measure_true_peak_dbfs(master)
+    # Export guarantee at 8x (the oversampling master_health checks). Leaves
+    # a small margin for quantization/dither; peak safety beats loudness.
+    tp_measured = worst_channel_true_peak_dbfs(master, 8)
     safe_tp = actual_tp - 0.01
     if tp_measured > safe_tp:
         attenuation_db = safe_tp - tp_measured
@@ -681,9 +686,16 @@ def master_mix(
     lufs_final = float(pyln.Meter(delivered_sr).integrated_loudness(delivered))
     lra_final = (round(float(pyln.Meter(delivered_sr).loudness_range(delivered)), 2)
                  if len(delivered) >= 3 * delivered_sr else None)
-    tp_final = float(_measure_true_peak_dbfs(delivered.T))
+    tp_final = float(worst_channel_true_peak_dbfs(delivered.T, 8))
     sample_peak_final = float(20.0 * np.log10(max(float(np.max(np.abs(delivered))), 1e-12)))
-    loudness_target_met = abs(lufs_final - actual_target_lufs) <= 0.5
+    loudness_target_met = (None if actual_target_lufs is None
+                           else bool(abs(lufs_final - actual_target_lufs) <= 0.5))
+    if actual_target_lufs is None:
+        loudness_note = "Format has no loudness target; scaled to the true-peak ceiling"
+    elif loudness_target_met:
+        loudness_note = None
+    else:
+        loudness_note = "Peak safety or processing prevented the requested loudness; audition before changing dynamics"
 
     report = {
         "input": str(input_path),
@@ -703,12 +715,17 @@ def master_mix(
         "loudness_target_met": loudness_target_met,
         "true_peak_target_met": bool(tp_final <= actual_tp),
         "measurement_source": "decoded_output",
-        "loudness_note": None if loudness_target_met else "Peak safety or processing prevented the requested loudness; audition before changing dynamics",
-        "lufs_delta_from_target": round(lufs_final - actual_target_lufs, 2),
+        "loudness_note": loudness_note,
+        "lufs_delta_from_target": (None if actual_target_lufs is None
+                                   else round(lufs_final - actual_target_lufs, 2)),
         "output_lra_lu": lra_final,
         "output_true_peak_dbtp": round(tp_final, 2),
+        "true_peak_oversample": 8,
         "output_sample_peak_dbfs": round(sample_peak_final, 2),
         "tp_ceiling_dbtp": actual_tp,
+        "tp_ceiling_source": tp_reason,
+        "limiter": limiter_used,
+        "vinyl_elliptical_hz": vinyl_elliptical_hz,
         "bit_depth": bit_depth,
         "dithered": do_dither,
         "sample_rate": sr,
@@ -718,8 +735,9 @@ def master_mix(
     )
 
     print(f"  Output: {out_path}")
-    print(f"  LUFS {lufs_final:.2f} (target {actual_target_lufs}, delta {lufs_final - actual_target_lufs:+.2f}), "
-          f"LRA {lra_final} LU, TP {tp_final:.2f} dBTP")
+    delta = "n/a" if actual_target_lufs is None else f"{lufs_final - actual_target_lufs:+.2f}"
+    print(f"  LUFS {lufs_final:.2f} (target {actual_target_lufs}, delta {delta}), "
+          f"LRA {lra_final} LU, TP {tp_final:.2f} dBTP (8x)")
     print(f"  Chain: {' -> '.join(chain_applied)}")
     return report
 
@@ -738,7 +756,8 @@ def list_format_presets() -> None:
         if p.get("skip_limiter"):
             skip.append("no limiter")
         skip_str = f"  [{', '.join(skip)}]" if skip else ""
-        print(f"  {name:<14}  LUFS {p['target_lufs']:>5}, TP {p['tp_ceiling_dbtp']:>4} dBTP, "
+        lufs = "none" if p["target_lufs"] is None else p["target_lufs"]
+        print(f"  {name:<14}  LUFS {lufs!s:>5}, TP {p['tp_ceiling_dbtp']:>4} dBTP, "
               f"{bit}{skip_str}")
         print(f"  {'':<14}  {p['description']}")
 
@@ -766,7 +785,12 @@ def main() -> None:
     parser.add_argument("--target-lufs", type=float,
                         help="Override format target LUFS")
     parser.add_argument("--tp-ceiling", type=float,
-                        help="Override format true peak ceiling (dBTP)")
+                        help="Override format true peak ceiling (dBTP). Default: format ceiling, "
+                             "lowered to -2 dBTP when the target is louder than -14 LUFS")
+    parser.add_argument("--vinyl-elliptical", type=float, nargs="?", const=150.0, default=None,
+                        metavar="HZ",
+                        help="Opt-in sub-mono (side high-pass, zero-phase) below HZ (default 150) "
+                             "for the vinyl_pre format; off by default")
     parser.add_argument("--list-formats", action="store_true",
                         help="List delivery format presets and exit")
     parser.add_argument("--list-master-presets", action="store_true",
@@ -787,6 +811,8 @@ def main() -> None:
         sys.exit(1)
     if not args.format and not args.all_formats:
         parser.error("either --format <name> or --all-formats is required")
+    if args.vinyl_elliptical is not None and not args.all_formats and args.format != "vinyl_pre":
+        parser.error("--vinyl-elliptical applies to the vinyl_pre format only")
 
     if args.all_formats:
         formats = ["spotify", "apple", "youtube", "tidal", "cd", "vinyl_pre"]
@@ -809,6 +835,7 @@ def main() -> None:
             target_lufs=args.target_lufs,
             tp_ceiling=args.tp_ceiling,
             precomputed_input=precomputed,
+            vinyl_elliptical_hz=args.vinyl_elliptical if fmt == "vinyl_pre" else None,
         )
         results.append(r)
 
@@ -818,9 +845,10 @@ def main() -> None:
         print("BATCH MASTERING SUMMARY")
         print("=" * 60)
         for r in results:
+            lra = "n/a" if r["output_lra_lu"] is None else f"{r['output_lra_lu']:.1f}"
             print(f"  {r['format']:<14}  LUFS {r['output_lufs']:+.2f}  "
                   f"TP {r['output_true_peak_dbtp']:+.2f} dBTP  "
-                  f"LRA {r['output_lra_lu']:.1f} LU  →  {Path(r['output']).name}")
+                  f"LRA {lra} LU  →  {Path(r['output']).name}")
 
 
 if __name__ == "__main__":

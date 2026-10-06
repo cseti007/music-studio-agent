@@ -59,7 +59,7 @@ def _detect_format(path: Path) -> str:
 
 _PT_SR_RE = re.compile(r"Samplerate\s*=\s*(\d+)Hz")
 _PT_CLIP_RE = re.compile(
-    r"^`(.+?)`\s+t\(\d+\)\s+\((.+?)\)\s+@\s+(\d+)\s+\+\s+(\d+),\s+(\d+)"
+    r"^`(.+?)`\s+t\((\d+)\)\s+\((.+?)\)\s+@\s+(\d+)\s+\+\s+(\d+),\s+(\d+)"
 )
 
 
@@ -117,10 +117,11 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
         if not m:
             continue
         track_name       = m.group(1)
-        source_filename  = m.group(2)
-        timeline_start   = int(m.group(3))
-        source_offset    = int(m.group(4))
-        length           = int(m.group(5))
+        track_id         = int(m.group(2))
+        source_filename  = m.group(3)
+        timeline_start   = int(m.group(4))
+        source_offset    = int(m.group(5))
+        length           = int(m.group(6))
 
         clip = {
             "source_file":            _resolve_audio(source_filename, audio_dir),
@@ -129,7 +130,6 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
             "length_samples":         length,
         }
         tracks.setdefault(track_name, []).append(clip)
-        track_id = int(re.search(r"t\((\d+)\)", line).group(1))
         channel_tracks.setdefault(track_name, {}).setdefault(track_id, []).append(clip)
         max_end = max(max_end, timeline_start + length)
 
@@ -149,12 +149,19 @@ def _parse_protools(session_path: Path, audio_dir: Path | None) -> dict:
                     clip["source_offset_sample"], clip["length_samples"])
 
         first = sorted(next(iter(layouts.values())), key=layout_key)
-        if (len(layouts) == 2 and all(sorted(clips, key=layout_key) == first for clips in layouts.values())
-                and all(Path(c["source_file"]).is_file()
-                        and sf.info(c["source_file"]).channels == 2 for c in first)):
-            tracks[name] = first
-        else:
-            raise ValueError(f"Ambiguous same-name Pro Tools tracks: {name}; use unique track names or consolidated stems")
+        ids = sorted(layouts)
+        if len(layouts) != 2 or not all(sorted(clips, key=layout_key) == first for clips in layouts.values()):
+            raise ValueError(f"Ambiguous same-name Pro Tools tracks: {name} (track IDs {ids}) have "
+                             "different clip layouts or sources (e.g. split L/R mono files or "
+                             "duplicate names); use unique track names or consolidated stems")
+        unresolved = [c["source_file"] for c in first if not Path(c["source_file"]).is_file()]
+        if unresolved:
+            raise ValueError(f"Cannot verify the stereo layout of {name} (track IDs {ids}): "
+                             f"unresolved source {unresolved[0]}; pass --audio-dir")
+        if not all(sf.info(c["source_file"]).channels == 2 for c in first):
+            raise ValueError(f"Same-name Pro Tools tracks {name} (track IDs {ids}) repeat identical "
+                             "edits of a non-stereo source; use unique track names or consolidated stems")
+        tracks[name] = first
     track_list = sorted(
         [
             {"name": name, "clips": sorted(clips, key=lambda c: c["timeline_start_sample"])}
@@ -214,13 +221,37 @@ def _beats_to_samples(beats: float, bpm: float, sr: int) -> int:
     return int(beats * (60.0 / bpm) * sr)
 
 
+def _ableton_tempo_events(root: ET.Element) -> list[float]:
+    """Tempo automation values. Live keeps envelopes in the master track's
+    AutomationEnvelopes, linked to Tempo/AutomationTarget by PointeeId."""
+    values = [float(e.get("Value")) for e in root.findall(".//MasterTrack//Tempo/Automation/Events/FloatEvent")]
+    target = root.find(".//MasterTrack//Tempo/AutomationTarget")
+    if target is not None:
+        for envelope in root.findall(".//MasterTrack/AutomationEnvelopes/Envelopes/AutomationEnvelope"):
+            pointee = envelope.find("EnvelopeTarget/PointeeId")
+            if pointee is not None and pointee.get("Value") == target.get("Id"):
+                values += [float(e.get("Value")) for e in envelope.findall("Automation/Events/FloatEvent")]
+    return values
+
+
+def _warp_changes_timing(clip: ET.Element, bpm: float) -> bool:
+    """True unless the warp markers map beats to seconds at the project tempo,
+    which plays the audio at its original speed and position."""
+    markers = clip.findall("WarpMarkers/WarpMarker")
+    if not markers:
+        return True
+    return any(abs(float(m.get("SecTime")) - float(m.get("BeatTime")) * 60.0 / bpm) > 1e-4
+               for m in markers)
+
+
 def _parse_ableton(session_path: Path) -> dict:
     with gzip.open(str(session_path), "rb") as f:
         root = ET.parse(f).getroot()
 
-    if root.findall(".//MasterTrack//Tempo/Automation/Events/FloatEvent"):
+    tempo_values = set(_ableton_tempo_events(root))
+    if len(tempo_values) > 1:
         raise ValueError("Tempo automation is unsupported; export consolidated stems")
-    bpm         = _ableton_bpm(root)
+    bpm         = tempo_values.pop() if tempo_values else _ableton_bpm(root)
     sample_rate = _ableton_sample_rate(root)
     session_dir = session_path.parent
 
@@ -237,10 +268,14 @@ def _parse_ableton(session_path: Path) -> dict:
             "/ArrangerAutomation/Events/AudioClip"
         )
         for clip in audio_track.findall(clip_path):
-            for tag in ("IsWarped", "Loop/LoopOn"):
-                flag = clip.find(tag)
-                if flag is not None and flag.get("Value", "false").lower() == "true":
-                    raise ValueError(f"Unsupported {tag} on {track_name}; export consolidated stems")
+            loop = clip.find("Loop/LoopOn")
+            if loop is not None and loop.get("Value", "false").lower() == "true":
+                raise ValueError(f"Unsupported Loop/LoopOn on {track_name}; export consolidated stems")
+            warped = clip.find("IsWarped")
+            if (warped is not None and warped.get("Value", "false").lower() == "true"
+                    and _warp_changes_timing(clip, bpm)):
+                raise ValueError(f"Unsupported warp on {track_name}: warp markers stretch or move "
+                                 "the audio relative to the project tempo; export consolidated stems")
             time_beats       = float(clip.get("Time", 0))
             start_rel_beats  = _find_val(clip, "StartRelative")
             out_marker_beats = _find_val(clip, "OutMarker")

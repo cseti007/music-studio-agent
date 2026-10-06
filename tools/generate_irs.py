@@ -19,7 +19,6 @@ can load by stem name.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -106,12 +105,17 @@ def make_room_live(sr: int = SR) -> np.ndarray:
     L = rng.standard_normal(length) * 0.3
     R = rng.standard_normal(length) * 0.3
     env = _decay_envelope(length, 0.7, sr)
-    er_samples = [int(sr * t) for t in (0.008, 0.017, 0.029, 0.041, 0.055)]
-    er = np.zeros(length)
-    for s, amp in zip(er_samples, (0.5, 0.4, 0.3, 0.22, 0.15)):
-        if s < length: er[s] = amp
-    L = (L + er) * env
-    R = (R + er[::-1][:length] * 0.7) * env  # use reversed ER for R, decorrelation
+    amps = (0.5, 0.4, 0.3, 0.22, 0.15)
+    # Each channel gets its own early-reflection times (decorrelated but
+    # equally early), so the image stays centred.
+    er_l = np.zeros(length)
+    er_r = np.zeros(length)
+    for t_l, t_r, amp in zip((0.008, 0.017, 0.029, 0.041, 0.055),
+                             (0.011, 0.021, 0.026, 0.045, 0.051), amps):
+        er_l[int(sr * t_l)] = amp
+        er_r[int(sr * t_r)] = amp
+    L = (L + er_l) * env
+    R = (R + er_r) * env
     L = _shape(L, sr, 100, 9000)
     R = _shape(R, sr, 100, 9000)
     return np.stack([L, R], axis=1)

@@ -1,9 +1,9 @@
 {
   "name": "punchy_modern_rock",
   "version": "1.0",
-  "description": "Punchier variant of modern_rock \u2014 emphasised kick body, controlled boxy 350 Hz region, forward snare/vocal presence at 3 kHz, gentle cymbal control. Calibrated to a real session iteration (v11 manual fine-tune over the modern_rock baseline).",
+  "description": "Punchier variant of modern_rock \u2014 emphasised kick body, controlled boxy 350 Hz region, forward snare/vocal presence at 3 kHz, gentle cymbal control. Project preference from one session iteration (v11 manual fine-tune over the modern_rock baseline), not a general calibration. master_chain_template.master.lufs_target and true_peak_dbfs are ignored in render_mix premaster mode (the default); delivery loudness and peak ceiling belong to master_mix.py.",
   "sources": [
-    "Calibrated against a real-session master that received the following manual fine-tune over the modern_rock baseline",
+    "Project preference: one session master after the following manual fine-tune over the modern_rock baseline",
     "Recommended master chain (copy into mix_config.master): see master_chain_template below"
   ],
   "calibration_note": "Tonal balance targets are wideband band-RMS at the integrated_target LUFS (-14). Spectrum is close to modern_rock but with: less air, scooped lower-mid (around 350 Hz region cleaner), kept presence at 3 kHz region.",
