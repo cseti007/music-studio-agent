@@ -272,8 +272,9 @@ def test_drumgizmo_kit_bottom_polarity_and_default_filechannel(tmp_path):
         '<audiofile channel="SnareBottom" file="samples/1.wav" filechannel="2"/>'
         '<audiofile channel="OHLeft" file="samples/1.wav" filechannel="3"/></sample></samples></instrument>')
     (hit,) = sm._library_hits(lib)
-    kit, close = sm._load_hit(hit)
-    assert np.allclose(close, 1.6 * top) and np.allclose(kit, 1.8 * top)
+    kit, mics = sm._load_hit(hit)
+    assert set(mics) == {"top", "bottom"} and np.allclose(mics["bottom"], 0.6 * top)  # polarity aligned
+    assert np.allclose(sm._close(mics), 1.6 * top) and np.allclose(kit, 1.8 * top)
     assert hit["close_channels"] == ["SnareTop", "SnareBottom"]
 
 
@@ -321,3 +322,70 @@ def test_render_reports_hits_below_the_threshold(tmp_path):
     sample.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
     report = rsl.render_snare_layer(track, sample, tmp_path / "out")
     assert report["placed"] + report["possibly_missed"]["count"] >= 9
+
+
+# ---------------------------------------------------------------------------
+# two snare microphones (top and bottom)
+# ---------------------------------------------------------------------------
+
+def _drumgizmo_lib(tmp_path, n=4):
+    """Kit with SnareTop / SnareBottom (bottom recorded inverted, 20 samples late) / OH."""
+    lib = tmp_path / "Kit"
+    inst = lib / "Snare"
+    (inst / "samples").mkdir(parents=True)
+    xml = []
+    for i in range(n):
+        top = (0.3 + 0.2 * i) * snare(f0=232.0, wires=0.8, seed=30 + i)
+        bottom = -0.5 * np.concatenate([np.zeros(20), top[:-20]])
+        sf.write(str(inst / "samples" / f"{i}.wav"), np.stack([top, bottom, 0.3 * top], axis=1), SR, subtype="FLOAT")
+        xml.append(f'<sample name="Snare-{i}" power="{0.1 + i}">'
+                   f'<audiofile channel="SnareTop" file="samples/{i}.wav" filechannel="1"/>'
+                   f'<audiofile channel="SnareBottom" file="samples/{i}.wav" filechannel="2"/>'
+                   f'<audiofile channel="OHLeft" file="samples/{i}.wav" filechannel="3"/></sample>')
+    (inst / "Snare.xml").write_text(f'<instrument version="2.0" name="Snare"><samples>{"".join(xml)}</samples></instrument>')
+    (lib / "license.json").write_text(json.dumps({"license": "CC-BY-4.0", "release_ok": True, "attribution": "x"}))
+    return lib
+
+
+def test_match_writes_microphones_that_add_up_to_the_close_file(tmp_path):
+    drums, rest = _reference(tmp_path)
+    sp.snare_profile(drums, tmp_path / "prof", drums_stem=drums, no_drums_stem=rest)
+    report = sm.snare_match([tmp_path / "prof" / "snare_profile.json"], [_drumgizmo_lib(tmp_path)], tmp_path / "m")
+    best = report["candidates"][0]
+    assert set(best["mic_files"]) == {"top", "bottom"}
+    top, bottom = sf.read(best["mic_files"]["top"])[0], sf.read(best["mic_files"]["bottom"])[0]
+    close = sf.read(best["file"])[0]
+    assert np.max(np.abs(top + bottom - close)) < 1e-5  # 24-bit rounding only
+    assert json.loads(Path(best["mic_files"]["bottom"]).with_suffix(".json").read_text())["release_ok"]
+
+
+def _two_mic_case(tmp_path, companion_license=True):
+    onsets = [S.ms(200 + 600 * i) for i in range(6)]
+    track = _write(tmp_path / "snare_top.wav", place(4.2, [(o, snare(seed=i), 0.5) for i, o in enumerate(onsets)]))
+    top = snare(f0=210.0, seed=5)
+    bottom = 0.5 * np.concatenate([np.zeros(20), top])  # same time base, 20 samples late
+    sample = _write(tmp_path / "cand" / "c_top.wav", top)
+    companion = _write(tmp_path / "cand" / "c_bottom.wav", bottom)
+    sample.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
+    if companion_license:
+        companion.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
+    return track, sample, companion
+
+
+def test_companion_layer_keeps_gain_and_timing_of_its_microphone(tmp_path):
+    track, sample, companion = _two_mic_case(tmp_path)
+    reports = rsl.render_snare_layer(track, sample, tmp_path / "out", polarity="normal", offset_ms=0.0,
+                                     companion_path=companion)
+    assert [Path(r["output"]).name for r in reports] == ["snare_top_snare_layer.wav",
+                                                        "snare_top_snare_layer_companion.wav"]
+    a, b = (sf.read(r["output"])[0] for r in reports)
+    assert len(a) == len(b) == sf.info(str(track)).frames
+    assert np.max(np.abs(b[20:] - 0.5 * a[:-20])) < 1e-6  # same hits and gains, bottom 20 samples later
+    for r in reports:  # each output replays from its own operation record
+        _run_recorded(json.loads(Path(r["output"]).with_suffix(".operation.json").read_text()))
+
+
+def test_companion_needs_its_own_license(tmp_path):
+    track, sample, companion = _two_mic_case(tmp_path, companion_license=False)
+    with pytest.raises(ValueError, match="c_bottom"):
+        rsl.render_snare_layer(track, sample, tmp_path / "out", companion_path=companion)

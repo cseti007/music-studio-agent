@@ -6,7 +6,8 @@ high-pass; see _snare.trigger_hits), refined offline to the onset, and a copy
 of the one-shot sample is placed at each onset (1 ms pre-roll), so there is no
 trigger delay. Onset accuracy depends on the bleed in the input; the report
 lists events that look like missed hits (possibly_missed). A kit shifted by more
-than 5 ms against the input (exported from another start) is refused. Per-hit gain follows the hit level:
+than 10 ms against the input (exported from another start) is refused.
+An auto offset at the +/-2 ms search limit is flagged (offset_at_search_limit). Per-hit gain follows the hit level:
 
   gain_db = base + level_db + dynamics * (hit_db - median_hit_db)
 
@@ -21,6 +22,13 @@ most body (150-400 Hz) energy is kept; a crack-band (1-5 kHz) loss of more
 than 1 dB against the best crack option is flagged for listening. Judge it on
 the full kit: an alignment that suits the close microphone alone can cancel
 against overheads and rooms. A positive offset moves the layer later.
+
+With a companion (e.g. the bottom-microphone one-shot of the same library
+hit, written by snare_match.py next to the top one) a second layer is
+rendered from the same hits with the same gains, offset and polarity, cut at
+the same index so the microphones keep their timing and balance; it goes
+next to our own bottom track (<input>_snare_layer_companion.wav). Polarity and
+offset are chosen on the sum of both layers.
 
 A sample is release-safe only if its sidecar JSON (written by snare_match.py)
 says release_ok; anything else (e.g. a hit cut from a commercial reference)
@@ -46,7 +54,7 @@ import _snare as S
 from _recall import record_operation
 
 PREROLL_MS = 1.0
-MAX_KIT_LAG_MS = 5.0  # a kit export further off than this was not taken from the same start
+MAX_KIT_LAG_MS = 10.0  # overheads/rooms arrive a few ms late; beyond this the kit is from another start
 GAIN_RANGE_DB = (-24.0, 6.0)
 MAX_OFFSET_MS = 2.0   # alignment search range (+/-) for offset "auto"
 OFFSET_STEP_MS = 0.25
@@ -103,14 +111,17 @@ def render_snare_layer(
     polarity: str = "auto",
     offset_ms: float | str = "auto",
     private: bool = False,
-) -> dict:
+    companion_path: Path | None = None,
+) -> dict | list[dict]:
     if polarity not in ("auto", "normal", "inverted"):
         raise ValueError("polarity must be auto, normal or inverted")
     if offset_ms != "auto" and abs(float(offset_ms)) > MAX_OFFSET_MS:
         raise ValueError(f"offset_ms must be 'auto' or within +/-{MAX_OFFSET_MS} ms")
     lic = _license(sample_path)
-    if not lic["release_ok"] and not private:
-        raise ValueError(f"{sample_path.name} has no release_ok license; use private=True for private listening only")
+    lic_c = _license(companion_path) if companion_path else None
+    for path, licence in ((sample_path, lic), (companion_path, lic_c)):
+        if licence and not licence["release_ok"] and not private:
+            raise ValueError(f"{path.name} has no release_ok license; use private=True for private listening only")
 
     info = sf.info(str(input_path))
     y = S.load_mono(input_path)
@@ -125,19 +136,29 @@ def render_snare_layer(
     if sample_db < -60.0:
         raise ValueError(f"{sample_path.name}: no attack found in the first 60 ms (peak {sample_db:.1f} dBFS)")
     pre = s_on - max(s_on - S.ms(PREROLL_MS), 0)  # pre-roll actually available in the file
-    sample = sample[s_on - pre:]
+    # the companion (e.g. the bottom microphone of the same hit) shares the
+    # sample's time base: cut at the same index to keep the microphones' timing
+    samples = {"sample": sample[s_on - pre:]}
+    if companion_path:
+        samples["companion"] = S.load_mono(companion_path)[s_on - pre:]
 
     levels = np.array([h["level_db"] for h in hits])
     base = float(np.median(levels) - sample_db + level_db)
     pad = S.ms(MAX_OFFSET_MS)
-    layer = np.zeros(pad + len(y) + len(sample) + pad)
-    for h, lvl in zip(hits, levels):
-        rel = float(np.clip(dynamics * (lvl - np.median(levels)), *GAIN_RANGE_DB))
-        start = pad + h["onset"] - pre
-        layer[start:start + len(sample)] += sample * 10.0 ** ((base + rel) / 20.0)
+    placed = {}
+    for key, smp in samples.items():  # same hits and gains for every microphone
+        layer = np.zeros(pad + len(y) + len(smp) + pad)
+        for h, lvl in zip(hits, levels):
+            rel = float(np.clip(dynamics * (lvl - np.median(levels)), *GAIN_RANGE_DB))
+            start = pad + h["onset"] - pre
+            layer[start:start + len(smp)] += smp * 10.0 ** ((base + rel) / 20.0)
+        placed[key] = layer
+    length = max(len(v) for v in placed.values())
+    placed = {k: np.pad(v, (0, length - len(v))) for k, v in placed.items()}
+    layer = np.sum(list(placed.values()), axis=0)  # what is added to the kit
 
-    def shifted(offset_samples: int) -> np.ndarray:
-        return layer[pad - offset_samples:pad - offset_samples + len(y)]
+    def shifted(x: np.ndarray, offset_samples: int) -> np.ndarray:
+        return x[pad - offset_samples:pad - offset_samples + len(y)]
 
     starts = [h["onset"] for h in hits]
     possibly_missed = _possibly_missed(y, starts, float(np.median(levels)))
@@ -176,24 +197,30 @@ def render_snare_layer(
     test = {"judged_on": "kit" if kit_path else "input (close microphone only)", "kit_lag_ms": kit_lag_ms,
             "chosen": best,
             "zero_offset_normal": zero,
-            "crack_disagrees": max(t["crack_db"] for t in trials) - best["crack_db"] > 1.0}
+            "crack_disagrees": max(t["crack_db"] for t in trials) - best["crack_db"] > 1.0,
+            "offset_at_search_limit": offset_ms == "auto" and abs(best["offset_ms"]) >= MAX_OFFSET_MS}
     polarity, offset = best["polarity"], best["offset_ms"]
-    layer = shifted(S.ms(offset)) * (1.0 if polarity == "normal" else -1.0)
-
-    if info.samplerate != S.SR:
-        layer = resample_poly(layer, info.samplerate, S.SR)[:info.frames]
-        layer = np.pad(layer, (0, info.frames - len(layer)))
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{input_path.stem}_snare_layer.wav"
-    sf.write(str(out_path), layer, info.samplerate, subtype="FLOAT")
-
-    report = {"input": str(input_path), "output": str(out_path), "sample": str(sample_path),
-              "kit": str(kit_path) if kit_path else None, "placed": len(hits),
-              "possibly_missed": possibly_missed,
-              "median_hit_db": round(float(np.median(levels)), 2), "base_gain_db": round(base, 2),
-              "polarity": polarity, "offset_ms": offset, "alignment_test": test, "private": private, **lic}
-    (output_dir / "snare_layer_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    return report
+    reports = []
+    for key, src_path, licence, suffix in (("sample", sample_path, lic, ""),
+                                           ("companion", companion_path, lic_c, "_companion")):
+        if key not in placed:
+            continue
+        out = shifted(placed[key], S.ms(offset)) * (1.0 if polarity == "normal" else -1.0)
+        if info.samplerate != S.SR:
+            out = resample_poly(out, info.samplerate, S.SR)[:info.frames]
+            out = np.pad(out, (0, info.frames - len(out)))
+        out_path = output_dir / f"{input_path.stem}_snare_layer{suffix}.wav"
+        sf.write(str(out_path), out, info.samplerate, subtype="FLOAT")
+        reports.append({"input": str(input_path), "output": str(out_path), "sample": str(src_path),
+                        "kit": str(kit_path) if kit_path else None, "placed": len(hits),
+                        "possibly_missed": possibly_missed,
+                        "median_hit_db": round(float(np.median(levels)), 2), "base_gain_db": round(base, 2),
+                        "polarity": polarity, "offset_ms": offset, "alignment_test": test,
+                        "private": private, **licence})
+    result = reports if companion_path else reports[0]
+    (output_dir / "snare_layer_report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
 
 
 def main() -> None:
@@ -211,8 +238,10 @@ def main() -> None:
     parser.add_argument("--polarity", choices=["auto", "normal", "inverted"], default="auto")
     parser.add_argument("--offset-ms", default="auto", help="Layer offset in ms, or auto (default: auto)")
     parser.add_argument("--private", action="store_true", help="Allow samples without a release_ok license")
+    parser.add_argument("--companion", type=Path,
+                        help="Second one-shot on the same time base (e.g. the bottom microphone): a second layer")
     args = parser.parse_args()
-    for path in [args.input, args.sample] + ([args.kit] if args.kit else []):
+    for path in [args.input, args.sample] + [x for x in (args.kit, args.companion) if x]:
         if not path.exists():
             print(json.dumps({"error": f"Not found: {path}"}), file=sys.stderr)
             sys.exit(1)
@@ -221,11 +250,11 @@ def main() -> None:
                                     args.react_ms, args.detect_ms, args.release_ms, args.dynamics,
                                     args.level_db, args.polarity,
                                     args.offset_ms if args.offset_ms == "auto" else float(args.offset_ms),
-                                    args.private)
+                                    args.private, args.companion)
     except ValueError as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         sys.exit(1)
-    print(json.dumps(report, indent=2))
+    print(json.dumps({"layers": report} if isinstance(report, list) else report, indent=2))
 
 
 if __name__ == "__main__":

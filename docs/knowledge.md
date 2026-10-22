@@ -1672,6 +1672,14 @@ first session (Tool's Aenima as reference, CrocellKit CC-BY 4.0 as library):
   level in the full mix with the listener.
 - EQ cannot add a sharper attack or a room; residual crack and tail differences
   remain listening questions.
+- With top and bottom microphones, the bottom carried most of the wire band
+  (+6.7 dB over the top, pre-fader) and the top the attack. Replacing only the
+  top kept our own wire sound; layer and replace per microphone.
+- Blind, loudness-matched listening (one listener, one excerpt): layers at the
+  listener's blend level (-15.5 dB re mix) were indistinguishable from no
+  layer; the reference character was heard only with the layer about 12 dB
+  louder (about -3.5 dB re mix). The descriptor distance D did not rank that
+  version first; crack and tuning moved toward the reference, wire/body did not.
 
 Reference hits are for private comparison. Released work uses licensed samples,
 with the library's attribution in the credits.

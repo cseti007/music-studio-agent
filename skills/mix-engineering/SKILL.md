@@ -100,9 +100,15 @@ When the user wants their snare to sound like the snare on reference songs:
    warns, ask whether to use one target per song. `no_acceptable_match` is an
    answer, not a reason to force a sample.
 3. Export the kit (all drum tracks, trigger plugins off) from the same start as
-   the close snare track; `render_snare_layer.py` with `--kit`.
-4. Place the layer at the snare track's position, reinforcing (not replacing)
-   unless asked. Set its level in the full mix, not on the solo snare.
+   the close snare track; `render_snare_layer.py` with `--kit`, triggered from
+   the snare top. When the snare has top and bottom microphones, use the
+   candidate's `_top` file as the sample and its `_bottom` file as
+   `--companion`, and place each layer next to its own track: the bottom
+   microphone carries most of the wire sound.
+4. Place the layers at the snare tracks' position. Find the level with a blind
+   level sweep in the full mix (e.g. the user's blend level, +6, +12 dB, and
+   replacing both snare tracks); a reference character may only appear once
+   the layer carries most of the snare.
 5. Measure the full mix before and after with `snare_profile.py --compare-to`,
    then a blind loudness-matched A/B for the user. D is a hypothesis; the
    user's ear decides.

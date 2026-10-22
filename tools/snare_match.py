@@ -12,7 +12,10 @@ Each step is kept only if D drops and no descriptor gets worse by more than
 1 z. Candidates are measured on the library kit mix (all microphones, like a
 reference drum stem); the written one-shot is the close snare microphones
 (top + polarity-aligned bottom) with the same corrections, ready to layer
-under our own kit. D ranks hypotheses; listening decides.
+under our own kit. With several snare microphones each one is also written
+(<candidate>_top.wav, <candidate>_bottom.wav; same gain, same time base, so
+they keep the library's balance) to layer next to our own top and bottom
+tracks. D ranks hypotheses; listening decides.
 
 Libraries: a DrumGizmo kit folder (instrument XML + multichannel WAVs) or a
 folder of one-shot WAVs. A license.json in the library folder states
@@ -70,12 +73,23 @@ def _describe(kit: np.ndarray, close: np.ndarray) -> dict:
     return desc
 
 
-def _load_hit(hit: dict) -> tuple[np.ndarray, np.ndarray]:
-    """(kit mix, close mics) of a library hit, mono at SR."""
+def _mic_role(channel: str, top: str) -> str:
+    low = channel.lower()
+    if channel == top:
+        return "top"
+    return "bottom" if any(x in low for x in ("bottom", "bot", "under")) else low
+
+
+def _load_hit(hit: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """(kit mix, {role: close snare microphone}) of a library hit, mono at SR.
+
+    Roles are "top", "bottom" (or the channel name); the other snare
+    microphones are polarity-aligned to the top. A one-shot file is {"mono": ...}.
+    """
     if "channels" not in hit:
         data, sr = sf.read(hit["file"], always_2d=True)
         mono = _to_sr(data.mean(axis=1), sr)
-        return mono, mono
+        return mono, {"mono": mono}
     cache, ch = {}, {}
     for name, (file, idx) in hit["channels"].items():
         if file not in cache:
@@ -91,7 +105,11 @@ def _load_hit(hit: dict) -> tuple[np.ndarray, np.ndarray]:
         if c != top and np.dot(sosfilt(body, ch[top]), sosfilt(body, ch[c])) < 0:
             ch[c] = -ch[c]
     hit["close_channels"] = snare
-    return np.sum(list(ch.values()), axis=0), np.sum([ch[c] for c in snare], axis=0)
+    return np.sum(list(ch.values()), axis=0), {_mic_role(c, top): ch[c] for c in snare}
+
+
+def _close(mics: dict[str, np.ndarray]) -> np.ndarray:
+    return np.sum(list(mics.values()), axis=0)
 
 
 def _library_hits(lib: Path) -> list[dict]:
@@ -146,7 +164,8 @@ def build_index(lib: Path, cache_dir: Path) -> list[dict]:
     for h in hits:
         h.setdefault("velocity_pct", 1.0)
     for hit in hits:
-        hit["desc"] = _describe(*_load_hit(hit))
+        kit, mics = _load_hit(hit)
+        hit["desc"] = _describe(kit, _close(mics))
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"schema": INDEX_SCHEMA, "extractor": S.EXTRACTOR_VERSION, "library": str(lib),
                                  "stamp": stamp, "hits": hits}),
@@ -234,11 +253,19 @@ def correct(kit: np.ndarray, close: np.ndarray, target: dict) -> dict:
     return out
 
 
-def render_candidate(close: np.ndarray, corr: dict) -> np.ndarray:
-    y = S.varispeed(close, corr["tune_semitones"])
-    for f in corr["eq_filters"]:
-        y = filter_signal(y, S.SR, f)
-    return y * 10.0 ** (-1.0 / 20.0) / (np.abs(y).max() + 1e-12)
+def render_candidate(mics: dict[str, np.ndarray], corr: dict) -> dict[str, np.ndarray]:
+    """Tuned and EQ'd one-shots: "close" (sum of the snare microphones) and,
+    with several microphones, each one. All share one gain (loudest at -1 dBFS),
+    so the microphones keep their balance and add up to "close"."""
+    out = {}
+    for role, y in mics.items():
+        y = S.varispeed(y, corr["tune_semitones"])
+        for f in corr["eq_filters"]:
+            y = filter_signal(y, S.SR, f)
+        out[role] = y
+    result = {"close": _close(out), **(out if len(out) > 1 else {})}
+    gain = 10.0 ** (-1.0 / 20.0) / (max(np.abs(y).max() for y in result.values()) + 1e-12)
+    return {role: y * gain for role, y in result.items()}
 
 
 def snare_match(profiles: list[Path], libraries: list[Path], output_dir: Path, top: int = 5,
@@ -274,25 +301,30 @@ def snare_match(profiles: list[Path], libraries: list[Path], output_dir: Path, t
 
     candidates = []
     for h in pool[:max(2 * top, 10)]:
-        kit, close = _load_hit(h)
-        corr = correct(kit, close, target)
-        candidates.append((h, kit, close, corr))
+        kit, mics = _load_hit(h)
+        corr = correct(kit, _close(mics), target)
+        candidates.append((h, kit, mics, corr))
     candidates.sort(key=lambda c: c[3]["D_final"])
 
     out_dir = output_dir / "candidates"
     out_dir.mkdir(exist_ok=True)
+    for old in list(out_dir.glob("*.wav")) + list(out_dir.glob("*.json")):  # no stale candidates
+        old.unlink()
     listed = []
-    for rank, (h, _, close, corr) in enumerate(candidates[:top], 1):
+    for rank, (h, _, mics, corr) in enumerate(candidates[:top], 1):
         lic = h["lic"]
         stem = f"{rank:02d}_" + h["id"].replace("/", "_").replace(" ", "_")
-        wav = out_dir / f"{stem}.wav"
-        sf.write(str(wav), render_candidate(close, corr), S.SR, subtype="PCM_24")
+        audio = render_candidate(mics, corr)
+        files = {role: out_dir / (f"{stem}.wav" if role == "close" else f"{stem}_{role}.wav") for role in audio}
         meta = {"rank": rank, "id": h["id"], "instrument": h["instrument"], "velocity_pct": h["velocity_pct"],
-                "close_channels": h.get("close_channels"),
-                **corr, "accepted": accept_d is None or corr["D_final"] <= accept_d,
+                "close_channels": h.get("close_channels"), **corr,
+                "accepted": accept_d is None or corr["D_final"] <= accept_d,
                 "license": lic.get("license"), "release_ok": bool(lic.get("release_ok")),
-                "attribution": lic.get("attribution"), "file": str(wav)}
-        wav.with_suffix(".json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+                "attribution": lic.get("attribution"), "file": str(files["close"]),
+                "mic_files": {role: str(f) for role, f in files.items() if role != "close"}}
+        for role, wav in files.items():
+            sf.write(str(wav), audio[role], S.SR, subtype="PCM_24")
+            wav.with_suffix(".json").write_text(json.dumps(dict(meta, mic=role), indent=2), encoding="utf-8")
         listed.append(meta)
 
     report = {"schema": SCHEMA, "profiles": [str(p) for p in profiles], "merged_profile": target,
@@ -325,7 +357,7 @@ def main() -> None:
         sys.exit(1)
     summary = {k: report[k] for k in ("status", "accept_d", "song_spread", "pool_size", "skipped_libraries")}
     summary["candidates"] = [{k: c[k] for k in ("rank", "id", "D_raw", "D_final", "tune_semitones", "accepted",
-                                                "release_ok", "file")} for c in report["candidates"]]
+                                                "release_ok", "file", "mic_files")} for c in report["candidates"]]
     summary["report"] = str(args.output_dir / "snare_match.json")
     print(json.dumps(summary, indent=2))
 
