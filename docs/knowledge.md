@@ -1680,6 +1680,14 @@ first session (Tool's Aenima as reference, CrocellKit CC-BY 4.0 as library):
   layer; the reference character was heard only with the layer about 12 dB
   louder (about -3.5 dB re mix). The descriptor distance D did not rank that
   version first; crack and tuning moved toward the reference, wire/body did not.
+- Negative result: snare prominence (backbeat level against the kit between
+  hits, against kick hits, or against the mix) did not explain that choice.
+  Our unlayered snare was already as prominent as the reference's; the
+  preferred version made the sample dominate the snare's timbre, including
+  over the snare in overheads and rooms. The closed-loop D on our separated
+  mix could not tell 0, +6 and +12 dB apart (within 0.1) and jumped above
+  +12 dB when the f0 estimate switched mode. Choose the layer level by a
+  blind level sweep; do not predict it from the reference.
 
 Reference hits are for private comparison. Released work uses licensed samples,
 with the library's attribution in the credits.
