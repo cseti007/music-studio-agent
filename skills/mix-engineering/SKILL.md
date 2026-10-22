@@ -90,6 +90,26 @@ Live DAW rules:
    limiting. Verify format, peaks and any contractual loudness on the exported
    file.
 
+## Reference snare matching
+
+When the user wants their snare to sound like the snare on reference songs:
+
+1. `snare_profile.py` on each reference song. Check `status`, the number of hits,
+   and listen to `private_ref/` hits with the user if the profile looks odd.
+2. `snare_match.py` with all profiles and licensed libraries. If `song_spread`
+   warns, ask whether to use one target per song. `no_acceptable_match` is an
+   answer, not a reason to force a sample.
+3. Export the kit (all drum tracks, trigger plugins off) from the same start as
+   the close snare track; `render_snare_layer.py` with `--kit`.
+4. Place the layer at the snare track's position, reinforcing (not replacing)
+   unless asked. Set its level in the full mix, not on the solo snare.
+5. Measure the full mix before and after with `snare_profile.py --compare-to`,
+   then a blind loudness-matched A/B for the user. D is a hypothesis; the
+   user's ear decides.
+
+Never place hits cut from a reference (`private_ref/`, `--private`) in a mix
+that will be released. Credit the sample library as its license requires.
+
 ## Interpreting analysis
 
 Always end an analysis with a verdict, which may be "no action needed". Do not

@@ -1650,6 +1650,32 @@ is dry bypass. This is a specific implementation, not an emulation of a named
 commercial equalizer. Sidechain length and sample rate must match. Check actual
 activity and center-cut statistics; they describe processing, not its benefit.
 
+Reference snare matching, verified 2026-10-22 (method and session observation):
+
+`snare_profile.py`, `snare_match.py` and `render_snare_layer.py` choose a licensed
+sample whose measured snare descriptors are closest to a reference song's snare
+and layer it under the recorded snare. Sound On Sound's
+[replace and reinforce guide](https://www.soundonsound.com/techniques/how-replace-reinforce-recorded-drums)
+supports the underlying practice: blend rather than replace when the performance
+matters, align transients, and vary samples by velocity. Observations from the
+first session (Tool's Aenima as reference, CrocellKit CC-BY 4.0 as library):
+
+- Mastered references measured ~8 dB more wire/crack than raw library kit mixes.
+  Treat brightness gaps as EQ hypotheses, not as grounds to reject a sample.
+- Below ~160 Hz the separated reference contains kick and bass residue; it is
+  excluded from the snare shape.
+- A snare has several strong modes; the strongest flips between hits. The lowest
+  peak within 6 dB of the strongest gave stable tuning (0.4-1.9 semitone MAD).
+- Alignment chosen on the close microphone alone selected the opposite polarity
+  to the one that reinforced the full kit. Judge polarity and offset on the kit.
+- A layer 6 dB under the close microphone was inaudible in the full mix; set the
+  level in the full mix with the listener.
+- EQ cannot add a sharper attack or a room; residual crack and tail differences
+  remain listening questions.
+
+Reference hits are for private comparison. Released work uses licensed samples,
+with the library's attribution in the credits.
+
 Room-depth guidance, reviewed 2026-09-10:
 
 For more assertive drum production, Mark Mynett documents parallel snare

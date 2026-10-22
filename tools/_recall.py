@@ -43,6 +43,7 @@ CALLS = {
     "apply_exciter": ("apply_exciter",),
     "apply_multiband_comp": ("apply_multiband_comp",),
     "apply_plugin": ("apply_plugin",),
+    "render_snare_layer": ("render_snare_layer",),
 }
 
 # Plugin bundles are directories on macOS/Linux; they are hashed as a whole.
