@@ -3,7 +3,8 @@
 All analysis runs on mono audio at SR (48 kHz). One hit is described by:
   shape     1/3-octave levels 160 Hz-10 kHz of the first 150 ms, mean removed (dB);
             lower bands are left out: kick and bass residue dominate them
-  f0_hz     drum tuning: spectral peak 120-450 Hz in the 15-120 ms window
+  f0_hz     drum tuning: lowest spectral peak within 6 dB of the strongest,
+            160-450 Hz, in the 15-120 ms window
   wb_db     wires vs body: energy 2-8 kHz over 150-400 Hz in the first 100 ms
   crack_db  mean power 1-5 kHz in the first 5 ms over 5-50 ms
   decay_ms  5 ms RMS envelope fall from its peak to -20 dB
@@ -27,12 +28,13 @@ from scipy.signal import butter, lfilter, resample_poly, sosfilt
 SR = 48000
 SHAPE_HZ = [round(100.0 * 2.0 ** (k / 3.0), 1) for k in range(2, 21)]  # 159 Hz .. 10.2 kHz
 # Bump when descriptor definitions change, so cached library indexes are rebuilt.
-EXTRACTOR_VERSION = 4
+EXTRACTOR_VERSION = 5
 WEIGHTS = {"shape": 2.0, "wb_db": 2.0, "f0": 1.5, "decay": 1.5, "crack_db": 1.0}
 # Minimum spread used in z-scores, so a very consistent reference cannot make
 # tiny differences look huge.
 FLOORS = {"f0_st": 0.25, "wb_db": 1.0, "crack_db": 1.0, "shape_db": 0.5, "decay_log": 0.10}
 MAD_SCALE = 1.4826
+MIN_LONG_HITS = 5  # hits with a clean 500 ms window needed for decay and tail
 
 
 def ms(value: float) -> int:
@@ -54,36 +56,40 @@ def _hp(y: np.ndarray, hz: float, order: int = 2) -> np.ndarray:
     return lfilter(b, a, y)
 
 
-def onset_before(rect: np.ndarray, peak: int, frac: float = 0.1, back_ms: float = 10.0) -> int:
-    """First sample within back_ms before `peak` where rect reaches frac of the peak."""
-    lo = max(peak - ms(back_ms), 0)
-    return lo + int(np.flatnonzero(rect[lo:peak + 1] >= frac * rect[peak])[0])
-
-
 def attack_onset(rect: np.ndarray, start: int, end: int) -> int:
-    """Onset of the attack whose envelope peak lies in rect[start:end].
+    """Onset of the first attack in rect[start:end] (rect: rectified signal).
 
-    Envelope: 1 ms centred RMS of rect. Threshold: 10% of the envelope peak,
-    but at least twice the noise before the hit (90th percentile of the
-    envelope 10-40 ms before the peak). The onset is the last threshold
-    crossing within 10 ms before the peak (so earlier noise bumps do not
-    count), refined to the first raw sample at the threshold.
+    Envelope: 1 ms centred RMS. Noise: 90th percentile of the envelope in the
+    40 ms before `start`; zero when there is no room before it (a file that
+    starts at the hit), so pre-hit noise above 10% of the peak in such a file
+    is not handled. The attack peak is the envelope maximum within 3 ms
+    of the first sample above max(10% of the window maximum, 2x noise), so a
+    later, larger resonance cannot pull the onset late. The onset is the last
+    crossing of max(10% of that peak, 2x noise) before the attack peak (the
+    noise term capped at half the level it is compared with), refined
+    to the first raw sample that also clears 1.5x the largest raw value of the
+    millisecond before it (bleed spikes are not taken as the onset).
     """
     n = ms(1)
     lo_env = max(start - ms(40), 0)
-    seg = rect[lo_env:min(end + n, len(rect))]
+    seg = rect[lo_env:min(end + ms(10), len(rect))]
     env = np.sqrt(np.convolve(seg ** 2, np.ones(n) / n, mode="same"))
-    peak = (start - lo_env) + int(np.argmax(env[start - lo_env:end - lo_env]))
-    pre = env[max(peak - ms(40), 0):max(peak - ms(10), 0)]
-    noise = float(np.percentile(pre, 90)) if len(pre) > ms(1) else 0.0
-    thr = max(0.1 * env[peak], 2.0 * noise)
+    w0, w1 = start - lo_env, min(end - lo_env, len(env))
+    window = env[w0:w1]
+    pre = env[:w0]
+    noise = float(np.percentile(pre, 90)) if len(pre) > n else 0.0
+    # noise may raise a threshold, but never above half the level it is applied to
+    first = w0 + int(np.flatnonzero(window >= max(0.1, min(2.0 * noise / window.max(), 0.5)) * window.max())[0])
+    peak = first + int(np.argmax(env[first:first + ms(3) + 1]))
+    thr = max(0.1 * env[peak], min(2.0 * noise, 0.5 * env[peak]))
     lo = max(peak - ms(10), 0)
     below = np.flatnonzero(env[lo:peak] < thr)
     cross = lo + (int(below[-1]) + 1 if len(below) else 0)
     # the centred envelope rises ~0.5 ms early: refine on the raw signal
-    raw = rect[lo_env:lo_env + peak + 1]
-    first = max(cross - ms(1), 0) + np.flatnonzero(raw[max(cross - ms(1), 0):] >= thr)
-    return lo_env + int(first[0]) if len(first) else lo_env + cross
+    s0 = max(cross - ms(0.5), 0)
+    raw_floor = 1.5 * float(seg[max(s0 - n, 0):s0].max()) if s0 > 0 else 0.0
+    hits = np.flatnonzero(seg[s0:peak + 1] >= max(thr, raw_floor))
+    return lo_env + (s0 + int(hits[0]) if len(hits) else cross)
 
 
 def detect_onsets(y: np.ndarray, rel_db: float = -30.0, rise_db: float = 6.0,
@@ -93,26 +99,29 @@ def detect_onsets(y: np.ndarray, rel_db: float = -30.0, rise_db: float = 6.0,
     An event starts where a 2 ms RMS envelope rises rise_db above a 30 ms
     one-pole average of itself (a decaying drum's own oscillation does not
     qualify). Events quieter than rel_db below the loudest are ignored.
-    Returns (onset sample indices, event peak levels in dBFS).
+    Returns (onset sample indices, high-passed peak levels, full-band peak
+    levels), levels in dBFS.
     """
     rect = np.abs(_hp(y, 150.0))
+    full = np.abs(y)
     n = ms(2)
     fast = np.sqrt(np.convolve(rect ** 2, np.ones(n) / n, mode="same"))
     tau = 1.0 - np.exp(-1.0 / ms(30))
     slow = lfilter([tau], [1.0, tau - 1.0], fast)
     rising = 20.0 * np.log10((fast + 1e-9) / (np.concatenate([[0.0], slow[:-1]]) + 1e-9)) >= rise_db
     starts = np.flatnonzero(np.diff(rising.astype(np.int8)) == 1) + 1
-    onsets, levels, last = [], [], -ms(min_gap_ms)
-    for s in starts:
-        if s - last < ms(min_gap_ms):
+    onsets, levels, full_levels, last = [], [], [], -ms(min_gap_ms)
+    for st in starts:
+        if st - last < ms(min_gap_ms) or st + ms(10) >= len(rect):
             continue
-        peak = s + int(np.argmax(rect[s:s + ms(10)]))
-        onsets.append(onset_before(rect, peak))
-        levels.append(20.0 * np.log10(rect[peak] + 1e-12))
-        last = s
-    onsets, levels = np.array(onsets, dtype=int), np.array(levels)
+        on = attack_onset(rect, max(st - ms(5), 0), st + ms(5))
+        onsets.append(on)
+        levels.append(20.0 * np.log10(rect[on:on + ms(10)].max() + 1e-12))
+        full_levels.append(20.0 * np.log10(full[on:on + ms(10)].max() + 1e-12))
+        last = st
+    onsets, levels, full_levels = np.array(onsets, dtype=int), np.array(levels), np.array(full_levels)
     keep = levels >= levels.max() + rel_db if len(levels) else np.array([], dtype=bool)
-    return onsets[keep], levels[keep]
+    return onsets[keep], levels[keep], full_levels[keep]
 
 
 def _power_spectrum(seg: np.ndarray, n_fft: int, window: bool = False):
@@ -146,7 +155,7 @@ def hit_descriptors(y: np.ndarray, onset: int) -> dict:
     # strongest is a stable tuning reference.
     freqs, spec = _power_spectrum(seg[ms(15):ms(120)], 1 << 14, window=True)
     mag_db = 10.0 * np.log10(spec + 1e-20)
-    idx = np.flatnonzero((freqs >= 120) & (freqs <= 450))
+    idx = np.flatnonzero((freqs >= 160) & (freqs <= 450))
     local = idx[1:-1][(mag_db[idx[1:-1]] > mag_db[idx[:-2]]) & (mag_db[idx[1:-1]] >= mag_db[idx[2:]])]
     if len(local):
         i = int(local[mag_db[local] >= mag_db[local].max() - 6.0].min())
@@ -165,7 +174,7 @@ def hit_descriptors(y: np.ndarray, onset: int) -> dict:
 
     win = ms(5)
     env = np.sqrt(np.convolve(seg ** 2, np.ones(win) / win, mode="full")[:len(seg)])
-    p = int(np.argmax(env))
+    p = int(np.argmax(env[:ms(30)]))  # the hit's own peak, not a later event's
     below = np.flatnonzero(env[p:] < env[p] * 0.1)
     decay = (below[0] if len(below) else len(env) - p) * 1000.0 / SR
 
@@ -188,7 +197,8 @@ def _robust(values) -> tuple[float, float]:
 
 
 def aggregate(descs: list[dict]) -> dict:
-    """Median and scaled MAD of descriptors over hits. NaN values are ignored."""
+    """Median and scaled MAD of descriptors over hits. NaN values are ignored;
+    decay and tail stay None unless MIN_LONG_HITS hits measured them."""
     shapes = np.array([d["shape"] for d in descs], dtype=float)
     with np.errstate(all="ignore"):
         valid = np.isfinite(shapes).any(axis=0)
@@ -198,15 +208,21 @@ def aggregate(descs: list[dict]) -> dict:
         shape_mad[valid] = MAD_SCALE * np.nanmedian(np.abs(shapes[:, valid] - shape_med[valid]), axis=0)
         f0_med, _ = _robust([d["f0_hz"] for d in descs])
         _, f0_mad_st = _robust([12.0 * np.log2(d["f0_hz"] / f0_med) for d in descs])
-        decay_med, _ = _robust([d["decay_ms"] for d in descs])
-        _, decay_mad_log = _robust([np.log(d["decay_ms"] / decay_med) for d in descs])
+        decays = [d["decay_ms"] for d in descs]
+        if np.isfinite(decays).sum() < MIN_LONG_HITS:  # too few clean tails to trust
+            decays = [float("nan")] * len(descs)
+        decay_med, _ = _robust(decays)
+        _, decay_mad_log = _robust([np.log(d / decay_med) for d in decays])
     prof = {"n": len(descs), "shape_hz": SHAPE_HZ,
             "shape": {"median": [_num(x) for x in shape_med], "mad": [_num(x) for x in shape_mad]},
             "f0_hz": {"median": _num(f0_med), "mad_st": _num(f0_mad_st)},
             "decay_ms": {"median": _num(decay_med), "mad_log": _num(decay_mad_log),
                          "n": int(np.isfinite([d["decay_ms"] for d in descs]).sum())}}
     for key in ("wb_db", "crack_db", "tail_db"):
-        med, mad = _robust([d[key] for d in descs])
+        values = [d[key] for d in descs]
+        if key == "tail_db" and np.isfinite(values).sum() < MIN_LONG_HITS:
+            values = [float("nan")] * len(descs)
+        med, mad = _robust(values)
         prof[key] = {"median": _num(med), "mad": _num(mad)}
     return prof
 
@@ -258,12 +274,13 @@ def find_reference_hits(drums: np.ndarray, no_drums: np.ndarray) -> list[dict]:
     Snare-like: body (150-400 Hz) and wire (1.5-8 kHz) energy present and
     little kick (<100 Hz) in the first 60 ms. Of those, the loudest third
     (backbeats) with no other event within 12 dB of the hit in the next 150 ms
-    are kept; hits that are also clear for 400 ms provide decay and tail
-    (otherwise those are NaN). Hits whose shape is an outlier (log-spectral
+    are kept; hits with no event within 20 dB in the whole 500 ms analysis
+    window provide decay and tail (otherwise those are NaN). Levels are
+    compared both high-passed and full band, so a kick counts as an event. Hits whose shape is an outlier (log-spectral
     distance > 2x the median) are dropped. Shape bands less than 6 dB above
     the no_drums residue are set to NaN.
     """
-    onsets, levels = detect_onsets(drums)
+    onsets, levels, full_levels = detect_onsets(drums)
     snare_like = []
     for i, (on, level) in enumerate(zip(onsets, levels)):
         if on < ms(100) or on + ms(500) > len(drums):
@@ -279,10 +296,15 @@ def find_reference_hits(drums: np.ndarray, no_drums: np.ndarray) -> list[dict]:
     loud_floor = np.percentile([s[2] for s in snare_like], 66.7)
     hits = []
     for i, on, level, kick, body, wires in snare_like:
-        later = (onsets > on + ms(30)) & (levels > level - 12.0)
-        if level < loud_floor or np.any(later & (onsets < on + ms(150))):
+        after = onsets > on + ms(30)
+
+        def events_within(db: float, until_ms: float) -> bool:
+            near = (levels > level - db) | (full_levels > full_levels[i] - db)
+            return bool(np.any(after & near & (onsets < on + ms(until_ms))))
+
+        if level < loud_floor or events_within(12.0, 150):
             continue
-        long_clean = not np.any(later & (onsets < on + ms(400)))
+        long_clean = not events_within(20.0, 500)
         desc = hit_descriptors(drums, on)
         if not long_clean:
             desc["decay_ms"] = desc["tail_db"] = float("nan")
@@ -292,7 +314,7 @@ def find_reference_hits(drums: np.ndarray, no_drums: np.ndarray) -> list[dict]:
         if np.isfinite(shape).sum() < 6:  # too few bands clear of the residue
             continue
         desc["shape"] = shape.tolist()
-        pre =10.0 * np.log10(np.mean(drums[on - ms(80):on - ms(5)] ** 2) + 1e-20)
+        pre = 10.0 * np.log10(np.mean(drums[on - ms(80):on - ms(5)] ** 2) + 1e-20)
         residue = 10.0 * np.log10(np.mean(no_drums[on - ms(20):on + ms(150)] ** 2) + 1e-20) - level
         hits.append({"onset": int(on), "time_s": round(on / SR, 3), "level_db": round(float(level), 1),
                      "isolation_db": round(float(level - pre), 1), "residue_db": round(float(residue), 1),

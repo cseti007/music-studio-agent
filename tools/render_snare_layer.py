@@ -1,10 +1,12 @@
-"""Render a sample-accurate snare layer triggered by a close snare track.
+"""Render a snare layer placed at the detected hits of a close snare track.
 
 Snare hits in the input (e.g. the snare top microphone) are found with an
 offline replica of the LSP Trigger detector (RMS sidechain with a 150 Hz
-high-pass; see _snare.trigger_hits), refined to the true onset, and a copy of
-the one-shot sample is placed at each onset (1 ms pre-roll), so there is no
-trigger delay. Per-hit gain follows the hit level:
+high-pass; see _snare.trigger_hits), refined offline to the onset, and a copy
+of the one-shot sample is placed at each onset (1 ms pre-roll), so there is no
+trigger delay. Onset accuracy depends on the bleed in the input; the report
+lists events that look like missed hits (possibly_missed). A kit shifted by more
+than 5 ms against the input (exported from another start) is refused. Per-hit gain follows the hit level:
 
   gain_db = base + level_db + dynamics * (hit_db - median_hit_db)
 
@@ -44,6 +46,7 @@ import _snare as S
 from _recall import record_operation
 
 PREROLL_MS = 1.0
+MAX_KIT_LAG_MS = 5.0  # a kit export further off than this was not taken from the same start
 GAIN_RANGE_DB = (-24.0, 6.0)
 MAX_OFFSET_MS = 2.0   # alignment search range (+/-) for offset "auto"
 OFFSET_STEP_MS = 0.25
@@ -59,6 +62,30 @@ def _license(sample_path: Path) -> dict:
 
 def _bandpass(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
     return sosfilt(butter(2, [lo / (S.SR / 2), hi / (S.SR / 2)], "band", output="sos"), x)
+
+
+def _kit_lag_ms(y: np.ndarray, kit: np.ndarray, starts: list[int]) -> float:
+    """Lag of the kit against the input at the hits (+ = kit late), from
+    high-passed envelope cross-correlation within +/-20 ms."""
+    win, span = S.ms(60), S.ms(20)
+    a = np.abs(S._hp(y, 150.0))
+    b = np.abs(S._hp(np.pad(kit, (0, max(len(y) - len(kit), 0))), 150.0))
+    acc = np.zeros(2 * span + 1)
+    for st in starts[:200]:
+        if st - span < 0 or st + win + span > len(b):
+            continue
+        x = a[st:st + win]
+        acc += np.correlate(b[st - span:st + win + span], x, mode="valid")
+    return round(float((int(np.argmax(acc)) - span) * 1000.0 / S.SR), 2)
+
+
+def _possibly_missed(y: np.ndarray, starts: list[int], median_db: float) -> dict:
+    """Events within 12 dB of the median hit that got no trigger (threshold too high?)."""
+    onsets, levels, _ = S.detect_onsets(y)
+    placed = np.array(starts)
+    missed = [int(o) for o, lvl in zip(onsets, levels)
+              if lvl > median_db - 12.0 and not np.any(np.abs(placed - o) <= S.ms(10))]
+    return {"count": len(missed), "first_s": [round(o / S.SR, 3) for o in missed[:10]]}
 
 
 @record_operation("render_snare_layer")
@@ -79,6 +106,8 @@ def render_snare_layer(
 ) -> dict:
     if polarity not in ("auto", "normal", "inverted"):
         raise ValueError("polarity must be auto, normal or inverted")
+    if offset_ms != "auto" and abs(float(offset_ms)) > MAX_OFFSET_MS:
+        raise ValueError(f"offset_ms must be 'auto' or within +/-{MAX_OFFSET_MS} ms")
     lic = _license(sample_path)
     if not lic["release_ok"] and not private:
         raise ValueError(f"{sample_path.name} has no release_ok license; use private=True for private listening only")
@@ -93,6 +122,8 @@ def render_snare_layer(
     rect = np.abs(S._hp(sample, 150.0))
     s_on = S.attack_onset(rect, 0, S.ms(60))
     sample_db = 20.0 * np.log10(rect[s_on:s_on + S.ms(10)].max() + 1e-12)
+    if sample_db < -60.0:
+        raise ValueError(f"{sample_path.name}: no attack found in the first 60 ms (peak {sample_db:.1f} dBFS)")
     pre = s_on - max(s_on - S.ms(PREROLL_MS), 0)  # pre-roll actually available in the file
     sample = sample[s_on - pre:]
 
@@ -109,8 +140,20 @@ def render_snare_layer(
         return layer[pad - offset_samples:pad - offset_samples + len(y)]
 
     starts = [h["onset"] for h in hits]
-    ref = S.load_mono(kit_path)[:len(y)] if kit_path else y
-    ref = np.pad(ref, (0, len(y) - len(ref)))
+    possibly_missed = _possibly_missed(y, starts, float(np.median(levels)))
+    kit_lag_ms = None
+    if kit_path:
+        if sf.info(str(kit_path)).samplerate != info.samplerate:
+            raise ValueError("kit and input sample rates differ")
+        ref = S.load_mono(kit_path)[:len(y)]
+        kit_lag_ms = _kit_lag_ms(y, ref, starts)
+        if abs(kit_lag_ms) > MAX_KIT_LAG_MS:
+            raise ValueError(f"kit looks shifted by {kit_lag_ms:+.1f} ms against the input; export it "
+                             "from the same start sample as the input track")
+    else:
+        ref = y
+    # pad so every hit window (up to 60 ms) fits, also for hits near the end
+    ref = np.pad(ref, (0, len(y) - len(ref) + S.ms(60)))
     offsets = (np.arange(-MAX_OFFSET_MS, MAX_OFFSET_MS + 1e-9, OFFSET_STEP_MS) if offset_ms == "auto"
                else [float(offset_ms)])
     signs = {"normal": 1.0, "inverted": -1.0} if polarity == "auto" else {polarity: 1.0 if polarity == "normal" else -1.0}
@@ -130,7 +173,8 @@ def render_snare_layer(
             trials.append(trial)
     best = max(trials, key=lambda t: t["body_db"])
     zero = next((t for t in trials if t["offset_ms"] == 0.0 and t["polarity"] == "normal"), None)
-    test = {"judged_on": "kit" if kit_path else "input (close microphone only)", "chosen": best,
+    test = {"judged_on": "kit" if kit_path else "input (close microphone only)", "kit_lag_ms": kit_lag_ms,
+            "chosen": best,
             "zero_offset_normal": zero,
             "crack_disagrees": max(t["crack_db"] for t in trials) - best["crack_db"] > 1.0}
     polarity, offset = best["polarity"], best["offset_ms"]
@@ -145,6 +189,7 @@ def render_snare_layer(
 
     report = {"input": str(input_path), "output": str(out_path), "sample": str(sample_path),
               "kit": str(kit_path) if kit_path else None, "placed": len(hits),
+              "possibly_missed": possibly_missed,
               "median_hit_db": round(float(np.median(levels)), 2), "base_gain_db": round(base, 2),
               "polarity": polarity, "offset_ms": offset, "alignment_test": test, "private": private, **lic}
     (output_dir / "snare_layer_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
@@ -152,7 +197,7 @@ def render_snare_layer(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Render a sample-accurate snare layer from a close snare track.")
+    parser = argparse.ArgumentParser(description="Render a snare layer placed at the hits of a close snare track.")
     parser.add_argument("input", type=Path, help="Close snare track (e.g. snare top), WAV")
     parser.add_argument("--sample", type=Path, required=True, help="One-shot snare sample (snare_match candidate)")
     parser.add_argument("--output-dir", type=Path, required=True)

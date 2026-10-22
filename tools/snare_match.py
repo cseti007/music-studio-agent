@@ -37,6 +37,7 @@ import soundfile as sf
 from scipy.signal import butter, resample_poly, sosfilt
 
 import _snare as S
+from _recall import file_hash
 from apply_eq import filter_signal
 from compare_reference import _filters_from_delta, _fit_filter_gains
 
@@ -81,14 +82,16 @@ def _load_hit(hit: dict) -> tuple[np.ndarray, np.ndarray]:
             data, sr = sf.read(file, always_2d=True)
             cache[file] = _to_sr(data, sr)
         ch[name] = cache[file][:, idx]
-    top, bottom = ch.get("SnareTop"), ch.get("SnareBottom")
-    if top is not None and bottom is not None:
-        body = butter(2, [150 / (S.SR / 2), 400 / (S.SR / 2)], "band", output="sos")
-        if np.dot(sosfilt(body, top), sosfilt(body, bottom)) < 0:
-            ch["SnareBottom"] = -bottom
-    kit = np.sum(list(ch.values()), axis=0)
-    close = ch["SnareTop"] + ch.get("SnareBottom", 0.0) if top is not None else kit
-    return kit, close
+    snare = [c for c in ch if "snare" in c.lower()]
+    if not snare:
+        raise ValueError(f"{hit['id']}: no snare microphone channel among {sorted(ch)}")
+    top = next((c for c in snare if "top" in c.lower()), snare[0])
+    body = butter(2, [150 / (S.SR / 2), 400 / (S.SR / 2)], "band", output="sos")
+    for c in snare:  # align the other snare microphones (e.g. bottom) to the top's polarity
+        if c != top and np.dot(sosfilt(body, ch[top]), sosfilt(body, ch[c])) < 0:
+            ch[c] = -ch[c]
+    hit["close_channels"] = snare
+    return np.sum(list(ch.values()), axis=0), np.sum([ch[c] for c in snare], axis=0)
 
 
 def _library_hits(lib: Path) -> list[dict]:
@@ -99,37 +102,49 @@ def _library_hits(lib: Path) -> list[dict]:
         if root.tag != "instrument" or "snare" not in name.lower() or any(x in name.lower() for x in EXCLUDE):
             continue
         for sample in root.iter("sample"):
-            channels = {af.get("channel"): (str(xml.parent / af.get("file")), int(af.get("filechannel")) - 1)
+            channels = {af.get("channel"): (str(xml.parent / af.get("file")), int(af.get("filechannel", "1")) - 1)
                         for af in sample.iter("audiofile")}
             hits.append({"id": f"{lib.name}/{name}/{sample.get('name')}", "instrument": name,
                          "power": float(sample.get("power", 0.0)), "channels": channels})
     if not hits:  # plain one-shot folder
         for wav in sorted(lib.rglob("*.wav")):
-            data, _ = sf.read(str(wav), always_2d=True)
+            if sf.info(str(wav)).channels > 2:
+                raise ValueError(f"{wav}: {sf.info(str(wav)).channels} channels without a DrumGizmo "
+                                 "instrument XML; pass the kit folder that holds the instrument folders")
             hits.append({"id": f"{lib.name}/{wav.relative_to(lib)}", "instrument": wav.parent.name,
-                         "power": float(np.mean(data ** 2)), "file": str(wav)})
+                         "file": str(wav)})
     return hits
 
 
 def build_index(lib: Path, cache_dir: Path) -> list[dict]:
-    """Library snare hits with kit-mix descriptors; cached by file size and mtime."""
-    stamp = {}
+    """Library snare hits with kit-mix descriptors.
+
+    Cached; the cache key covers the audio and instrument XML files (size,
+    mtime) and the code that computes the descriptors.
+    """
+    stamp = {"code": [file_hash(Path(__file__).with_name(f)) for f in ("_snare.py", "snare_match.py")]}
     hits = _library_hits(lib)
+    files = {str(x) for x in lib.glob("*/*.xml")}
     for hit in hits:
-        for file in {f for f, _ in hit["channels"].values()} if "channels" in hit else {hit["file"]}:
-            st = Path(file).stat()
-            stamp[file] = [st.st_size, st.st_mtime_ns]
+        files |= {f for f, _ in hit["channels"].values()} if "channels" in hit else {hit["file"]}
+    for file in sorted(files):
+        st = Path(file).stat()
+        stamp[file] = [st.st_size, st.st_mtime_ns]
     cache = cache_dir / f"{lib.name}.json"
     if cache.is_file():
         index = json.loads(cache.read_text(encoding="utf-8"))
         if (index.get("schema") == INDEX_SCHEMA and index.get("extractor") == S.EXTRACTOR_VERSION
                 and index.get("stamp") == stamp):
             return index["hits"]
+    # velocity_pct ranks DrumGizmo velocity layers (sample power) within an
+    # instrument; one-shot files are separate sounds, not velocity layers
     for instrument in {h["instrument"] for h in hits}:
-        group = [h for h in hits if h["instrument"] == instrument]
+        group = [h for h in hits if h["instrument"] == instrument and "power" in h]
         ranks = np.argsort(np.argsort([h["power"] for h in group]))
         for h, r in zip(group, ranks):
-            h["velocity_pct"] = round(float(r / max(len(group) - 1, 1)), 3)
+            h["velocity_pct"] = round(float(r / (len(group) - 1)), 3) if len(group) >= 3 else 1.0
+    for h in hits:
+        h.setdefault("velocity_pct", 1.0)
     for hit in hits:
         hit["desc"] = _describe(*_load_hit(hit))
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -197,9 +212,13 @@ def correct(kit: np.ndarray, close: np.ndarray, target: dict) -> dict:
     shape = np.array(cur_desc["shape"], dtype=float)
     ref = np.array([np.nan if x is None else x for x in target["shape"]["median"]], dtype=float)
     ok = np.isfinite(shape) & np.isfinite(ref)
-    delta = (shape[ok] - shape[ok].mean()) - (ref[ok] - ref[ok].mean())
-    bands = [{"hz": hz, "delta_db": round(float(v), 1)} for hz, v in zip(np.array(S.SHAPE_HZ)[ok], delta)]
-    filters, _ = _fit_filter_gains(_filters_from_delta(bands, threshold_db=1.0), bands, S.SR)
+    delta = np.zeros(len(shape))
+    delta[ok] = (shape[ok] - shape[ok].mean()) - (ref[ok] - ref[ok].mean())
+    # masked bands stay in the list at 0 dB so they split runs instead of
+    # joining deviations on both sides into one filter
+    runs = [{"hz": hz, "delta_db": round(float(v), 1)} for hz, v in zip(S.SHAPE_HZ, delta)]
+    bands = [b for b, valid in zip(runs, ok) if valid]
+    filters, _ = _fit_filter_gains(_filters_from_delta(runs, threshold_db=1.0), bands, S.SR)
     filters = [{k: v for k, v in f.items() if k != "_auto"} for f in filters]
     if filters:
         y = cur
@@ -269,6 +288,7 @@ def snare_match(profiles: list[Path], libraries: list[Path], output_dir: Path, t
         wav = out_dir / f"{stem}.wav"
         sf.write(str(wav), render_candidate(close, corr), S.SR, subtype="PCM_24")
         meta = {"rank": rank, "id": h["id"], "instrument": h["instrument"], "velocity_pct": h["velocity_pct"],
+                "close_channels": h.get("close_channels"),
                 **corr, "accepted": accept_d is None or corr["D_final"] <= accept_d,
                 "license": lic.get("license"), "release_ok": bool(lic.get("release_ok")),
                 "attribution": lic.get("attribution"), "file": str(wav)}

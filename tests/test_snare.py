@@ -188,3 +188,136 @@ def test_auto_alignment_finds_coherent_polarity_and_zero_offset(tmp_path, sign, 
     sample.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
     report = rsl.render_snare_layer(track, sample, tmp_path / "out")
     assert report["polarity"] == expected and report["offset_ms"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# regressions from review (2026-10-22)
+# ---------------------------------------------------------------------------
+
+def _bleed(n, db, hp_hz, seed=0):
+    from scipy.signal import butter, sosfilt
+    noise = np.random.default_rng(seed).standard_normal(n)
+    noise = sosfilt(butter(4, hp_hz / (SR / 2), "high", output="sos"), noise)
+    return noise / np.sqrt(np.mean(noise ** 2)) * 10 ** (db / 20)
+
+
+def test_decay_ignores_next_beat_kick():
+    """A kick on the next beat (+462 ms at 130 bpm) must not replace the snare decay."""
+    beat = S.ms(60000 / 130)
+    events = []
+    for i in range(30):
+        start = S.ms(300) + 2 * i * beat
+        events += [(start, snare(seed=i), 0.5), (start + beat, kick(), 0.6)]
+    drums = place(30 * 2 * 60 / 130 + 1.0, events)
+    noise = np.random.default_rng(2).standard_normal(len(drums)) * 1e-4
+    descs = [h["desc"] for h in S.find_reference_hits(drums, noise)]
+    isolated = S.hit_descriptors(place(1.0, [(S.ms(100), snare(seed=0), 0.5)]), S.ms(100))["decay_ms"]
+    decays = [d["decay_ms"] for d in descs if np.isfinite(d["decay_ms"])]
+    assert descs and all(abs(d - isolated) / isolated < 0.15 for d in decays)
+
+
+@pytest.mark.parametrize("bleed_db", [-45.0, -40.0])
+def test_trigger_onsets_stay_accurate_with_bleed(bleed_db):
+    rng = np.random.default_rng(1)
+    onsets = [S.ms(200 + 500 * i) for i in range(12)]
+    y = place(6.5, [(o, snare(seed=i), 10 ** (rng.uniform(-14, -4) / 20)) for i, o in enumerate(onsets)])
+    y += _bleed(len(y), bleed_db, 2000.0)
+    hits = S.trigger_hits(y)
+    assert len(hits) == 12
+    assert max(abs(h["onset"] - o) for h, o in zip(hits, onsets)) <= S.ms(0.25)
+
+
+def test_reference_onsets_and_crack_robust_to_cymbal_wash():
+    events = [(S.ms(300 + 600 * i), snare(seed=i, wires=0.8), 0.3) for i in range(30)]
+    clean = place(19.0, events)
+    washed = clean + _bleed(len(clean), 20 * np.log10(0.3) - 26.0, 3000.0, seed=4)
+    rest = np.random.default_rng(3).standard_normal(len(clean)) * 1e-4
+    true = {e[0] for e in events}
+    hits = S.find_reference_hits(washed, rest)
+    assert hits and all(min(abs(h["onset"] - t) for t in true) <= S.ms(1) for h in hits)
+    crack = lambda hs: np.median([h["desc"]["crack_db"] for h in hs])  # noqa: E731
+    assert abs(crack(hits) - crack(S.find_reference_hits(clean, rest))) < 1.0
+
+
+def test_f0_ignores_sustained_bass_under_the_snare():
+    events = [(S.ms(300 + 600 * i), snare(f0=240.0, seed=i, wires=0.8), 0.3) for i in range(30)]
+    drums = place(19.0, events)
+    t = np.arange(len(drums)) / SR
+    drums += 0.3 * 10 ** (-26 / 20) * np.sin(2 * np.pi * 147.0 * t)
+    rest = np.random.default_rng(3).standard_normal(len(drums)) * 1e-4
+    prof = S.aggregate([h["desc"] for h in S.find_reference_hits(drums, rest)])
+    assert abs(prof["f0_hz"]["median"] - 240.0) < 4.0
+
+
+def test_one_shot_libraries_are_not_dropped_by_velocity(tmp_path):
+    drums, rest = _reference(tmp_path)
+    sp.snare_profile(drums, tmp_path / "prof", drums_stem=drums, no_drums_stem=rest)
+    lib = tmp_path / "oneshots"
+    for i, (f0, gain) in enumerate([(200.0, 0.9), (240.0, 0.2), (300.0, 0.6)]):  # closest is the quietest
+        _write(lib / f"snare_{i}.wav", gain * snare(f0=f0, wires=0.8, seed=20 + i))
+    (lib / "license.json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
+    report = sm.snare_match([tmp_path / "prof" / "snare_profile.json"], [lib], tmp_path / "m")
+    assert report["candidates"][0]["id"] == "oneshots/snare_1.wav"
+
+
+def test_drumgizmo_kit_bottom_polarity_and_default_filechannel(tmp_path):
+    lib = tmp_path / "Kit"
+    inst = lib / "Snare"
+    (inst / "samples").mkdir(parents=True)
+    top = snare(f0=230.0, seed=1)
+    sf.write(str(inst / "samples" / "1.wav"), np.stack([top, -0.6 * top, 0.2 * top], axis=1), SR, subtype="FLOAT")
+    (inst / "Snare.xml").write_text(
+        '<instrument version="2.0" name="Snare"><samples><sample name="Snare-1" power="1.0">'
+        '<audiofile channel="SnareTop" file="samples/1.wav"/>'
+        '<audiofile channel="SnareBottom" file="samples/1.wav" filechannel="2"/>'
+        '<audiofile channel="OHLeft" file="samples/1.wav" filechannel="3"/></sample></samples></instrument>')
+    (hit,) = sm._library_hits(lib)
+    kit, close = sm._load_hit(hit)
+    assert np.allclose(close, 1.6 * top) and np.allclose(kit, 1.8 * top)
+    assert hit["close_channels"] == ["SnareTop", "SnareBottom"]
+
+
+def _render_case(tmp_path, last_hit_s=None):
+    onsets = [S.ms(200 + 500 * i) for i in range(6)]
+    if last_hit_s is not None:
+        onsets.append(S.ms(last_hit_s * 1000))
+    length = (max(onsets) / SR) + (0.03 if last_hit_s is not None else 0.6)
+    track = _write(tmp_path / "snare_top.wav", place(length, [(o, snare(seed=i), 0.5) for i, o in enumerate(onsets)]))
+    sample = _write(tmp_path / "cand" / "s.wav", snare(f0=210.0, seed=5))
+    sample.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
+    return track, sample, onsets
+
+
+def test_render_offset_bounds_and_shift(tmp_path):
+    track, sample, _ = _render_case(tmp_path)
+    with pytest.raises(ValueError):
+        rsl.render_snare_layer(track, sample, tmp_path / "bad", offset_ms=3.0)
+    zero = sf.read(rsl.render_snare_layer(track, sample, tmp_path / "z", polarity="normal", offset_ms=0.0)["output"])[0]
+    late = sf.read(rsl.render_snare_layer(track, sample, tmp_path / "p", polarity="normal", offset_ms=2.0)["output"])[0]
+    assert len(late) == len(zero) and np.allclose(late[S.ms(2):], zero[:-S.ms(2)])
+
+
+def test_render_hit_near_the_end(tmp_path):
+    track, sample, _ = _render_case(tmp_path, last_hit_s=3.4)
+    report = rsl.render_snare_layer(track, sample, tmp_path / "out")
+    assert len(sf.read(report["output"])[0]) == sf.info(str(track)).frames and report["placed"] == 7
+
+
+def test_render_refuses_a_shifted_kit(tmp_path):
+    track, sample, _ = _render_case(tmp_path)
+    y = sf.read(str(track))[0]
+    kit = _write(tmp_path / "kit.wav", np.concatenate([np.zeros(S.ms(100)), y]))  # exported from another start
+    with pytest.raises(ValueError, match="shifted"):
+        rsl.render_snare_layer(track, sample, tmp_path / "out", kit_path=kit)
+    aligned = _write(tmp_path / "kit_ok.wav", y)
+    assert abs(rsl.render_snare_layer(track, sample, tmp_path / "ok", kit_path=aligned)["alignment_test"]["kit_lag_ms"]) < 1
+
+
+def test_render_reports_hits_below_the_threshold(tmp_path):
+    onsets = [S.ms(200 + 500 * i) for i in range(10)]
+    gains = [0.25] * 5 + [0.08] * 5  # second half ~10 dB softer, below the -26 dB RMS threshold
+    track = _write(tmp_path / "t.wav", place(5.5, [(o, snare(seed=i), g) for i, (o, g) in enumerate(zip(onsets, gains))]))
+    sample = _write(tmp_path / "cand" / "s.wav", snare(seed=5))
+    sample.with_suffix(".json").write_text(json.dumps({"license": "CC0", "release_ok": True}))
+    report = rsl.render_snare_layer(track, sample, tmp_path / "out")
+    assert report["placed"] + report["possibly_missed"]["count"] >= 9
