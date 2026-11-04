@@ -39,7 +39,7 @@ Live DAW rules:
   parameters, different detector behavior).
 - Read back what you set (gain, plugin parameters) and report the actual
   value, not the requested one.
-- If the DAW has its own MCP server (Ardour 9.7: "MCP HTTP Server
+- If the DAW has its own MCP server (Ardour 9.7+: "MCP HTTP Server
   (Experimental)"), use it for DAW operations on live state (tracks, faders,
   plugins, regions, undo) and the project's server for what it lacks (import,
   export, analysis, rendering, blind auditions). The project's own
