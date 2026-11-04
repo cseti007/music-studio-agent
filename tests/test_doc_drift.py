@@ -21,7 +21,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = REPO_ROOT / "tools"
 CLAUDE_MD = REPO_ROOT / "CLAUDE.md"
-DOCS = [CLAUDE_MD, REPO_ROOT / "README.md", REPO_ROOT / "docs" / "knowledge.md"]
+DOCS = [CLAUDE_MD, REPO_ROOT / "README.md", REPO_ROOT / "docs" / "knowledge.md",
+        REPO_ROOT / "skills" / "mix-engineering" / "SKILL.md"]
 
 # Private helper modules (leading underscore) are internal, not user-facing
 # tools, so they are exempt from the "must be documented" reverse check.
