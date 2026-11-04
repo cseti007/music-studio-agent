@@ -24,7 +24,7 @@ the library is used only with --private.
 
 Usage:
   python tools/snare_match.py --profile ref/a/snare_profile.json --profile ref/b/snare_profile.json \\
-      --library ~/audio-libs/CrocellKit --output-dir output/snare_match
+      --library libs/CrocellKit --output-dir output/snare_match
 """
 
 from __future__ import annotations

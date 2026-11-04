@@ -1658,7 +1658,7 @@ and layer it under the recorded snare. Sound On Sound's
 [replace and reinforce guide](https://www.soundonsound.com/techniques/how-replace-reinforce-recorded-drums)
 supports the underlying practice: blend rather than replace when the performance
 matters, align transients, and vary samples by velocity. Observations from the
-first session (Tool's Aenima as reference, CrocellKit CC-BY 4.0 as library):
+first session (a commercial progressive rock album as reference, CrocellKit CC-BY 4.0 as library):
 
 - Mastered references measured ~8 dB more wire/crack than raw library kit mixes.
   Treat brightness gaps as EQ hypotheses, not as grounds to reject a sample.

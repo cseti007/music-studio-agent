@@ -16,9 +16,9 @@ by MUSIC_MIX_AGENT_SEPARATOR_PYTHON (default: the current interpreter).
 Stems are cached in <output-dir>/separated/<file hash>/.
 
 Usage:
-  python tools/snare_profile.py song.flac --output-dir output/ref/stinkfist
+  python tools/snare_profile.py song.flac --output-dir output/ref/song_a
   python tools/snare_profile.py our_mix.wav --output-dir output/ours \\
-      --compare-to output/ref/stinkfist/snare_profile.json
+      --compare-to output/ref/song_a/snare_profile.json
 """
 
 from __future__ import annotations
